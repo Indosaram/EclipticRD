@@ -1,0 +1,101 @@
+import Foundation
+import ScreenCaptureKit
+import CoreMedia
+import CoreGraphics
+import AppKit
+
+public enum ScreenCaptureError: Error, Hashable {
+    case noPermission
+    case noDisplay
+    case captureStartFailed
+}
+
+public class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
+    private var stream: SCStream?
+    private let captureQueue = DispatchQueue(label: "eclipticrd.capture", qos: .userInteractive)
+    private var display: SCDisplay?
+
+    public var onFrame: ((CMSampleBuffer) -> Void)?
+    public var onCursorPosition: ((CGPoint) -> Void)?
+
+    public private(set) var width: Int = 0
+    public private(set) var height: Int = 0
+    public private(set) var scaleFactor: CGFloat = 1.0
+
+    public override init() { super.init() }
+
+    public func getDisplayInfo() -> (width: Int, height: Int, pixelWidth: Int, pixelHeight: Int, scale: CGFloat) {
+        let displayID = CGMainDisplayID()
+        let w = CGDisplayPixelsWide(displayID)
+        let h = CGDisplayPixelsHigh(displayID)
+        let mode = CGDisplayCopyDisplayMode(displayID)
+        let scale = CGFloat(mode?.pixelWidth ?? w) / CGFloat(w)
+        let pw = Int(CGFloat(w) * scale)
+        let ph = Int(CGFloat(h) * scale)
+        return (w, h, pw, ph, scale)
+    }
+
+    public func start(fps: Int = ERDConstants.defaultFPS) async throws {
+        guard CGPreflightScreenCaptureAccess() else {
+            CGRequestScreenCaptureAccess()
+            throw ScreenCaptureError.noPermission
+        }
+
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        guard let display = content.displays.first else { throw ScreenCaptureError.noDisplay }
+
+        self.display = display
+        let info = getDisplayInfo()
+        self.width = info.width
+        self.height = info.height
+        self.scaleFactor = info.scale
+
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
+        let config = SCStreamConfiguration()
+        config.width = info.pixelWidth
+        config.height = info.pixelHeight
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        config.queueDepth = 5
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.showsCursor = true
+
+        let stream = SCStream(filter: filter, configuration: config, delegate: self)
+        try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+        try await stream.startCapture()
+        self.stream = stream
+        ERDLog.video("[Capture] Started: \(width)x\(height) @\(fps)fps scale=\(scaleFactor)")
+    }
+
+    public func stop() async throws {
+        try await stream?.stopCapture()
+        stream = nil
+        ERDLog.video("[Capture] Stopped")
+    }
+
+    // MARK: - SCStreamOutput
+    public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen else { return }
+        onFrame?(sampleBuffer)
+
+        // Try to extract cursor position from sample buffer attachments (private API).
+        // Falls back to NSEvent.mouseLocation if the attachment is unavailable.
+        if let cursor = CMGetAttachment(sampleBuffer, key: "com.apple.screencapture.cursor.position" as CFString, attachmentModeOut: nil) as? [String: Any],
+           let x = cursor["x"] as? CGFloat, let y = cursor["y"] as? CGFloat {
+            onCursorPosition?(CGPoint(x: x, y: y))
+        } else {
+            // Fallback: use NSEvent.mouseLocation (global screen coordinates, origin at bottom-left)
+            // Convert to display-local coordinates accounting for multi-monitor offset
+            let mouseLocation = NSEvent.mouseLocation
+            if let screen = NSScreen.main {
+                let relativeX = mouseLocation.x - screen.frame.origin.x
+                let relativeY = screen.frame.maxY - mouseLocation.y
+                onCursorPosition?(CGPoint(x: relativeX, y: relativeY))
+            }
+        }
+    }
+
+    // MARK: - SCStreamDelegate
+    public func stream(_ stream: SCStream, didStopWithError error: Error) {
+        ERDLog.error("[Capture] Stream stopped with error: \(error)")
+    }
+}
