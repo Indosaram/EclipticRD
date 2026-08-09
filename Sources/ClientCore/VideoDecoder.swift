@@ -22,7 +22,8 @@ public class VideoDecoder {
 
     public func decode(_ data: Data) {
         decoderQueue.async { [weak self] in
-            self?.processNALUs(data)
+            guard let self = self else { return }
+            self.processNALUs(data)
         }
     }
 

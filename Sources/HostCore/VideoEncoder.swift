@@ -76,7 +76,10 @@ public class VideoEncoder {
     public func encode(_ sampleBuffer: CMSampleBuffer) {
         encoderQueue.async { [weak self] in
             guard let self = self else { return }
-            guard let session = self.session, let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+            guard let session = self.session else { return }
+            guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+                return
+            }
             let pts = CMTime(value: self.frameCount, timescale: CMTimeScale(self.fps))
             self.frameCount += 1
 
@@ -99,6 +102,13 @@ public class VideoEncoder {
         encoderQueue.async { [weak self] in
             guard let self = self, let session = self.session else { return }
             VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AverageBitRate, value: newBitrate as CFTypeRef)
+        }
+    }
+
+    public func updateFPS(_ newFPS: Int) {
+        encoderQueue.async { [weak self] in
+            guard let self = self, let session = self.session else { return }
+            VTSessionSetProperty(session, key: kVTCompressionPropertyKey_ExpectedFrameRate, value: newFPS as CFTypeRef)
         }
     }
 

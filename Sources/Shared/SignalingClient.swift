@@ -52,7 +52,7 @@ public class SignalingClient {
             lock.unlock()
 
             var sseURL = URLComponents(url: topicURL.appendingPathComponent("json"), resolvingAgainstBaseURL: false)!
-            sseURL.queryItems = [URLQueryItem(name: "poll", value: "1"), URLQueryItem(name: "since", value: "30s")]
+            sseURL.queryItems = [URLQueryItem(name: "poll", value: "1"), URLQueryItem(name: "since", value: "5m")]
 
             var request = URLRequest(url: sseURL.url!)
             request.timeoutInterval = 30

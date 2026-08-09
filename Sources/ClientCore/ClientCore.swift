@@ -10,12 +10,33 @@ public class ClientCore {
     private let udpChannel = UDPChannel()
     private let frameReceiver = FrameReceiver()
     private let decoder = VideoDecoder()
+    private let audioPlayer = ClientAudioPlayer()
+    public let isAudioMuted = AtomicBool(false)
     private var renderer: MetalRenderer?
     private var inputSender: InputSender?
     // Protects inputSender from concurrent access between TCP callbacks and UI thread.
     private let stateQueue = DispatchQueue(label: "eclipticrd.client.state")
 
+    private var abrTimer: DispatchSourceTimer?
+    private let abrQueue = DispatchQueue(label: "eclipticrd.client.abr")
+    private var currentBitrate: Int = ERDConstants.defaultBitrate
+    private var lowLossStartTime: Date?
+
+    private var clipboardMonitor: ClipboardMonitor?
+    private var peerCapabilities: HandshakeCapabilities = []
+    private var nextStreamConfigRequestID: UInt32 = 1
+    public var onStreamConfigResponse: (@Sendable (StreamConfigurationResponsePayload) -> Void)?
+    public var onStreamConfigRejected: (@Sendable (StreamConfigurationRejectPayload) -> Void)?
+    public var onStreamConfigError: (@Sendable (StreamConfigurationErrorPayload) -> Void)?
+
+    public var onSessionReady: (@Sendable () -> Void)?
+    public var onServerIdentity: (@Sendable (String) -> Void)?
+    public var onDisconnected: (@Sendable () -> Void)?
+    public var onError: (@Sendable (String) -> Void)?
+    public var onClipboardSynced: (@Sendable (String) -> Void)?
+
     public var serverHost: String?
+    private var udpTargetHost: String?
     private var _serverScreenWidth: Int = 0
     private var _serverScreenHeight: Int = 0
     public var serverScreenWidth: Int {
@@ -30,7 +51,18 @@ public class ClientCore {
     private init() {
         // Wire pipeline: UDP → FrameReceiver → VideoDecoder → MetalRenderer
         udpChannel.onReceive = { [weak self] data, endpoint in
-            self?.frameReceiver.handlePacket(data)
+            guard let self = self else { return }
+            guard data.count >= ERDConstants.packetHeaderSize else { return }
+            
+            // Bypass frame assembly queue for zero-jitter, real-time audio playback
+            if data[2] == PacketType.audioFrame.rawValue {
+                if !self.isAudioMuted.value {
+                    let payload = data.subdata(in: ERDConstants.packetHeaderSize..<data.count)
+                    self.audioPlayer.play(data: payload)
+                }
+            } else {
+                self.frameReceiver.handlePacket(data)
+            }
         }
 
         frameReceiver.onFrameReady = { [weak self] data, header in
@@ -103,21 +135,31 @@ public class ClientCore {
                 }
 
                 tcpChannel.connectICE(endpoints: endpoints)
-                setupTCPHandlers(host: serverCandidate.publicIP)
+                // Pass nil so the onConnect handler resolves host from
+                // the actual winning TCP connection (local or public).
+                setupTCPHandlers(host: nil)
 
             } catch {
                 ERDLog.error("[ClientCore] ICE connection failed: \(error)")
+                self.onError?("ICE connection failed: \(error.localizedDescription)")
             }
         }
     }
 
     public func stop() {
+        stopClipboardSync()
+        stopABR()
         stateQueue.sync {
             inputSender?.stopCapturing()
             inputSender = nil
         }
         frameReceiver.stop()
         decoder.stop()
+        audioPlayer.stop()
+        serverHost = nil
+        udpTargetHost = nil
+        serverScreenWidth = 0
+        serverScreenHeight = 0
         tcpChannel.stop()
         udpChannel.stop()
         ERDLog.info("[Client] Disconnected from server")
@@ -132,6 +174,7 @@ public class ClientCore {
             // Resolve server IP for UDP
             let resolvedHost = host ?? self.tcpChannel.remoteHostIP ?? "127.0.0.1"
             self.serverHost = resolvedHost
+            self.udpTargetHost = resolvedHost
 
             if host == nil {
                 ERDLog.info("[Client] Resolved server IP: \(resolvedHost)")
@@ -139,7 +182,8 @@ public class ClientCore {
 
             ERDLog.info("[Client] TCP connected, sending handshake...")
             let hs = HandshakePayload(hostname: ProcessInfo.processInfo.hostName,
-                                       screenWidth: 0, screenHeight: 0, scaleFactor: 1.0)
+                                       screenWidth: 0, screenHeight: 0, scaleFactor: 1.0,
+                                       capabilities: [.streamConfiguration, .textClipboardSync])
             let header = PacketHeader(type: .handshake, sequence: 0, timestamp: 0)
             var packet = header.serialize()
             packet.append(hs.serialize())
@@ -148,26 +192,75 @@ public class ClientCore {
 
         tcpChannel.onReceive = { [weak self] data in
             guard let self = self else { return }
-            guard data.count >= ERDConstants.packetHeaderSize else { return }
-            guard let header = PacketHeader.deserialize(from: data) else { return }
+            guard data.count >= ERDConstants.packetHeaderSize else {
+                return
+            }
+            guard let header = PacketHeader.deserialize(from: data) else {
+                return
+            }
             let payload = data.subdata(in: ERDConstants.packetHeaderSize..<data.count)
 
             if header.type == .handshakeAck {
                 if let hs = HandshakePayload.deserialize(from: payload) {
-                    ERDLog.info("[Client] Server: \(hs.hostname) \(hs.screenWidth)x\(hs.screenHeight)")
+                    ERDLog.info("[Client] Server: \(hs.hostname) \(hs.screenWidth)x\(hs.screenHeight) caps=\(hs.capabilities.rawValue)")
+                    self.onServerIdentity?(hs.hostname)
                     self.serverScreenWidth = Int(hs.screenWidth)
                     self.serverScreenHeight = Int(hs.screenHeight)
+                    self.stateQueue.sync { self.peerCapabilities = hs.capabilities }
 
-                    // Connect UDP for video frames
-                    let udpHost = self.serverHost ?? "127.0.0.1"
+                    let udpHost = self.udpTargetHost ?? self.serverHost ?? "127.0.0.1"
+                    self.udpChannel.onReady = { [weak self] in
+                        self?.udpChannel.sendPing()
+                    }
                     self.udpChannel.connect(host: udpHost, port: ERDConstants.udpPort)
                     ERDLog.info("[Client] Connecting UDP to \(udpHost):\(ERDConstants.udpPort)")
+                    self.startABR()
+                    self.startClipboardSync()
+                    self.audioPlayer.start()
+                    self.onSessionReady?()
+                }
+            } else if header.type == .control {
+                if let msg = ControlMessage.deserialize(from: payload) {
+                    switch msg.type {
+                    case .ping:
+                        self.tcpChannel.sendControl(ControlMessage(type: .pong))
+                    case .streamConfigResponse:
+                        if let data = msg.payload,
+                           let resp = StreamConfigurationResponsePayload.deserialize(from: data) {
+                            ERDLog.info("[Client] Stream config accepted: \(resp.activeConfiguration.width)x\(resp.activeConfiguration.height)")
+                            self.onStreamConfigResponse?(resp)
+                        }
+                    case .streamConfigReject:
+                        if let data = msg.payload,
+                           let reject = StreamConfigurationRejectPayload.deserialize(from: data) {
+                            ERDLog.warning("[Client] Stream config rejected: \(reject.message)")
+                            self.onStreamConfigRejected?(reject)
+                        }
+                    case .streamConfigError:
+                        if let data = msg.payload,
+                           let err = StreamConfigurationErrorPayload.deserialize(from: data) {
+                            ERDLog.error("[Client] Stream config error: \(err.message)")
+                            self.onStreamConfigError?(err)
+                        }
+                    case .clipboardSyncUpdate:
+                        if let data = msg.payload,
+                           let update = ClipboardSyncUpdatePayload.deserialize(from: data) {
+                            self.handleClipboardUpdate(update)
+                        }
+                    case .clipboardSyncError:
+                        if let data = msg.payload,
+                           let err = ClipboardSyncErrorPayload.deserialize(from: data) {
+                            ERDLog.warning("[Client] Clipboard sync error: \(err.message)")
+                        }
+                    default: break
+                    }
                 }
             }
         }
 
         tcpChannel.onDisconnect = { [weak self] in
             ERDLog.info("[Client] Disconnected from server")
+            self?.onDisconnected?()
             self?.stop()
         }
     }
@@ -180,5 +273,125 @@ public class ClientCore {
         let sender = InputSender(tcpChannel: tcpChannel)
         sender.startCapturing(in: view)
         stateQueue.sync { inputSender = sender }
+    }
+
+    // MARK: - Stream Configuration
+
+    public func requestStreamConfiguration(_ config: StreamConfiguration) {
+        let requestID = stateQueue.sync { () -> UInt32 in
+            let id = nextStreamConfigRequestID
+            nextStreamConfigRequestID += 1
+            return id
+        }
+        let request = StreamConfigurationRequestPayload(requestID: requestID, desiredConfiguration: config)
+        let msg = ControlMessage(type: .streamConfigRequest, payload: request.serialize())
+        tcpChannel.sendControl(msg)
+        ERDLog.info("[Client] Requesting stream config: \(config.width)x\(config.height) @\(config.framesPerSecond)fps")
+    }
+
+    // MARK: - Clipboard Sync
+
+    private func startClipboardSync() {
+        let peerCaps = stateQueue.sync { self.peerCapabilities }
+        guard peerCaps.contains(.textClipboardSync) else {
+            ERDLog.info("[Client] Server does not support clipboard sync, skipping")
+            return
+        }
+
+        let monitor = ClipboardMonitor { [weak self] text in
+            guard let self = self else { return }
+            let update = ClipboardSyncUpdatePayload(
+                requestID: 0,
+                direction: .clientToHost,
+                origin: .localPasteboard,
+                text: text)
+            if let data = update.serialize() {
+                let msg = ControlMessage(type: .clipboardSyncUpdate, payload: data)
+                self.tcpChannel.sendControl(msg)
+            }
+        }
+        stateQueue.sync { self.clipboardMonitor = monitor }
+        monitor.start()
+        ERDLog.info("[Client] Clipboard sync started")
+    }
+
+    private func stopClipboardSync() {
+        let monitor = stateQueue.sync { self.clipboardMonitor }
+        monitor?.stop()
+        stateQueue.sync { self.clipboardMonitor = nil }
+    }
+
+    private func handleClipboardUpdate(_ update: ClipboardSyncUpdatePayload) {
+        let monitor = stateQueue.sync { self.clipboardMonitor }
+        monitor?.applyRemoteText(update.text)
+        ERDLog.info("[Client] Clipboard received from server (\(update.text.count) chars)")
+        onClipboardSynced?(update.text)
+    }
+
+    // MARK: - Adaptive Bitrate
+
+    private func startABR() {
+        stopABR()
+        currentBitrate = ERDConstants.defaultBitrate
+        lowLossStartTime = nil
+
+        let timer = DispatchSource.makeTimerSource(queue: abrQueue)
+        timer.schedule(deadline: .now() + 3.0, repeating: 3.0)
+        timer.setEventHandler { [weak self] in
+            self?.evaluateBitrate()
+        }
+        timer.resume()
+        abrTimer = timer
+    }
+
+    private func stopABR() {
+        abrTimer?.cancel()
+        abrTimer = nil
+    }
+
+    private func evaluateBitrate() {
+        let lossRatio = frameReceiver.frameLossRatio
+        var newBitrate = currentBitrate
+
+        if lossRatio > 0.10 {
+            lowLossStartTime = nil
+            newBitrate = max(ERDConstants.minBitrate, Int(Double(currentBitrate) * 0.75))
+            ERDLog.info("[Client] ABR: loss \(String(format: "%.1f", lossRatio * 100))%% → reduce to \(newBitrate)")
+        } else if lossRatio < 0.02 {
+            if let start = lowLossStartTime {
+                if Date().timeIntervalSince(start) >= 10.0 {
+                    newBitrate = min(ERDConstants.maxBitrate, Int(Double(currentBitrate) * 1.10))
+                    lowLossStartTime = Date()
+                    ERDLog.info("[Client] ABR: stable → increase to \(newBitrate)")
+                }
+            } else {
+                lowLossStartTime = Date()
+            }
+        } else {
+            lowLossStartTime = nil
+        }
+
+        if newBitrate != currentBitrate {
+            currentBitrate = newBitrate
+            let payload = BitrateAdjustPayload(targetBitrate: Int32(newBitrate))
+            let msg = ControlMessage(type: .bitrateAdjust, payload: payload.serialize())
+            tcpChannel.sendControl(msg)
+        }
+    }
+
+    public struct StreamStats {
+        public let fps: Double
+        public let bitrate: Int
+        public let frameLoss: Double
+        public let framesReceived: Int
+    }
+
+    public func getStats() -> StreamStats {
+        StreamStats(
+            fps: frameReceiver.recentFPS,
+            bitrate: currentBitrate,
+            frameLoss: frameReceiver.frameLossRatio,
+            framesReceived: frameReceiver.totalFramesReceived
+        )
     }
 }

@@ -1,0 +1,5 @@
+- `[x]` discovery: Deep exploration of HostCore, ClientCore, Shared, and Build system
+- `[x]` scoring: Determine AGENTS.md locations based on complexity
+- `[x]` generate: Create/Update AGENTS.md for Root and selected subdirs
+- `[x]` review: Deduplicate, trim, and validate
+- `[x]` migration: Move everything to parent directory and cleanup

@@ -11,6 +11,17 @@ public class BonjourBrowser {
             self.id = id; self.name = name; self.endpoint = endpoint
         }
 
+        public var endpointDescription: String {
+            switch endpoint {
+            case .service(_, let type, let domain, _):
+                return "\(type) (\(domain))"
+            case .hostPort(let host, let port):
+                return "\(host):\(port)"
+            default:
+                return "\(endpoint)"
+            }
+        }
+
         public func hash(into hasher: inout Hasher) { hasher.combine(id) }
         public static func == (lhs: DiscoveredHost, rhs: DiscoveredHost) -> Bool { lhs.id == rhs.id }
     }

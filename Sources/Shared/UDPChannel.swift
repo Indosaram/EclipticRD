@@ -75,10 +75,7 @@ public class UDPChannel {
     // MARK: - Send
 
     public func send(_ data: Data, to endpoint: NWEndpoint? = nil) {
-        guard let conn = connection else {
-            ERDLog.warning("[UDP] Send called while not connected — packet dropped")
-            return
-        }
+        guard let conn = connection else { return }
         conn.send(content: data, completion: .contentProcessed { error in
             if let error = error { ERDLog.error("[UDP] Send error: \(error)") }
         })

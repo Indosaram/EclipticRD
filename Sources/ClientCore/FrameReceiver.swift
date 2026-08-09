@@ -19,21 +19,53 @@ public class FrameReceiver {
         }
     }
 
+    private struct LossEntry {
+        let timestamp: Date
+        let lost: Int
+        let total: Int
+    }
+
     private var frames: [UInt32: FrameAssembly] = [:]
     private let assemblyQueue = DispatchQueue(label: "eclipticrd.frame-assembly", qos: .userInteractive)
     private var cleanupTimer: DispatchSourceTimer?
     private let timeout: Double = ERDConstants.frameAssemblyTimeout
 
+    private var expectedFrameId: UInt32 = 0
+    private var hasReceivedFirstFrame = false
+    private var lossEntries: [LossEntry] = []
+    private let lossLock = NSLock()
+
+    private var completedFrameTimestamps: [Date] = []
+    public private(set) var totalFramesReceived: Int = 0
+
     public var onFrameReady: ((Data, FrameHeaderPayload) -> Void)?
     public var onCursorUpdate: ((CursorUpdate) -> Void)?
+
+    /// Computed property: FPS based on frames completed in the last 1 second
+    public var recentFPS: Double {
+        assemblyQueue.sync {
+            let cutoff = Date().addingTimeInterval(-1.0)
+            let recentCount = completedFrameTimestamps.filter { $0 > cutoff }.count
+            return Double(recentCount)
+        }
+    }
+
+    public var frameLossRatio: Double {
+        lossLock.lock()
+        defer { lossLock.unlock() }
+        let cutoff = Date().addingTimeInterval(-5.0)
+        let recent = lossEntries.filter { $0.timestamp > cutoff }
+        let totalLost = recent.reduce(0) { $0 + $1.lost }
+        let totalFrames = recent.reduce(0) { $0 + $1.total }
+        guard totalFrames > 0 else { return 0.0 }
+        return Double(totalLost) / Double(totalFrames)
+    }
 
     public init() {
         startCleanupTimer()
     }
 
     deinit {
-        // Use async (not sync) to avoid deadlock if deallocated on assemblyQueue.
-        // Timer cancel is safe to call asynchronously.
         let timer = cleanupTimer
         assemblyQueue.async {
             timer?.cancel()
@@ -45,7 +77,15 @@ public class FrameReceiver {
             self.cleanupTimer?.cancel()
             self.cleanupTimer = nil
             self.frames.removeAll()
+            self.completedFrameTimestamps.removeAll()
+            self.totalFramesReceived = 0
+            self.expectedFrameId = 0
+            self.startCleanupTimer()
         }
+        lossLock.lock()
+        lossEntries.removeAll()
+        hasReceivedFirstFrame = false
+        lossLock.unlock()
     }
 
     public func handlePacket(_ data: Data) {
@@ -73,6 +113,17 @@ public class FrameReceiver {
             ERDLog.error("[FrameReceiver] Failed to deserialize frame header from \(data.count) bytes")
             return
         }
+
+        if fh.isKeyFrame {
+            let keysToRemove = frames.keys.filter { $0 < fh.frameId }
+            for key in keysToRemove {
+                if let assembly = frames[key], !assembly.isComplete {
+                    frames.removeValue(forKey: key)
+                }
+            }
+        }
+
+        trackFrameLoss(receivedFrameId: fh.frameId)
         frames[fh.frameId] = FrameAssembly(header: fh, chunks: [:], startTime: Date())
     }
 
@@ -93,9 +144,32 @@ public class FrameReceiver {
             let completed = frames.removeValue(forKey: chunk.frameId)!
             if let frameData = completed.assemble() {
                 ERDLog.video("[FrameReceiver] ✅ Frame #\(chunk.frameId) assembled: \(frameData.count) bytes")
+                totalFramesReceived += 1
+                completedFrameTimestamps.append(Date())
+                let cutoff = Date().addingTimeInterval(-2.0)
+                completedFrameTimestamps.removeAll { $0 < cutoff }
                 onFrameReady?(frameData, completed.header)
             }
         }
+    }
+
+    private func trackFrameLoss(receivedFrameId: UInt32) {
+        lossLock.lock()
+        defer { lossLock.unlock() }
+
+        if !hasReceivedFirstFrame {
+            hasReceivedFirstFrame = true
+            expectedFrameId = receivedFrameId + 1
+            lossEntries.append(LossEntry(timestamp: Date(), lost: 0, total: 1))
+            return
+        }
+
+        let gap = receivedFrameId > expectedFrameId ? Int(receivedFrameId - expectedFrameId) : 0
+        lossEntries.append(LossEntry(timestamp: Date(), lost: gap, total: 1 + gap))
+        expectedFrameId = receivedFrameId + 1
+
+        let cutoff = Date().addingTimeInterval(-10.0)
+        lossEntries.removeAll { $0.timestamp < cutoff }
     }
 
     private func startCleanupTimer() {

@@ -25,5 +25,7 @@ public enum ERDConstants {
     public static let frameAssemblyTimeout: Double = 1.0
     public static let inputBatchInterval: Double = 1.0 / 120.0
 
-    public static let protocolVersion: UInt8 = 1
+    public static let legacyProtocolVersion: UInt8 = 1
+    public static let protocolVersion: UInt8 = 2
+    public static let maxClipboardTextBytes: Int = 4096
 }

@@ -1,12 +1,32 @@
 import SwiftUI
 import MetalKit
 import Network
+import ApplicationServices
+import CoreGraphics
 
 @main
 struct EclipticApp: App {
+    @StateObject private var connectionManager = ConnectionManager()
+    @State private var permissionsGranted = Self.shouldShowHome()
+
     var body: some Scene {
         WindowGroup {
-            HomeView()
+            Group {
+                if permissionsGranted {
+                    HomeView()
+                        .environmentObject(connectionManager)
+                } else {
+                    OnboardingView {
+                        permissionsGranted = Self.shouldShowHome()
+                    }
+                }
+            }
+            .preferredColorScheme(.dark)
+            .frame(minWidth: 450, minHeight: 400)
         }
+    }
+
+    private static func shouldShowHome() -> Bool {
+        return AXIsProcessTrusted() && CGPreflightScreenCaptureAccess()
     }
 }

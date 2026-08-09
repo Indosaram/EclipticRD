@@ -13,3 +13,7 @@ xcuserdata/
 # Swift Package Manager
 .build/
 Packages/
+
+# auto-added: build artifacts & tooling state
+target/
+.serena/

@@ -45,19 +45,45 @@ test("PacketHeader rejects bad magic") {
     return PacketHeader.deserialize(from: data) == nil
 }
 
+test("PacketHeader with audioFrame type") {
+    let h = PacketHeader(type: .audioFrame, sequence: 99, timestamp: 987654, flags: 1)
+    let data = h.serialize()
+    guard let h2 = PacketHeader.deserialize(from: data) else { return false }
+    return h2.type == .audioFrame && h2.sequence == 99 && h2.timestamp == 987654 && h2.flags == 1
+}
+
 test("HandshakePayload serialize/deserialize") {
-    let hs = HandshakePayload(hostname: "MyMac-Pro", screenWidth: 2560, screenHeight: 1440, scaleFactor: 2.0)
+    let hs = HandshakePayload(hostname: "MyMac-Pro", screenWidth: 2560, screenHeight: 1440, scaleFactor: 2.0,
+                              protocolVersion: ERDConstants.protocolVersion,
+                              capabilities: [.streamConfiguration, .clipboardSync, .textClipboardSync])
     let data = hs.serialize()
     guard let hs2 = HandshakePayload.deserialize(from: data) else { return false }
     return hs2.hostname == "MyMac-Pro" && hs2.screenWidth == 2560 &&
-           hs2.screenHeight == 1440 && hs2.scaleFactor == 2.0
+           hs2.screenHeight == 1440 && hs2.scaleFactor == 2.0 &&
+           hs2.protocolVersion == ERDConstants.protocolVersion &&
+           hs2.capabilities.contains(.streamConfiguration) &&
+           hs2.capabilities.contains(.clipboardSync) &&
+           hs2.capabilities.contains(.textClipboardSync)
 }
 
 test("HandshakePayload with Unicode hostname") {
     let hs = HandshakePayload(hostname: "맥북-프로", screenWidth: 1920, screenHeight: 1080, scaleFactor: 1.0)
     let data = hs.serialize()
     guard let hs2 = HandshakePayload.deserialize(from: data) else { return false }
-    return hs2.hostname == "맥북-프로"
+    return hs2.hostname == "맥북-프로" && hs2.protocolVersion == ERDConstants.protocolVersion
+}
+
+test("HandshakePayload deserializes legacy payloads") {
+    let legacy = HandshakePayload(hostname: "Legacy", screenWidth: 1024, screenHeight: 768, scaleFactor: 1.0)
+    var data = Data()
+    let nameData = legacy.hostname.data(using: .utf8) ?? Data()
+    var nameLen = UInt16(nameData.count).littleEndian; data.append(Data(bytes: &nameLen, count: 2))
+    data.append(nameData)
+    var w = legacy.screenWidth.littleEndian; data.append(Data(bytes: &w, count: 2))
+    var h = legacy.screenHeight.littleEndian; data.append(Data(bytes: &h, count: 2))
+    var s = legacy.scaleFactor.bitPattern.littleEndian; data.append(Data(bytes: &s, count: 4))
+    guard let hs2 = HandshakePayload.deserialize(from: data) else { return false }
+    return hs2.hostname == "Legacy" && hs2.protocolVersion == ERDConstants.legacyProtocolVersion && hs2.capabilities.isEmpty
 }
 
 test("FrameHeaderPayload serialize/deserialize") {
@@ -91,6 +117,69 @@ test("ControlMessage serialize/deserialize") {
     let data = cm.serialize()
     guard let cm2 = ControlMessage.deserialize(from: data) else { return false }
     return cm2.type == .requestKeyFrame
+}
+
+test("StreamConfiguration serialize/deserialize") {
+    let config = StreamConfiguration(width: 3840, height: 2160, bitrate: 12_000_000, framesPerSecond: 120)
+    let data = config.serialize()
+    guard let decoded = StreamConfiguration.deserialize(from: data) else { return false }
+    return decoded.width == 3840 && decoded.height == 2160 && decoded.bitrate == 12_000_000 && decoded.framesPerSecond == 120
+}
+
+test("StreamConfigurationRequest serialize/deserialize") {
+    let request = StreamConfigurationRequestPayload(requestID: 42,
+                                                    desiredConfiguration: StreamConfiguration(width: 3440, height: 1440, bitrate: 9_000_000, framesPerSecond: 90))
+    let data = request.serialize()
+    guard let decoded = StreamConfigurationRequestPayload.deserialize(from: data) else { return false }
+    return decoded.requestID == 42 && decoded.desiredConfiguration.width == 3440 && decoded.desiredConfiguration.height == 1440
+}
+
+test("StreamConfigurationResponse serialize/deserialize") {
+    let response = StreamConfigurationResponsePayload(requestID: 42,
+                                                      activeConfiguration: StreamConfiguration(width: 2560, height: 1600, bitrate: 8_000_000, framesPerSecond: 60))
+    let data = response.serialize()
+    guard let decoded = StreamConfigurationResponsePayload.deserialize(from: data) else { return false }
+    return decoded.requestID == 42 && decoded.activeConfiguration.height == 1600 && decoded.activeConfiguration.framesPerSecond == 60
+}
+
+test("StreamConfigurationReject serialize/deserialize") {
+    let reject = StreamConfigurationRejectPayload(requestID: 7, reason: .unsupportedDimensions, message: "too large")
+    let data = reject.serialize()
+    guard let decoded = StreamConfigurationRejectPayload.deserialize(from: data) else { return false }
+    return decoded.requestID == 7 && decoded.reason == .unsupportedDimensions && decoded.message == "too large"
+}
+
+test("StreamConfigurationError serialize/deserialize") {
+    let error = StreamConfigurationErrorPayload(requestID: 7, errorCode: .invalidRequest, message: "bad request")
+    let data = error.serialize()
+    guard let decoded = StreamConfigurationErrorPayload.deserialize(from: data) else { return false }
+    return decoded.requestID == 7 && decoded.errorCode == .invalidRequest && decoded.message == "bad request"
+}
+
+test("ClipboardSyncRequest serialize/deserialize") {
+    let request = ClipboardSyncRequestPayload(requestID: 11, direction: .bidirectional, origin: .localPasteboard)
+    let data = request.serialize()
+    guard let decoded = ClipboardSyncRequestPayload.deserialize(from: data) else { return false }
+    return decoded.requestID == 11 && decoded.direction == .bidirectional && decoded.origin == .localPasteboard
+}
+
+test("ClipboardSyncUpdate serialize/deserialize") {
+    let update = ClipboardSyncUpdatePayload(requestID: 12, direction: .hostToClient, origin: .remotePasteboard, text: "hello clipboard")
+    guard let data = update.serialize(), let decoded = ClipboardSyncUpdatePayload.deserialize(from: data) else { return false }
+    return decoded.requestID == 12 && decoded.direction == .hostToClient && decoded.origin == .remotePasteboard && decoded.text == "hello clipboard"
+}
+
+test("ClipboardSyncError serialize/deserialize") {
+    let error = ClipboardSyncErrorPayload(requestID: 13, direction: .clientToHost, origin: .syncedFromPeer, errorCode: 9, message: "clipboard rejected")
+    let data = error.serialize()
+    guard let decoded = ClipboardSyncErrorPayload.deserialize(from: data) else { return false }
+    return decoded.requestID == 13 && decoded.direction == .clientToHost && decoded.origin == .syncedFromPeer && decoded.errorCode == 9 && decoded.message == "clipboard rejected"
+}
+
+test("ClipboardSyncUpdate rejects oversized payloads") {
+    let text = String(repeating: "a", count: ERDConstants.maxClipboardTextBytes + 1)
+    let update = ClipboardSyncUpdatePayload(requestID: 14, direction: .hostToClient, origin: .localPasteboard, text: text)
+    return update.serialize() == nil
 }
 
 test("CursorUpdate serialize/deserialize") {

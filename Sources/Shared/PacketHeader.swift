@@ -9,6 +9,7 @@ public enum PacketType: UInt8 {
     case inputEvent = 5
     case control = 6
     case ping = 7
+    case audioFrame = 8
 }
 
 public struct PacketHeader {

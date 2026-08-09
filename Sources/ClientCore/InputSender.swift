@@ -4,7 +4,6 @@ public class InputSender {
     private let tcpChannel: TCPChannel
     private var captureView: NSView?
     private var localMonitor: Any?
-    private var globalMonitor: Any?
 
     public init(tcpChannel: TCPChannel) {
         self.tcpChannel = tcpChannel
@@ -25,15 +24,10 @@ public class InputSender {
             self?.handleEvent(event)
             return event
         }
-
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: eventMask) { [weak self] event in
-            self?.handleEvent(event)
-        }
     }
 
     public func stopCapturing() {
         if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
-        if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
         captureView = nil
     }
 

@@ -17,6 +17,7 @@ public class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     public var onFrame: ((CMSampleBuffer) -> Void)?
     public var onCursorPosition: ((CGPoint) -> Void)?
+    public var onAudio: ((CMSampleBuffer) -> Void)?
 
     public private(set) var width: Int = 0
     public private(set) var height: Int = 0
@@ -36,9 +37,18 @@ public class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     public func start(fps: Int = ERDConstants.defaultFPS) async throws {
-        guard CGPreflightScreenCaptureAccess() else {
-            CGRequestScreenCaptureAccess()
-            throw ScreenCaptureError.noPermission
+        // CGRequestScreenCaptureAccess() triggers the system prompt on first call.
+        // On subsequent calls it returns the cached result without re-prompting.
+        if !CGPreflightScreenCaptureAccess() {
+            let granted = CGRequestScreenCaptureAccess()
+            if !granted {
+                // Open System Settings → Privacy → Screen Recording so the user
+                // can manually toggle the permission (required for ad-hoc signed builds).
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+                    await MainActor.run { NSWorkspace.shared.open(url) }
+                }
+                throw ScreenCaptureError.noPermission
+            }
         }
 
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -58,12 +68,35 @@ public class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.queueDepth = 5
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = true
+        let hostAudioEnabled = UserDefaults.standard.object(forKey: "hostAudioEnabled") as? Bool ?? true
+        config.capturesAudio = hostAudioEnabled
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: captureQueue)
+        if hostAudioEnabled {
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: captureQueue)
+        }
         try await stream.startCapture()
         self.stream = stream
         ERDLog.video("[Capture] Started: \(width)x\(height) @\(fps)fps scale=\(scaleFactor)")
+    }
+
+    public func updateConfiguration(width: Int, height: Int, fps: Int) async throws {
+        guard let stream = self.stream else {
+            throw ScreenCaptureError.captureStartFailed
+        }
+        let config = SCStreamConfiguration()
+        config.width = width
+        config.height = height
+        config.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
+        config.queueDepth = 3
+        config.pixelFormat = kCVPixelFormatType_32BGRA
+        config.showsCursor = true
+
+        try await stream.updateConfiguration(config)
+        self.width = width
+        self.height = height
+        ERDLog.video("[Capture] Configuration updated: \(width)x\(height) @\(fps)fps")
     }
 
     public func stop() async throws {
@@ -74,23 +107,26 @@ public class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     // MARK: - SCStreamOutput
     public func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen else { return }
-        onFrame?(sampleBuffer)
+        if type == .screen {
+            onFrame?(sampleBuffer)
 
-        // Try to extract cursor position from sample buffer attachments (private API).
-        // Falls back to NSEvent.mouseLocation if the attachment is unavailable.
-        if let cursor = CMGetAttachment(sampleBuffer, key: "com.apple.screencapture.cursor.position" as CFString, attachmentModeOut: nil) as? [String: Any],
-           let x = cursor["x"] as? CGFloat, let y = cursor["y"] as? CGFloat {
-            onCursorPosition?(CGPoint(x: x, y: y))
-        } else {
-            // Fallback: use NSEvent.mouseLocation (global screen coordinates, origin at bottom-left)
-            // Convert to display-local coordinates accounting for multi-monitor offset
-            let mouseLocation = NSEvent.mouseLocation
-            if let screen = NSScreen.main {
-                let relativeX = mouseLocation.x - screen.frame.origin.x
-                let relativeY = screen.frame.maxY - mouseLocation.y
-                onCursorPosition?(CGPoint(x: relativeX, y: relativeY))
+            // Try to extract cursor position from sample buffer attachments (private API).
+            // Falls back to NSEvent.mouseLocation if the attachment is unavailable.
+            if let cursor = CMGetAttachment(sampleBuffer, key: "com.apple.screencapture.cursor.position" as CFString, attachmentModeOut: nil) as? [String: Any],
+               let x = cursor["x"] as? CGFloat, let y = cursor["y"] as? CGFloat {
+                onCursorPosition?(CGPoint(x: x, y: y))
+            } else {
+                // Fallback: use NSEvent.mouseLocation (global screen coordinates, origin at bottom-left)
+                // Convert to display-local coordinates accounting for multi-monitor offset
+                let mouseLocation = NSEvent.mouseLocation
+                if let screen = NSScreen.main {
+                    let relativeX = mouseLocation.x - screen.frame.origin.x
+                    let relativeY = screen.frame.maxY - mouseLocation.y
+                    onCursorPosition?(CGPoint(x: relativeX, y: relativeY))
+                }
             }
+        } else if type == .audio {
+            onAudio?(sampleBuffer)
         }
     }
 

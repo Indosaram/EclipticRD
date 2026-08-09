@@ -1,16 +1,32 @@
 import Foundation
 
+public struct HandshakeCapabilities: OptionSet {
+    public let rawValue: UInt64
+
+    public init(rawValue: UInt64) {
+        self.rawValue = rawValue
+    }
+
+    public static let streamConfiguration = HandshakeCapabilities(rawValue: 1 << 0)
+    public static let clipboardSync = HandshakeCapabilities(rawValue: 1 << 1)
+    public static let textClipboardSync = HandshakeCapabilities(rawValue: 1 << 2)
+}
+
 public struct HandshakePayload {
     public let hostname: String
     public let screenWidth: UInt16
     public let screenHeight: UInt16
     public let scaleFactor: Float
+    public let protocolVersion: UInt8
+    public let capabilities: HandshakeCapabilities
 
-    public init(hostname: String, screenWidth: UInt16, screenHeight: UInt16, scaleFactor: Float) {
+    public init(hostname: String, screenWidth: UInt16, screenHeight: UInt16, scaleFactor: Float, protocolVersion: UInt8 = ERDConstants.protocolVersion, capabilities: HandshakeCapabilities = []) {
         self.hostname = hostname
         self.screenWidth = screenWidth
         self.screenHeight = screenHeight
         self.scaleFactor = scaleFactor
+        self.protocolVersion = protocolVersion
+        self.capabilities = capabilities
     }
 
     public func serialize() -> Data {
@@ -18,9 +34,11 @@ public struct HandshakePayload {
         let nameData = hostname.data(using: .utf8) ?? Data()
         var nameLen = UInt16(nameData.count).littleEndian; data.append(Data(bytes: &nameLen, count: 2))
         data.append(nameData)
-        var w = screenWidth.littleEndian;  data.append(Data(bytes: &w, count: 2))
+        var w = screenWidth.littleEndian; data.append(Data(bytes: &w, count: 2))
         var h = screenHeight.littleEndian; data.append(Data(bytes: &h, count: 2))
         var s = scaleFactor.bitPattern.littleEndian; data.append(Data(bytes: &s, count: 4))
+        var version = protocolVersion; data.append(Data(bytes: &version, count: 1))
+        var flags = capabilities.rawValue.littleEndian; data.append(Data(bytes: &flags, count: 8))
         return data
     }
 
@@ -36,6 +54,16 @@ public struct HandshakePayload {
         let h = data.subdata(in: offset..<offset+2).withUnsafeBytes { $0.load(as: UInt16.self).littleEndian }; offset += 2
         let sBits = data.subdata(in: offset..<offset+4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
         let s = Float(bitPattern: sBits)
-        return HandshakePayload(hostname: hostname, screenWidth: w, screenHeight: h, scaleFactor: s)
+        offset += 4
+
+        var protocolVersion = ERDConstants.legacyProtocolVersion
+        var capabilities: HandshakeCapabilities = []
+        if data.count >= offset + 9 {
+            protocolVersion = data[offset]
+            let flags = data.subdata(in: (offset + 1)..<(offset + 9)).withUnsafeBytes { $0.load(as: UInt64.self).littleEndian }
+            capabilities = HandshakeCapabilities(rawValue: flags)
+        }
+
+        return HandshakePayload(hostname: hostname, screenWidth: w, screenHeight: h, scaleFactor: s, protocolVersion: protocolVersion, capabilities: capabilities)
     }
 }
