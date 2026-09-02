@@ -39,6 +39,8 @@ pub use encode_windows::MediaFoundationEncoder;
 pub use inject_macos::{accessibility_is_trusted, request_accessibility, InputInjector};
 #[cfg(target_os = "windows")]
 pub use inject_windows::WindowsInputInjector;
+#[cfg(target_os = "linux")]
+pub use session::focused_output_name;
 pub use session::{
     random_pin, ConsentPrompt, DisplayInfo, HostConfig, HostServer, PairingRecord, PairingStore,
     SessionState, TimestampStats, VideoFrame,

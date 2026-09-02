@@ -12,7 +12,7 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use erd_app::{ClientSession, LatencyRecorder, PairingRecord, SessionConfig, SessionEvent};
 use erd_decode::HevcDecoder;
-use erd_proto::{Capabilities, ControlMessage};
+use erd_proto::{Capabilities, ControlMessage, InputEvent, InputEventType, Modifiers};
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -46,6 +46,12 @@ struct Cli {
     /// 64-character hexadecimal pre-shared key (32 bytes) if pairing store is unavailable.
     #[arg(long, conflicts_with = "pin")]
     psk_hex: Option<String>,
+
+    /// Send a tiny alternating mouse-move every N ms once streaming starts.
+    /// Drives screens that only produce frames on change (static wlroots
+    /// sessions) and exercises the host input-injection path.
+    #[arg(long)]
+    nudge_ms: Option<u64>,
 
     /// Pairing ID associated with psk-hex or pairing store reconnect.
     #[arg(long)]
@@ -197,6 +203,8 @@ fn run_client(cli: Cli) -> Result<()> {
         r_ctrl.store(false, Ordering::SeqCst);
     });
 
+    let first_frame_seen = Arc::new(AtomicBool::new(false));
+
     let mut latency_recorder = LatencyRecorder::new();
     let mut decoder: Option<HevcDecoder> = None;
     let mut decoded_frames: u64 = 0;
@@ -204,6 +212,41 @@ fn run_client(cli: Cli) -> Result<()> {
     let (frame_tx, frame_rx) = mpsc::sync_channel::<(erd_app::AssembledFrame, Instant)>(1024);
     let session_udp = session.clone();
     let r_udp = running.clone();
+
+    // Optional cursor-nudge driver: keeps compositors that only produce frames
+    // on change (static wlroots sessions) feeding the pipeline, and exercises
+    // the host input-injection path end-to-end.
+    if let Some(nudge_ms) = cli.nudge_ms.filter(|value| *value > 0) {
+        let session_nudge = session.clone();
+        let r_nudge = running.clone();
+        let first = Arc::clone(&first_frame_seen);
+        std::thread::Builder::new()
+            .name("erd-client-nudge".into())
+            .spawn(move || {
+                while !first.load(Ordering::Relaxed) && r_nudge.load(Ordering::Relaxed) {
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                let mut flip = false;
+                while r_nudge.load(Ordering::Relaxed) {
+                    let x = if flip { 0.501_5 } else { 0.5 };
+                    flip = !flip;
+                    let event = InputEvent {
+                        event_type: InputEventType::MouseMove,
+                        x,
+                        y: 0.5,
+                        key_code: 0,
+                        modifiers: Modifiers::empty(),
+                        scroll_dx: 0.0,
+                        scroll_dy: 0.0,
+                    };
+                    if let Err(error) = session_nudge.send_input(event) {
+                        debug!(%error, "nudge input rejected");
+                    }
+                    std::thread::sleep(Duration::from_millis(nudge_ms));
+                }
+            })
+            .ok();
+    }
 
     let udp_receiver_handle = std::thread::Builder::new()
         .name("erd-client-udp-receiver".into())
@@ -302,6 +345,7 @@ fn run_client(cli: Cli) -> Result<()> {
                                 decoded_any = true;
                                 decoded_frames =
                                     decoded_frames.saturating_add(nv12_frames.len() as u64);
+                                first_frame_seen.store(true, Ordering::Relaxed);
                             }
                         }
                         Err(err) => {

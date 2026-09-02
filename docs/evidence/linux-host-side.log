@@ -1,0 +1,10 @@
+[2m2026-09-02T10:06:37.769947Z[0m [32m INFO[0m [2merd_host::session[0m[2m:[0m UDP sender received stop signal
+[libx264 @ 0x7f29a0000cc0] frame I:4     Avg QP:34.25  size: 98577
+[libx264 @ 0x7f29a0000cc0] frame P:198   Avg QP:36.31  size: 15446
+[libx264 @ 0x7f29a0000cc0] mb I  I16..4: 100.0%  0.0%  0.0%
+[libx264 @ 0x7f29a0000cc0] mb P  I16..4:  0.4%  0.0%  0.0%  P16..4:  2.0%  0.0%  0.0%  0.0%  0.0%    skip:97.7%
+[libx264 @ 0x7f29a0000cc0] final ratefactor: 37.99
+[libx264 @ 0x7f29a0000cc0] coded y,uvDC,uvAC intra: 17.7% 4.6% 3.2% inter: 1.2% 0.1% 0.1%
+[libx264 @ 0x7f29a0000cc0] i16 v,h,dc,p: 86%  9%  4%  1%
+[libx264 @ 0x7f29a0000cc0] i8c dc,h,v,p:  0% 100%  0%  0%
+[libx264 @ 0x7f29a0000cc0] kb/s:8204.19

@@ -44,6 +44,10 @@ struct Cli {
     /// Automatically approve incoming pairing requests (non-interactive / automation).
     #[arg(long)]
     auto_approve: bool,
+
+    /// Output name to capture (Linux). Auto-detects the focused output when omitted.
+    #[arg(long, value_name = "NAME")]
+    output: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -112,9 +116,19 @@ fn main() -> Result<()> {
         {
             HostConfig::windows_default(Some(pin.clone()), store)?
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(target_os = "linux")]
         {
-            bail!("erd-host does not support this platform yet (macOS and Windows are wired)");
+            let output = cli.output.clone().or_else(erd_host::focused_output_name);
+            if let Some(name) = &output {
+                eprintln!("capturing output: {name}");
+            }
+            HostConfig::linux_default(Some(pin.clone()), store, output)?
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            bail!(
+                "erd-host does not support this platform yet (macOS, Windows and Linux are wired)"
+            );
         }
     };
     config.capture_audio = !cli.no_audio;
@@ -183,7 +197,13 @@ fn onboard_permissions() {
             "Windows host: DXGI Desktop Duplication + Media Foundation/NVENC are used; no TCC-style permission prompts are needed."
         );
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        eprintln!(
+            "Linux host: wlroots/Hyprland screencopy capture; VAAPI hardware encoding when available, x264 software otherwise."
+        );
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         eprintln!("erd-host capture and input are not wired for this platform yet.");
     }

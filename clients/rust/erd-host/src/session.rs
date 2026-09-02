@@ -26,14 +26,22 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+#[cfg(target_os = "linux")]
+use crate::capture_linux::{CaptureConfig as LinuxCaptureConfig, LinuxCapture};
 #[cfg(target_os = "macos")]
 use crate::capture_macos::{CaptureConfig, CaptureEvent, CaptureFrame, ScreenCapture};
 #[cfg(target_os = "windows")]
 use crate::capture_windows::{CaptureError, WindowsCapture};
+#[cfg(target_os = "linux")]
+use crate::encode_linux::{
+    EncoderConfig as LinuxEncoderConfig, LinuxVideoEncoder, VideoCodec as LinuxVideoCodec,
+};
 #[cfg(target_os = "macos")]
 use crate::encode_vt::{EncoderConfig, VideoToolboxEncoder, DEFAULT_BITRATE};
 #[cfg(target_os = "windows")]
 use crate::encode_windows::{EncoderConfig, MediaFoundationEncoder, VideoCodec};
+#[cfg(target_os = "linux")]
+use crate::inject_linux::LinuxInputInjector;
 #[cfg(target_os = "macos")]
 use crate::inject_macos::InputInjector;
 #[cfg(target_os = "windows")]
@@ -230,6 +238,9 @@ pub struct HostConfig {
     pub bitrate: u32,
     pub capture_audio: bool,
     pub consent_sender: Option<mpsc::Sender<ConsentPrompt>>,
+    /// Linux only: which output to capture. `None` picks the first output,
+    /// which on Hyprland is frequently a headless output that never commits.
+    pub output_name: Option<String>,
 }
 
 impl HostConfig {
@@ -253,6 +264,7 @@ impl HostConfig {
             frames_per_second: 60,
             bitrate: DEFAULT_BITRATE,
             capture_audio: true,
+            output_name: None,
             consent_sender: None,
         })
     }
@@ -285,6 +297,47 @@ impl HostConfig {
             frames_per_second: 60,
             bitrate: WINDOWS_DEFAULT_BITRATE,
             capture_audio: false,
+            output_name: None,
+            consent_sender: None,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn linux_default(
+        bootstrap_pin: Option<String>,
+        pairing_store: PairingStore,
+        output_name: Option<String>,
+    ) -> Result<Self, SessionError> {
+        let config = LinuxCaptureConfig {
+            output_name: output_name.clone(),
+            ..LinuxCaptureConfig::default()
+        };
+        let mut capture = LinuxCapture::connect(config)
+            .map_err(|error| SessionError::Io(io::Error::other(error.to_string())))?;
+        let output = capture.output_info();
+        let display = DisplayInfo {
+            logical_width: output.pixel_width,
+            logical_height: output.pixel_height,
+            pixel_width: output.pixel_width,
+            pixel_height: output.pixel_height,
+            scale_factor_milli: (output.scale.max(1) as u32) * 1_000,
+        };
+        drop(capture);
+        Ok(Self {
+            tcp_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_TCP_PORT)),
+            udp_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_UDP_PORT)),
+            bootstrap_pin,
+            pairing_window: PAIRING_WINDOW,
+            pairing_store,
+            host_name: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            display,
+            frames_per_second: 60,
+            bitrate: LINUX_DEFAULT_BITRATE,
+            capture_audio: false,
+            output_name,
             consent_sender: None,
         })
     }
@@ -428,6 +481,33 @@ impl DisplayInfo {
 
 #[cfg(target_os = "windows")]
 const WINDOWS_DEFAULT_BITRATE: u32 = 8_000_000;
+
+#[cfg(target_os = "linux")]
+const LINUX_DEFAULT_BITRATE: u32 = 8_000_000;
+
+/// Name of the compositor's focused output, for hosts that expose several
+/// outputs (e.g. Hyprland headless outputs). Best effort: None when the
+/// compositor is unknown or the probe fails, which makes the capture fall
+/// back to the first output.
+#[cfg(target_os = "linux")]
+pub fn focused_output_name() -> Option<String> {
+    let output = std::process::Command::new("hyprctl")
+        .arg("monitors")
+        .arg("-j")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let monitors: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    monitors
+        .as_array()?
+        .iter()
+        .find(|monitor| monitor.get("focused").and_then(serde_json::Value::as_bool) == Some(true))
+        .and_then(|monitor| monitor.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
 
 trait MediaHandle {
     fn force_key_frame(&self) -> Result<(), SessionError>;
@@ -842,6 +922,165 @@ impl MediaHandle for WindowsMediaHandle {
     }
 }
 
+#[cfg(target_os = "linux")]
+struct LinuxMediaSource {
+    fps: u32,
+    width: u32,
+    height: u32,
+    bitrate: u32,
+    output_name: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+impl MediaSource for LinuxMediaSource {
+    fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::channel;
+
+        enum PipelineFrame {
+            Video {
+                bgra: Vec<u8>,
+                stride: usize,
+                captured_at: Instant,
+            },
+            Stop,
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (frame_tx, frame_rx) = channel::<PipelineFrame>();
+
+        // Capture thread: wlroots/Hyprland screencopy at the target cadence.
+        {
+            let sender = sender.clone();
+            let stop = Arc::clone(&stop);
+            let fps = self.fps.max(1);
+            let output_name = self.output_name.clone();
+            std::thread::Builder::new()
+                .name("erd-linux-capture".into())
+                .spawn(move || {
+                    let interval = Duration::from_micros(1_000_000 / fps as u64);
+                    let capture_config = LinuxCaptureConfig {
+                        output_name: output_name.clone(),
+                        ..LinuxCaptureConfig::default()
+                    };
+                    let mut capture = match LinuxCapture::connect(capture_config) {
+                        Ok(capture) => capture,
+                        Err(error) => {
+                            let _ =
+                                sender.send(MediaEvent::Error(format!("capture init: {error}")));
+                            return;
+                        }
+                    };
+                    while !stop.load(Ordering::Relaxed) {
+                        let started = Instant::now();
+                        match capture.capture_frame() {
+                            Ok(frame) => {
+                                if frame_tx
+                                    .send(PipelineFrame::Video {
+                                        bgra: frame.bgra,
+                                        stride: frame.stride as usize,
+                                        captured_at: started,
+                                    })
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                            Err(error) => {
+                                let _ = sender.send(MediaEvent::Error(format!("capture: {error}")));
+                                return;
+                            }
+                        }
+                        let elapsed = started.elapsed();
+                        if elapsed < interval {
+                            std::thread::sleep(interval - elapsed);
+                        }
+                    }
+                })
+                .map_err(|error| SessionError::Io(io::Error::other(error)))?;
+        }
+
+        // Encode thread: VAAPI when the GPU offers it, x264 software otherwise.
+        {
+            let stop = Arc::clone(&stop);
+            let config = LinuxEncoderConfig {
+                width: self.width,
+                height: self.height,
+                bitrate: self.bitrate as usize,
+                fps: self.fps.max(1),
+                keyframe_interval: self.fps.max(1),
+                preferred_codec: LinuxVideoCodec::H264,
+            };
+            std::thread::Builder::new()
+                .name("erd-linux-encode".into())
+                .spawn(move || {
+                    let mut encoder = match LinuxVideoEncoder::new(config) {
+                        Ok(encoder) => encoder,
+                        Err(error) => {
+                            let _ =
+                                sender.send(MediaEvent::Error(format!("encoder init: {error}")));
+                            return;
+                        }
+                    };
+                    for frame in frame_rx {
+                        match frame {
+                            PipelineFrame::Stop => break,
+                            PipelineFrame::Video {
+                                bgra,
+                                stride,
+                                captured_at,
+                            } => match encoder.encode_bgra(&bgra, stride) {
+                                Ok(encoded_frames) => {
+                                    for encoded in encoded_frames {
+                                        let now = Instant::now();
+                                        let _ = sender.send(MediaEvent::Video(VideoFrame {
+                                            data: encoded.data,
+                                            is_key_frame: encoded.is_key_frame,
+                                            capture_at: captured_at,
+                                            encode_started_at: now,
+                                            encode_completed_at: now,
+                                        }));
+                                    }
+                                }
+                                Err(error) => {
+                                    let _ =
+                                        sender.send(MediaEvent::Error(format!("encode: {error}")));
+                                    return;
+                                }
+                            },
+                        }
+                    }
+                    stop.store(true, Ordering::Relaxed);
+                })
+                .map_err(|error| SessionError::Io(io::Error::other(error)))?;
+        }
+
+        Ok(Box::new(LinuxMediaHandle { stop }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxMediaHandle {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(target_os = "linux")]
+impl MediaHandle for LinuxMediaHandle {
+    fn force_key_frame(&self) -> Result<(), SessionError> {
+        // x264 emits key frames on keyframe_interval; the wire protocol
+        // tolerates waiting for the next natural one.
+        Ok(())
+    }
+
+    fn update_bitrate(&self, _bitrate: u32) -> Result<(), SessionError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// BT.601 limited-range BGRA8 -> NV12 conversion for tightly packed input.
 #[cfg(target_os = "windows")]
 fn bgra_to_nv12(
@@ -929,6 +1168,30 @@ impl HostServer {
         }))
     }
 
+    #[cfg(target_os = "linux")]
+    fn default_media_source(
+        config: &HostConfig,
+        fps: u32,
+    ) -> Result<Arc<dyn MediaSource>, SessionError> {
+        Ok(Arc::new(LinuxMediaSource {
+            fps,
+            width: config.display.pixel_width,
+            height: config.display.pixel_height,
+            bitrate: config.bitrate,
+            output_name: config.output_name.clone(),
+        }))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+    fn default_media_source(
+        _config: &HostConfig,
+        _fps: u32,
+    ) -> Result<Arc<dyn MediaSource>, SessionError> {
+        Err(SessionError::Store(
+            "no media source is wired for this platform yet".into(),
+        ))
+    }
+
     #[cfg(target_os = "windows")]
     fn default_media_source(
         config: &HostConfig,
@@ -944,7 +1207,7 @@ impl HostServer {
         }))
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     fn default_media_source(
         _config: &HostConfig,
         _fps: u32,
@@ -1108,6 +1371,13 @@ impl HostServer {
         );
         #[cfg(target_os = "windows")]
         let mut input = WindowsInputInjector::new(None).map_err(|error| SessionError::Io(error))?;
+        #[cfg(target_os = "linux")]
+        let mut input =
+            LinuxInputInjector::new(crate::inject_linux::OutputGeometry::single_output(
+                self.config.display.pixel_width,
+                self.config.display.pixel_height,
+            ))
+            .map_err(|error| SessionError::Io(error))?;
         let session_origin = Instant::now();
         info!(identity = negotiated_identity, peer = %tcp_peer, "TLS-PSK session established");
         let mut last_pong = Instant::now();
@@ -1595,6 +1865,7 @@ mod tests {
             frames_per_second: 60,
             bitrate: DEFAULT_BITRATE,
             capture_audio: false,
+            output_name: None,
             consent_sender: Some(consent_sender),
         }
     }
