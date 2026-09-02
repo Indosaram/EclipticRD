@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 public struct SessionCandidate: Codable, Equatable {
     public let role: String
@@ -13,109 +14,100 @@ public struct SessionCandidate: Codable, Equatable {
     }
 }
 
+/// NAT-traversal candidate exchange over a public ntfy.sh topic.
+///
+/// The topic is a 256-bit hash of the shared PIN and candidate payloads are
+/// AES-GCM encrypted under a key derived from the same PIN, so an outside
+/// observer can neither enumerate topics for a given PIN space nor read the
+/// exchanged addresses. Both peers poll until the other side's candidate
+/// shows up instead of failing on the first empty response.
 public class SignalingClient {
-    private let pin: String
     private let role: String
-    private var webSocketTask: URLSessionWebSocketTask?
-    private var isSearching = false
-    private var pendingContinuation: CheckedContinuation<SessionCandidate, Error>?
-    private var activeTask: URLSessionDataTask?
+    private let topic: String
+    private let payloadKey: SymmetricKey
     private let lock = NSLock()
+    private var isSearching = false
 
     public init(pin: String, role: String) {
-        self.pin = pin
         self.role = role
+        let ikm = Data(pin.utf8)
+        let seed = HKDF.derive(ikm: ikm, salt: Data("erd/signaling/v3".utf8), info: Data("erd/topic".utf8))
+        // ntfy.sh rejects topics longer than 64 chars with a 404; 112 bits of
+        // derived entropy keeps the topic unenumerable while fitting the cap.
+        self.topic = "erd3-" + seed.prefix(14).map { String(format: "%02x", $0) }.joined()
+        let key = HKDF.derive(ikm: ikm, salt: Data("erd/signaling/v3".utf8), info: Data("erd/payload-key".utf8))
+        self.payloadKey = SymmetricKey(data: key)
     }
 
     deinit { stop() }
 
-    public func exchangeCandidate(_ local: SessionCandidate) async throws -> SessionCandidate {
-        // Post our candidate to ntfy.sh/<pin>
-        let topicURL = URL(string: "https://ntfy.sh/eclipticrd-\(pin)")!
+    private static func encrypt(_ payload: Data, using key: SymmetricKey) throws -> String {
+        let box = try AES.GCM.seal(payload, using: key)
+        return Data(box.combined!).base64EncodedString()
+    }
 
-        let encoder = JSONEncoder()
-        let payload = try encoder.encode(local)
-
-        var postRequest = URLRequest(url: topicURL)
-        postRequest.httpMethod = "POST"
-        postRequest.httpBody = payload
-        postRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        ERDLog.network("[Signaling] Posting candidate to ntfy.sh/eclipticrd-\(pin)")
-        let _ = try await URLSession.shared.data(for: postRequest)
-
-        // Subscribe via SSE (Server-Sent Events) and wait for peer's candidate
-        return try await withCheckedThrowingContinuation { continuation in
-            lock.lock()
-            isSearching = true
-            pendingContinuation = continuation
-            lock.unlock()
-
-            var sseURL = URLComponents(url: topicURL.appendingPathComponent("json"), resolvingAgainstBaseURL: false)!
-            sseURL.queryItems = [URLQueryItem(name: "poll", value: "1"), URLQueryItem(name: "since", value: "5m")]
-
-            var request = URLRequest(url: sseURL.url!)
-            request.timeoutInterval = 30
-
-            let task = URLSession.shared.dataTask(with: request) { [weak self] data, _, error in
-                guard let self = self else { return }
-
-                self.lock.lock()
-                guard self.isSearching else {
-                    // Already cancelled via stop() — continuation was already resumed there
-                    self.lock.unlock()
-                    return
-                }
-                self.isSearching = false
-                self.pendingContinuation = nil
-                self.lock.unlock()
-
-                if let error = error {
-                    continuation.resume(throwing: error)
-                    return
-                }
-                guard let data = data else {
-                    continuation.resume(throwing: NSError(domain: "Signaling", code: 1, userInfo: [NSLocalizedDescriptionKey: "Signaling timeout waiting for peer"]))
-                    return
-                }
-
-                // Parse JSON lines from ntfy.sh response
-                let lines = String(data: data, encoding: .utf8)?.split(separator: "\n") ?? []
-                let decoder = JSONDecoder()
-
-                for line in lines.reversed() {
-                    // Each line is a ntfy message JSON containing a "message" field
-                    if let lineData = line.data(using: .utf8),
-                       let ntfyMessage = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
-                       let messageStr = ntfyMessage["message"] as? String,
-                       let messageData = messageStr.data(using: .utf8),
-                       let candidate = try? decoder.decode(SessionCandidate.self, from: messageData),
-                       candidate.role != self.role {
-                        continuation.resume(returning: candidate)
-                        return
-                    }
-                }
-
-                continuation.resume(throwing: NSError(domain: "Signaling", code: 2, userInfo: [NSLocalizedDescriptionKey: "Signaling timeout waiting for peer"]))
-            }
-            activeTask = task
-            task.resume()
+    private static func peerCandidate(in data: Data, excludingRole role: String, key: SymmetricKey) -> SessionCandidate? {
+        let lines = String(data: data, encoding: .utf8)?.split(separator: "\n") ?? []
+        for line in lines.reversed() {
+            guard let lineData = line.data(using: .utf8),
+                  let envelope = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let message = envelope["message"] as? String,
+                  let raw = Data(base64Encoded: message),
+                  let box = try? AES.GCM.SealedBox(combined: raw),
+                  let payload = try? AES.GCM.open(box, using: key),
+                  let candidate = try? JSONDecoder().decode(SessionCandidate.self, from: payload),
+                  candidate.role != role
+            else { continue }
+            return candidate
         }
+        return nil
+    }
+
+    public func exchangeCandidate(_ local: SessionCandidate) async throws -> SessionCandidate {
+        let payload = try JSONEncoder().encode(local)
+        let message = try Self.encrypt(payload, using: payloadKey)
+        let url = URL(string: "https://ntfy.sh/\(topic)")!
+
+        var post = URLRequest(url: url)
+        post.httpMethod = "POST"
+        post.httpBody = Data(message.utf8)
+        post.setValue("text/plain", forHTTPHeaderField: "Content-Type")
+
+        ERDLog.network("[Signaling] Posting candidate")
+        let (_, postResponse) = try await URLSession.shared.data(for: post)
+        if let http = postResponse as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            throw NSError(domain: "Signaling", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "Candidate POST rejected (HTTP \(http.statusCode))"])
+        }
+
+        lock.lock()
+        isSearching = true
+        lock.unlock()
+
+        let deadline = Date().addingTimeInterval(ERDConstants.connectionTimeout)
+        var poll = URLRequest(url: URL(string: "https://ntfy.sh/\(topic)/json?poll=1&since=10m")!)
+        poll.timeoutInterval = 10
+
+        while Date() < deadline {
+            lock.lock()
+            let active = isSearching
+            lock.unlock()
+            guard active else { throw CancellationError() }
+            try Task.checkCancellation()
+
+            if let (data, _) = try? await URLSession.shared.data(for: poll),
+               let candidate = Self.peerCandidate(in: data, excludingRole: role, key: payloadKey) {
+                return candidate
+            }
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+        }
+        throw NSError(domain: "Signaling", code: 2,
+                      userInfo: [NSLocalizedDescriptionKey: "Signaling timeout waiting for peer"])
     }
 
     public func stop() {
         lock.lock()
         isSearching = false
-        activeTask?.cancel()
-        activeTask = nil
-        let continuation = pendingContinuation
-        pendingContinuation = nil
         lock.unlock()
-
-        // Resume outside lock to avoid potential deadlock
-        continuation?.resume(throwing: CancellationError())
-
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
     }
 }

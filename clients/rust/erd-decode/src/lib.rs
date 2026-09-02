@@ -1,0 +1,432 @@
+//! FFmpeg HEVC decoding for the Ecliptic Remote Desktop AVCC media stream.
+
+use thiserror::Error;
+
+pub const NAL_LENGTH_BYTES: usize = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HardwareAcceleration {
+    Software,
+    #[cfg(feature = "videotoolbox")]
+    VideoToolbox,
+    #[cfg(feature = "d3d11va")]
+    D3d11va,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nalu<'a> {
+    pub nal_type: u8,
+    pub data: &'a [u8],
+}
+
+#[derive(Debug, Error)]
+pub enum DecodeError {
+    #[error("HEVC access unit is truncated at byte {offset}")]
+    TruncatedNalu { offset: usize },
+    #[error("HEVC NALU at byte {offset} has zero length")]
+    EmptyNalu { offset: usize },
+    #[error("HEVC parameter sets (VPS/SPS/PPS) are incomplete")]
+    MissingParameterSets,
+    #[error("FFmpeg support is disabled")]
+    FfmpegDisabled,
+    #[error("FFmpeg initialization failed: {0}")]
+    FfmpegInit(String),
+    #[error("FFmpeg decoder failed: {0}")]
+    Ffmpeg(String),
+    #[error("decoded frame has unsupported dimensions or format")]
+    UnsupportedFrame,
+}
+
+/// Parses one access unit containing 4-byte big-endian length-prefixed HEVC NALUs.
+pub fn parse_length_prefixed_nalus(access_unit: &[u8]) -> Result<Vec<Nalu<'_>>, DecodeError> {
+    let mut offset = 0;
+    let mut nalus = Vec::new();
+    while offset < access_unit.len() {
+        if access_unit.len() - offset < NAL_LENGTH_BYTES {
+            return Err(DecodeError::TruncatedNalu { offset });
+        }
+        let length = u32::from_be_bytes(
+            access_unit[offset..offset + NAL_LENGTH_BYTES]
+                .try_into()
+                .expect("four-byte NAL length"),
+        ) as usize;
+        let length_offset = offset;
+        offset += NAL_LENGTH_BYTES;
+        if length < 2 {
+            return Err(DecodeError::EmptyNalu {
+                offset: length_offset,
+            });
+        }
+        let end = offset
+            .checked_add(length)
+            .filter(|end| *end <= access_unit.len())
+            .ok_or(DecodeError::TruncatedNalu {
+                offset: length_offset,
+            })?;
+        let data = &access_unit[offset..end];
+        nalus.push(Nalu {
+            nal_type: (data[0] >> 1) & 0x3f,
+            data,
+        });
+        offset = end;
+    }
+    if nalus.is_empty() {
+        return Err(DecodeError::TruncatedNalu { offset: 0 });
+    }
+    Ok(nalus)
+}
+
+/// Converts length-prefixed NALUs to Annex-B (0x00, 0x00, 0x00, 0x01 prefixed).
+pub fn to_annex_b(data: &[u8]) -> Vec<u8> {
+    if let Ok(nalus) = parse_length_prefixed_nalus(data) {
+        let mut out = Vec::with_capacity(data.len() + nalus.len() * 4);
+        for nalu in nalus {
+            out.extend_from_slice(&[0, 0, 0, 1]);
+            out.extend_from_slice(nalu.data);
+        }
+        return out;
+    }
+    data.to_vec()
+}
+
+/// Extracts the direct AVCC-style VPS/SPS/PPS blob expected by the decoder context.
+pub fn hevc_parameter_set_blob(access_unit: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    let mut parameter_sets: [Option<&[u8]>; 3] = [None, None, None];
+    for nalu in parse_length_prefixed_nalus(access_unit)? {
+        match nalu.nal_type {
+            32 => parameter_sets[0] = Some(nalu.data),
+            33 => parameter_sets[1] = Some(nalu.data),
+            34 => parameter_sets[2] = Some(nalu.data),
+            _ => {}
+        }
+    }
+    if parameter_sets.iter().any(Option::is_none) {
+        return Err(DecodeError::MissingParameterSets);
+    }
+    let mut output = Vec::new();
+    for parameter_set in parameter_sets.into_iter().flatten() {
+        output.extend_from_slice(&(parameter_set.len() as u32).to_be_bytes());
+        output.extend_from_slice(parameter_set);
+    }
+    Ok(output)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Nv12Frame {
+    pub width: u32,
+    pub height: u32,
+    pub y_stride: usize,
+    pub uv_stride: usize,
+    pub y_plane: Vec<u8>,
+    pub uv_plane: Vec<u8>,
+    pub timestamp_ms: i64,
+}
+
+#[cfg(feature = "ffmpeg")]
+mod ffmpeg_impl {
+    use std::ptr;
+
+    use ffmpeg::{codec, format::Pixel, frame, software::scaling};
+    use ffmpeg_next as ffmpeg;
+
+    use super::{
+        hevc_parameter_set_blob, parse_length_prefixed_nalus, to_annex_b, DecodeError,
+        HardwareAcceleration, Nv12Frame,
+    };
+
+    pub struct HevcDecoder {
+        decoder: codec::decoder::Video,
+        scaler: Option<scaling::Context>,
+        extradata: Vec<u8>,
+        acceleration: HardwareAcceleration,
+        hw_device: *mut ffmpeg::ffi::AVBufferRef,
+    }
+
+    unsafe impl Send for HevcDecoder {}
+
+    impl HevcDecoder {
+        pub fn new(extradata: &[u8]) -> Result<Self, DecodeError> {
+            ffmpeg::init().map_err(|error| DecodeError::FfmpegInit(error.to_string()))?;
+            if extradata.is_empty() {
+                return Err(DecodeError::MissingParameterSets);
+            }
+            let codec = codec::decoder::find(codec::Id::HEVC)
+                .ok_or_else(|| DecodeError::Ffmpeg("HEVC decoder is unavailable".to_owned()))?;
+            let mut context = codec::Context::new_with_codec(codec);
+            unsafe {
+                (*context.as_mut_ptr()).err_recognition = ffmpeg::ffi::AV_EF_CRCCHECK
+                    | ffmpeg::ffi::AV_EF_BUFFER;
+                (*context.as_mut_ptr()).flags |= ffmpeg::ffi::AV_CODEC_FLAG_LOW_DELAY as i32;
+                (*context.as_mut_ptr()).flags2 |= ffmpeg::ffi::AV_CODEC_FLAG2_FAST;
+            }
+            let annex_b = to_annex_b(extradata);
+            let raw_len = annex_b.len();
+            let mut owned_extradata = annex_b;
+            owned_extradata.resize(
+                raw_len + ffmpeg::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize,
+                0,
+            );
+            unsafe {
+                (*context.as_mut_ptr()).extradata = owned_extradata.as_mut_ptr();
+                (*context.as_mut_ptr()).extradata_size = raw_len as i32;
+            }
+            let (acceleration, hw_device) = configure_hardware(&mut context);
+            let decoder = context
+                .decoder()
+                .video()
+                .map_err(|error| DecodeError::Ffmpeg(error.to_string()))?;
+            Ok(Self {
+                decoder,
+                scaler: None,
+                extradata: owned_extradata,
+                acceleration,
+                hw_device,
+            })
+        }
+
+        pub fn from_keyframe(keyframe: &[u8]) -> Result<Self, DecodeError> {
+            Self::new(&hevc_parameter_set_blob(keyframe)?)
+        }
+
+        pub fn acceleration(&self) -> HardwareAcceleration {
+            self.acceleration
+        }
+
+        /// Feeds one complete 4-byte length-prefixed access unit to FFmpeg.
+        pub fn decode(
+            &mut self,
+            access_unit: &[u8],
+            timestamp_ms: i64,
+        ) -> Result<Vec<Nv12Frame>, DecodeError> {
+            parse_length_prefixed_nalus(access_unit)?;
+            let annex_b = to_annex_b(access_unit);
+            let mut packet = ffmpeg::Packet::copy(&annex_b);
+            packet.set_pts(Some(timestamp_ms));
+            packet.set_dts(Some(timestamp_ms));
+            self.decoder
+                .send_packet(&packet)
+                .map_err(|error| DecodeError::Ffmpeg(error.to_string()))?;
+            self.receive_available(timestamp_ms)
+        }
+
+        pub fn flush(&mut self) -> Result<Vec<Nv12Frame>, DecodeError> {
+            self.decoder
+                .send_eof()
+                .map_err(|error| DecodeError::Ffmpeg(error.to_string()))?;
+            self.receive_available(0)
+        }
+
+        fn receive_available(
+            &mut self,
+            fallback_timestamp_ms: i64,
+        ) -> Result<Vec<Nv12Frame>, DecodeError> {
+            let mut frames = Vec::new();
+            loop {
+                let mut decoded = frame::Video::empty();
+                match self.decoder.receive_frame(&mut decoded) {
+                    Ok(()) => {
+                        let timestamp_ms = decoded
+                            .timestamp()
+                            .or_else(|| decoded.pts())
+                            .unwrap_or(fallback_timestamp_ms);
+                        if matches!(
+                            decoded.format(),
+                            Pixel::VIDEOTOOLBOX | Pixel::D3D11 | Pixel::D3D11VA_VLD
+                        ) {
+                            let decoded = transfer_hardware_frame(&decoded)?;
+                            frames.push(self.convert_to_nv12(&decoded, timestamp_ms)?);
+                        } else {
+                            frames.push(self.convert_to_nv12(&decoded, timestamp_ms)?);
+                        }
+                    }
+                    Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::error::EAGAIN => break,
+                    Err(ffmpeg::Error::Eof) => break,
+                    Err(error) => return Err(DecodeError::Ffmpeg(error.to_string())),
+                }
+            }
+            Ok(frames)
+        }
+
+        fn convert_to_nv12(
+            &mut self,
+            decoded: &frame::Video,
+            timestamp_ms: i64,
+        ) -> Result<Nv12Frame, DecodeError> {
+            let converted;
+            let source = if decoded.format() == Pixel::NV12 {
+                decoded
+            } else {
+                let needs_scaler = self.scaler.as_ref().map_or(true, |scaler| {
+                    scaler.input().format != decoded.format()
+                        || scaler.input().width != decoded.width()
+                        || scaler.input().height != decoded.height()
+                });
+                if needs_scaler {
+                    self.scaler = Some(
+                        scaling::Context::get(
+                            decoded.format(),
+                            decoded.width(),
+                            decoded.height(),
+                            Pixel::NV12,
+                            decoded.width(),
+                            decoded.height(),
+                            scaling::Flags::FAST_BILINEAR,
+                        )
+                        .map_err(|error| DecodeError::Ffmpeg(error.to_string()))?,
+                    );
+                }
+                converted = {
+                    let mut converted = frame::Video::empty();
+                    self.scaler
+                        .as_mut()
+                        .expect("scaler initialized above")
+                        .run(decoded, &mut converted)
+                        .map_err(|error| DecodeError::Ffmpeg(error.to_string()))?;
+                    converted
+                };
+                &converted
+            };
+            copy_nv12(source, timestamp_ms)
+        }
+    }
+
+    impl Drop for HevcDecoder {
+        fn drop(&mut self) {
+            unsafe {
+                if !self.hw_device.is_null() {
+                    ffmpeg::ffi::av_buffer_unref(&mut self.hw_device);
+                }
+                // Prevent AVCodecContext from freeing the Vec-owned extradata.
+                let context = self.decoder.as_mut_ptr();
+                (*context).extradata = ptr::null_mut();
+                (*context).extradata_size = 0;
+            }
+            let _ = self.extradata.len();
+        }
+    }
+
+    fn transfer_hardware_frame(decoded: &frame::Video) -> Result<frame::Video, DecodeError> {
+        let mut software = frame::Video::empty();
+        let result = unsafe {
+            ffmpeg::ffi::av_hwframe_transfer_data(software.as_mut_ptr(), decoded.as_ptr(), 0)
+        };
+        if result < 0 {
+            return Err(DecodeError::Ffmpeg(ffmpeg::Error::from(result).to_string()));
+        }
+        Ok(software)
+    }
+
+    fn copy_nv12(frame: &frame::Video, timestamp_ms: i64) -> Result<Nv12Frame, DecodeError> {
+        if frame.format() != Pixel::NV12 || frame.planes() < 2 {
+            return Err(DecodeError::UnsupportedFrame);
+        }
+        let width = frame.width() as usize;
+        let height = frame.height() as usize;
+        let y_stride = frame.stride(0);
+        let uv_stride = frame.stride(1);
+        let mut y_plane = vec![0_u8; width * height];
+        let mut uv_plane = vec![0_u8; width * height.div_ceil(2)];
+        for row in 0..height {
+            let source = &frame.data(0)[row * y_stride..row * y_stride + width];
+            y_plane[row * width..(row + 1) * width].copy_from_slice(source);
+        }
+        for row in 0..height.div_ceil(2) {
+            let source = &frame.data(1)[row * uv_stride..row * uv_stride + width];
+            uv_plane[row * width..(row + 1) * width].copy_from_slice(source);
+        }
+        Ok(Nv12Frame {
+            width: width as u32,
+            height: height as u32,
+            y_stride: width,
+            uv_stride: width,
+            y_plane,
+            uv_plane,
+            timestamp_ms,
+        })
+    }
+
+    fn configure_hardware(
+        _context: &mut codec::Context,
+    ) -> (HardwareAcceleration, *mut ffmpeg::ffi::AVBufferRef) {
+        #[cfg(all(feature = "videotoolbox", target_os = "macos"))]
+        if let Some(device) = create_hw_device(
+            _context,
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VIDEOTOOLBOX,
+        ) {
+            return (HardwareAcceleration::VideoToolbox, device);
+        }
+        #[cfg(all(feature = "d3d11va", target_os = "windows"))]
+        if let Some(device) = create_hw_device(
+            _context,
+            ffmpeg::ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+        ) {
+            return (HardwareAcceleration::D3d11va, device);
+        }
+        (HardwareAcceleration::Software, ptr::null_mut())
+    }
+
+    #[cfg(any(
+        all(feature = "videotoolbox", target_os = "macos"),
+        all(feature = "d3d11va", target_os = "windows")
+    ))]
+    fn create_hw_device(
+        context: &mut codec::Context,
+        device_type: ffmpeg::ffi::AVHWDeviceType,
+    ) -> Option<*mut ffmpeg::ffi::AVBufferRef> {
+        let mut device = ptr::null_mut();
+        let result = unsafe {
+            ffmpeg::ffi::av_hwdevice_ctx_create(
+                &mut device,
+                device_type,
+                ptr::null(),
+                ptr::null_mut(),
+                0,
+            )
+        };
+        if result < 0 || device.is_null() {
+            return None;
+        }
+        unsafe {
+            (*context.as_mut_ptr()).hw_device_ctx = ffmpeg::ffi::av_buffer_ref(device);
+        }
+        Some(device)
+    }
+
+    pub use HevcDecoder as ExportedHevcDecoder;
+}
+
+#[cfg(feature = "ffmpeg")]
+pub use ffmpeg_impl::ExportedHevcDecoder as HevcDecoder;
+
+#[cfg(not(feature = "ffmpeg"))]
+pub struct HevcDecoder;
+
+#[cfg(not(feature = "ffmpeg"))]
+impl HevcDecoder {
+    pub fn new(_extradata: &[u8]) -> Result<Self, DecodeError> {
+        Err(DecodeError::FfmpegDisabled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_length_prefix_is_a_graceful_error() {
+        assert!(matches!(
+            parse_length_prefixed_nalus(&[0, 0, 0, 8, 1, 2]),
+            Err(DecodeError::TruncatedNalu { offset: 0 })
+        ));
+    }
+
+    #[test]
+    fn parameter_set_blob_keeps_four_byte_lengths() {
+        let mut keyframe = Vec::new();
+        for data in [[0x40, 1], [0x42, 2], [0x44, 3]] {
+            keyframe.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            keyframe.extend_from_slice(&data);
+        }
+        assert_eq!(hevc_parameter_set_blob(&keyframe).unwrap(), keyframe);
+    }
+}

@@ -1,0 +1,50 @@
+I read this as completing the `erd-net` transport crate and proving it against the v3 contract - implementation and verification are complete.
+
+Implemented:
+
+- `tls_psk.rs`
+  - OpenSSL vendored TLS client and server with PSK callbacks.
+  - Bootstrap `erd-b1` and paired `erd-p1.<id>` identities.
+  - PBKDF2-SHA256 plus HKDF bootstrap key derivation.
+  - TLS 1.2 PSK AES-GCM cipher suites; TLS 1.3 negotiation disabled for Apple interoperability.
+  - Always-true certificate verification callback.
+  - Incremental 4-byte LE framing with 16 MiB limit and invalid-buffer drop.
+  - Bootstrap failure lockout semantics.
+  - In-process PSK server loopback and partial framing tests.
+
+- `udp_gcm.rs`
+  - AES-256-GCM datagrams with plaintext 12-byte authenticated headers.
+  - Direction-separated HKDF key and nonce chains.
+  - 4-byte prefix plus 8-byte BE counter nonces.
+  - 4096-packet replay window using 64-bit block masks.
+  - RFC 5869 vectors and all six Swift datagram tests, plus exact v3 derivation vectors.
+
+- `signaling.rs`
+  - Deterministic 33-character ntfy topic derivation.
+  - AES-GCM encrypted, Base64 candidate publication.
+  - Required candidate JSON field names and role filtering.
+  - POST status validation and JSONL polling with 10-second deadline.
+  - Live ntfy round-trip test gated by `ERD_LIVE_TESTS=1`.
+
+- `stun.rs`
+  - RFC 5389 binding requests with transaction validation.
+  - XOR-MAPPED-ADDRESS and MAPPED-ADDRESS parsing.
+  - Attribute padding and malformed-response handling.
+  - Default `stun.l.google.com:19302` endpoint.
+
+- Added required dependencies, including direct `openssl-sys` with `vendored`.
+
+Verification:
+
+```text
+cargo test -p erd-net
+24 passed, 0 failed
+
+cargo clippy -p erd-net --all-targets -- -D warnings
+clean
+
+cargo fmt --all -- --check
+clean
+```
+
+Language-server diagnostics report no errors.

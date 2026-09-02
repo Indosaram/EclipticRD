@@ -5,6 +5,9 @@ import ApplicationServices
 public class InputReceiver {
     private var screenWidth: CGFloat
     private var screenHeight: CGFloat
+    private let rateLock = NSLock()
+    private var eventTokens: Double = Double(ERDConstants.inputBurstCapacity)
+    private var lastRefillTime = Date()
 
     public init(screenWidth: CGFloat, screenHeight: CGFloat) {
         self.screenWidth = screenWidth
@@ -19,9 +22,11 @@ public class InputReceiver {
     public func handleInputEvent(_ data: Data) {
         guard AXIsProcessTrusted() else { return }
         guard let event = InputEventPayload.deserialize(from: data) else { return }
+        guard allowInputEvent() else { return }
+        guard !event.x.isNaN, !event.y.isNaN else { return }
 
-        let x = CGFloat(event.x) * screenWidth
-        let y = CGFloat(event.y) * screenHeight
+        let x = CGFloat(min(max(event.x, 0), 1)) * screenWidth
+        let y = CGFloat(min(max(event.y, 0), 1)) * screenHeight
         let point = CGPoint(x: x, y: y)
 
         let source = CGEventSource(stateID: .hidSystemState)
@@ -62,6 +67,19 @@ public class InputReceiver {
                 cgEvent.post(tap: .cghidEventTap)
             }
         }
+    }
+
+    /// Token bucket: sustained 200 events/s with a short burst allowance,
+    /// so a hostile peer cannot flood the host UI with synthetic input.
+    private func allowInputEvent() -> Bool {
+        rateLock.lock(); defer { rateLock.unlock() }
+        let now = Date()
+        eventTokens = min(Double(ERDConstants.inputBurstCapacity),
+                          eventTokens + now.timeIntervalSince(lastRefillTime) * Double(ERDConstants.maxInputEventsPerSecond))
+        lastRefillTime = now
+        guard eventTokens >= 1 else { return false }
+        eventTokens -= 1
+        return true
     }
 
     private func post(_ type: CGEventType, at point: CGPoint, button: CGMouseButton, source: CGEventSource?) {

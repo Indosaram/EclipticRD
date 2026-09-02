@@ -1,0 +1,97 @@
+
+[TEST 1] Binary Payload Serialization Round-trips
+  ✅ PacketHeader serialize/deserialize
+  ✅ PacketHeader rejects bad magic
+  ✅ PacketHeader with audioFrame type
+  ✅ HandshakePayload serialize/deserialize
+  ✅ HandshakePayload with Unicode hostname
+  ✅ HandshakePayload deserializes legacy payloads
+  ✅ FrameHeaderPayload serialize/deserialize
+  ✅ FrameChunkPayload serialize/deserialize
+  ✅ InputEventPayload serialize/deserialize
+  ✅ ControlMessage serialize/deserialize
+  ✅ StreamConfiguration serialize/deserialize
+  ✅ StreamConfigurationRequest serialize/deserialize
+  ✅ StreamConfigurationResponse serialize/deserialize
+  ✅ StreamConfigurationReject serialize/deserialize
+  ✅ StreamConfigurationError serialize/deserialize
+  ✅ ClipboardSyncRequest serialize/deserialize
+  ✅ ClipboardSyncUpdate serialize/deserialize
+  ✅ ClipboardSyncError serialize/deserialize
+  ✅ ClipboardSyncUpdate rejects oversized payloads
+  ✅ CursorUpdate serialize/deserialize
+  ✅ ModifierFlags OptionSet
+  ✅ AtomicBool thread safety
+
+[TEST 2] TCP Channel Loopback
+  ✅ TCPChannel listen + connect + send/receive
+
+[TEST 3] UDP Channel Loopback
+  ✅ UDPChannel listen + connect + sendPacket
+
+[TEST 4] Frame Chunk Assembly Pipeline
+  ✅ FrameReceiver assembles chunked frames
+
+[TEST 5] STUN Client (stun.l.google.com)
+    Public IP: 218.51.49.176:64009
+  ✅ STUN fetches public IP
+
+[TEST 6] ERDConstants
+  ✅ Constants have expected values
+
+[TEST 7] Video Encode → UDP FrameSender → FrameReceiver Pipeline
+    Sent: 10000 bytes, Received: 10000 bytes
+    Chunks: 8, KeyFrame: true
+  ✅ FrameSender chunks large encoded data and FrameReceiver reassembles
+
+[TEST 8] VideoEncoder H.265 Session
+    H.265 compression session created successfully
+    Frame encoded, callback fired: true
+  ✅ VideoEncoder creates and starts H.265 compression session
+
+[TEST 9] VideoDecoder Session
+  ✅ VideoDecoder initializes and accepts HEVC NALUs
+
+[TEST 10] Input Event TCP Round-trip
+    Received: type=leftMouseDown x=0.25 y=0.75 mods=8
+  ✅ InputEventPayload sent via TCPChannel.sendInput and received
+
+[TEST 11] Keyboard Event TCP Round-trip
+    Received: keyDown keyCode=8 mods=ModifierFlags(rawValue: 8)
+  ✅ KeyDown event with keyCode and modifiers sent via TCP
+
+[TEST 12] Scroll Wheel Event TCP Round-trip
+    Received: scroll dX=-3.5 dY=10.0
+  ✅ ScrollWheel event with deltaX/Y sent via TCP
+
+[TEST 13] InputReceiver CGEvent Injection
+    NOTE: this test moves the real cursor to the host screen center
+  ✅ InputReceiver creates and injects CGEvents
+
+[TEST 14] VideoEncoder → VideoDecoder Pipeline
+    Encoded frame: 2294 bytes, keyFrame=true
+    Encoded frame: 706 bytes, keyFrame=false
+    Decoded frame: 320x240
+    Decoded frame: 320x240
+    Encoded frame: 385 bytes, keyFrame=false
+    Decoded frame: 320x240
+    Encoded frame: 435 bytes, keyFrame=false
+    Decoded frame: 320x240
+    Encoded frame: 1279 bytes, keyFrame=false
+    Decoded frame: 320x240
+  ✅ Encode a pixel buffer to H.265 and decode it back
+
+[TEST 15] TLS-PSK Encrypted Channel Loopback
+  ✅ TCP TLS-PSK handshake completes and carries traffic
+
+[TEST 16] UDP Burst Delivery (20 datagrams)
+    Received 20/20 (result: success)
+  ✅ UDP loopback delivers a rapid burst without loss
+
+[TEST 17] Signaling Round-trip via ntfy.sh (real network)
+  ✅ Both peers exchange encrypted candidates through ntfy.sh
+
+========================================
+🎯 Results: 38 passed, 0 failed out of 38 tests
+✅ ALL TESTS PASSED!
+========================================

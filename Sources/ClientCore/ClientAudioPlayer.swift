@@ -31,8 +31,12 @@ public class ClientAudioPlayer {
 
             var tempQueue: AudioQueueRef?
             var fmt = format
-            // Create a low-latency playback output queue
-            let status = AudioQueueNewOutput(&fmt, { _, _, _ in }, nil, nil, nil, 0, &tempQueue)
+            // Create a low-latency playback output queue; buffers are freed
+            // in the completion callback, so every enqueued buffer is released
+            // exactly once after playback.
+            let status = AudioQueueNewOutput(&fmt, { _, inQueue, inBuffer in
+                AudioQueueFreeBuffer(inQueue, inBuffer)
+            }, nil, nil, nil, 0, &tempQueue)
 
             guard status == noErr, let q = tempQueue else {
                 ERDLog.error("[AudioPlayer] Failed to create AudioQueue: \(status)")
@@ -60,6 +64,9 @@ public class ClientAudioPlayer {
     public func play(data: Data) {
         queueAccessQueue.async { [weak self] in
             guard let self = self, self.isRunning, let q = self.queue else { return }
+
+            // Garbage or spoofed datagrams must not reach the audio allocator
+            guard !data.isEmpty, data.count <= 65_536 else { return }
 
             var buffer: AudioQueueBufferRef?
             let status = AudioQueueAllocateBuffer(q, UInt32(data.count), &buffer)

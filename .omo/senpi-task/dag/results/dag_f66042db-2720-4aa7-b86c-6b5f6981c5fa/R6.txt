@@ -1,0 +1,20 @@
+**Finalizing summary and evidence review**
+
+I read this as delivering the final review report and verdict by rerunning all six success-criterion gates from scratch without changing features or `Sources/`.
+
+### Gate Summary
+
+| Gate | Status | Evidence Path | Details |
+|---|---|---|---|
+| **1. Clippy** | **PASS** | `/tmp/gate-clippy.log` | Zero warnings/errors after 3 mechanical fixes (`erd-decode/src/lib.rs` cast, `erd-host/src/capture_macos.rs` unused extern declaration, `erd-host/src/session.rs` unused audio timestamp). |
+| **2. Rust Tests** | **PASS** | `/tmp/gate-test.log` | **105 passed**, 0 failed across all workspace crates. |
+| **3. VM E2E** | **PASS** | `/tmp/gate-e2e.log` | Tart VM paired, streamed, decoded 15 frames, and emitted `INTEROP_PASS`. |
+| **4. Benchmark** | **PASS** | `/tmp/gate-bench.log`<br>`bench-results.json` | 200 decoded frames inside Tart VM:<br>• **p50:** `3.05 ms` (`3050 µs`)<br>• **p99:** `5.01 ms` (`5010 µs`) |
+| **5. Swift Regression** | **FAIL** | `/tmp/gate-swift-clean.log`<br>`/tmp/gate-sources-diff-files.log`<br>`/tmp/gate-testcli-build.log`<br>`/tmp/gate-testcli-run.log`<br>`/tmp/gate-xctest.log` | • `git diff --quiet -- Sources/`: **FAIL** (exit code 1; 30 files changed under `Sources/`)<br>• `TestCLI`: **PASS** (`38/38 passed`)<br>• `EclipticRDLogicTests`: **PASS** (`** TEST SUCCEEDED **`, 24 passed, 1 skipped, 0 failed) |
+| **6. Review Doc** | **PASS** | `docs/rust-migration-review.md` | Full gate ledger, evidence citations, code quality review (layout, API hygiene, perf risks), and explicit verdict written. |
+
+### Final Verdict
+
+**VERDICT: NOT APPROVED**
+
+**Reason:** Gate 5 failed the mandatory `Sources/` repository cleanliness condition (`git diff --quiet -- Sources/ && echo CLEAN`). Under the criterion that requires all gates 1–5 to pass, the migration cannot receive an `APPROVED` verdict until `Sources/` is cleanly reconciled.

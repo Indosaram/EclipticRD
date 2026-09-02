@@ -1,0 +1,16 @@
+I read this as scaffolding a Tauri 2 desktop shell crate (`tauri-shell`) embedding `erd-app` within the cargo workspace.
+
+### Implementation Summary
+1. **Workspace Configuration**:
+   - Appended `"tauri-shell"` to `members` in `clients/rust/Cargo.toml` without modifying existing entries.
+2. **Tauri 2 Shell Package**:
+   - Scaffolded `clients/rust/tauri-shell/` with Tauri 2 configuration (`tauri.conf.json` configured with `productName: "EclipticRD"`, `identifier: "com.eclipticrd.shell"`, 1280x800 initial window size, and static HTML/JS frontend).
+   - Created `src-tauri/ui/index.html` static frontend using invoke bindings for Tauri 2.
+3. **Client Core Adapter & Commands**:
+   - Implemented `connect(host, tcp_port, udp_port, pin)`: spawns pairing/reconnect on tokio blocking runtime, starts the TCP control runtime, and launches the UDP media event loop on a dedicated background thread.
+   - Implemented `disconnect()`: shuts down TCP runtime, stops the background UDP task, and tears down the session.
+   - Implemented `stats()`: returns connection state, decoded/received frame counters, audio frame counters, and p50/p99 latency metrics.
+   - Implemented `send_input(event)`: parses pointer and key events and proxies them to `erd-app` input handlers (`pointer_event`, `key_event`, `ClientSession::send_input`).
+
+### Verification
+- Executed `CARGO_TARGET_DIR=target-tauri cargo check -p tauri-shell` in `clients/rust`: check completed with exit 0.

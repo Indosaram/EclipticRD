@@ -2,6 +2,7 @@ import Foundation
 import Network
 import MetalKit
 import AppKit
+import Security
 
 public class ClientCore {
     public static let shared = ClientCore()
@@ -25,6 +26,10 @@ public class ClientCore {
     private var clipboardMonitor: ClipboardMonitor?
     private var peerCapabilities: HandshakeCapabilities = []
     private var nextStreamConfigRequestID: UInt32 = 1
+    private var activePairing: PairingRecord?
+    private var sessionPairingKey: Data?
+    private var sessionSalt = Data()
+    private var audioFragments: [UInt32: (chunks: [UInt16: Data], total: UInt16)] = [:]
     public var onStreamConfigResponse: (@Sendable (StreamConfigurationResponsePayload) -> Void)?
     public var onStreamConfigRejected: (@Sendable (StreamConfigurationRejectPayload) -> Void)?
     public var onStreamConfigError: (@Sendable (StreamConfigurationErrorPayload) -> Void)?
@@ -54,11 +59,14 @@ public class ClientCore {
             guard let self = self else { return }
             guard data.count >= ERDConstants.packetHeaderSize else { return }
             
-            // Bypass frame assembly queue for zero-jitter, real-time audio playback
+            // Bypass frame assembly queue for zero-jitter, real-time audio playback.
+            // Magic check first: spoofed datagrams must not reach any handler.
+            guard data[0] == UInt8(truncatingIfNeeded: ERDConstants.magic),
+                  data[1] == UInt8(ERDConstants.magic >> 8) else { return }
             if data[2] == PacketType.audioFrame.rawValue {
                 if !self.isAudioMuted.value {
                     let payload = data.subdata(in: ERDConstants.packetHeaderSize..<data.count)
-                    self.audioPlayer.play(data: payload)
+                    self.handleAudioPayload(payload)
                 }
             } else {
                 self.frameReceiver.handlePacket(data)
@@ -82,21 +90,49 @@ public class ClientCore {
 
     // MARK: - Connection Methods
 
-    /// Connect via direct IP (LAN manual)
-    public func start(host: String?) {
+    /// Connect via direct IP (LAN manual). Supply a previously granted
+    /// pairing record, or a bootstrap PIN for first-time pairing; connecting
+    /// with neither is refused.
+    public func start(host: String?, pairing: PairingRecord?, bootstrapPIN: String?) {
         guard let host = host else { return }
         self.serverHost = host
+        guard setTransportSecurity(pairing: pairing, bootstrapPIN: bootstrapPIN) else { return }
         ERDLog.info("[Client] Connecting to \(host)")
 
         tcpChannel.connect(host: host, port: ERDConstants.tcpPort)
         setupTCPHandlers(host: host)
     }
 
+    public func start(host: String?) {
+        start(host: host, pairing: PairingManager.shared.pairedDevices().first, bootstrapPIN: nil)
+    }
+
     /// Connect via Bonjour endpoint
-    public func start(endpoint: NWEndpoint, name: String) {
+    public func start(endpoint: NWEndpoint, name: String, pairing: PairingRecord?, bootstrapPIN: String?) {
         ERDLog.info("[Client] Connecting to Bonjour Endpoint: \(name)")
+        guard setTransportSecurity(pairing: pairing, bootstrapPIN: bootstrapPIN) else { return }
         tcpChannel.connect(to: endpoint)
         setupTCPHandlers(host: nil)
+    }
+
+    public func start(endpoint: NWEndpoint, name: String) {
+        start(endpoint: endpoint, name: name, pairing: PairingManager.shared.pairedDevices().first, bootstrapPIN: nil)
+    }
+
+    @discardableResult
+    private func setTransportSecurity(pairing: PairingRecord?, bootstrapPIN: String?) -> Bool {
+        if let pairing {
+            tcpChannel.security = .psk([PairingManager.shared.clientPSK(for: pairing)])
+            activePairing = pairing
+            return true
+        }
+        if let bootstrapPIN {
+            tcpChannel.security = .psk([PairingManager.shared.clientPSK(pin: bootstrapPIN)])
+            activePairing = nil
+            return true
+        }
+        onError?("No paired device and no bootstrap PIN")
+        return false
     }
 
     /// Connect via PIN (Internet / NAT traversal)
@@ -134,10 +170,11 @@ public class ClientCore {
                     endpoints.append(.hostPort(host: NWEndpoint.Host(serverCandidate.publicIP), port: port))
                 }
 
-                tcpChannel.connectICE(endpoints: endpoints)
-                // Pass nil so the onConnect handler resolves host from
-                // the actual winning TCP connection (local or public).
+                // Install handlers before dialing: the TLS channel can become
+                // ready before connectICE returns.
+                tcpChannel.security = .psk([PairingManager.shared.clientPSK(pin: pin)])
                 setupTCPHandlers(host: nil)
+                tcpChannel.connectICE(endpoints: endpoints)
 
             } catch {
                 ERDLog.error("[ClientCore] ICE connection failed: \(error)")
@@ -152,6 +189,11 @@ public class ClientCore {
         stateQueue.sync {
             inputSender?.stopCapturing()
             inputSender = nil
+            audioFragments.removeAll()
+            sessionPairingKey = nil
+            sessionSalt = Data()
+            activePairing = nil
+            renderer = nil
         }
         frameReceiver.stop()
         decoder.stop()
@@ -180,14 +222,17 @@ public class ClientCore {
                 ERDLog.info("[Client] Resolved server IP: \(resolvedHost)")
             }
 
-            ERDLog.info("[Client] TCP connected, sending handshake...")
-            let hs = HandshakePayload(hostname: ProcessInfo.processInfo.hostName,
-                                       screenWidth: 0, screenHeight: 0, scaleFactor: 1.0,
-                                       capabilities: [.streamConfiguration, .textClipboardSync])
-            let header = PacketHeader(type: .handshake, sequence: 0, timestamp: 0)
-            var packet = header.serialize()
-            packet.append(hs.serialize())
-            self.tcpChannel.send(packet)
+            ERDLog.info("[Client] TLS channel established")
+            if let pairing = self.activePairing {
+                self.sendHandshake(with: pairing)
+            } else {
+                // Bootstrap channel: request pairing before any capability flows
+                let request = PairingRequestPayload(hostname: ProcessInfo.processInfo.hostName)
+                let header = PacketHeader(type: .pairingRequest, sequence: 0, timestamp: 0)
+                var packet = header.serialize()
+                packet.append(request.serialize())
+                self.tcpChannel.send(packet)
+            }
         }
 
         tcpChannel.onReceive = { [weak self] data in
@@ -200,13 +245,39 @@ public class ClientCore {
             }
             let payload = data.subdata(in: ERDConstants.packetHeaderSize..<data.count)
 
-            if header.type == .handshakeAck {
+            if header.type == .pairingGrant {
+                if let grant = PairingGrantPayload.deserialize(from: payload) {
+                    let record = PairingRecord(id: grant.pairingID, name: grant.hostName, key: grant.key)
+                    PairingManager.shared.adoptPairing(record)
+                    self.activePairing = record
+                    ERDLog.info("[Client] Paired with host \(grant.hostName)")
+                    self.sendHandshake(with: record)
+                }
+            } else if header.type == .pairingReject {
+                if let reject = PairingRejectPayload.deserialize(from: payload) {
+                    ERDLog.warning("[Client] Pairing rejected: \(reject.reason)")
+                    self.onError?("Pairing rejected")
+                    self.stop()
+                }
+            } else if header.type == .handshakeAck {
                 if let hs = HandshakePayload.deserialize(from: payload) {
+                    guard hs.protocolVersion == ERDConstants.protocolVersion else {
+                        ERDLog.warning("[Client] Host speaks protocol v\(hs.protocolVersion), expected v\(ERDConstants.protocolVersion)")
+                        self.onError?("Protocol version mismatch")
+                        self.stop()
+                        return
+                    }
                     ERDLog.info("[Client] Server: \(hs.hostname) \(hs.screenWidth)x\(hs.screenHeight) caps=\(hs.capabilities.rawValue)")
                     self.onServerIdentity?(hs.hostname)
                     self.serverScreenWidth = Int(hs.screenWidth)
                     self.serverScreenHeight = Int(hs.screenHeight)
                     self.stateQueue.sync { self.peerCapabilities = hs.capabilities }
+
+                    let (key, salt) = self.stateQueue.sync { (self.sessionPairingKey, self.sessionSalt) }
+                    if let key, salt.count == 16 {
+                        self.udpChannel.sendCipher = DatagramCipher.udpCipher(masterKey: key, sessionSalt: salt, clientToHost: true)
+                        self.udpChannel.receiveCipher = DatagramCipher.udpCipher(masterKey: key, sessionSalt: salt, clientToHost: false)
+                    }
 
                     let udpHost = self.udpTargetHost ?? self.serverHost ?? "127.0.0.1"
                     self.udpChannel.onReady = { [weak self] in
@@ -273,6 +344,61 @@ public class ClientCore {
         let sender = InputSender(tcpChannel: tcpChannel)
         sender.startCapturing(in: view)
         stateQueue.sync { inputSender = sender }
+    }
+
+    // MARK: - Session Security
+
+    private func sendHandshake(with pairing: PairingRecord) {
+        var salt = Data(count: 16)
+        _ = salt.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, 16, $0.baseAddress!) }
+        stateQueue.sync {
+            self.sessionSalt = salt
+            self.sessionPairingKey = pairing.key
+        }
+
+        let hs = HandshakePayload(hostname: ProcessInfo.processInfo.hostName,
+                                   screenWidth: 0, screenHeight: 0, scaleFactor: 1.0,
+                                   capabilities: [.streamConfiguration, .textClipboardSync],
+                                   pairingID: pairing.id,
+                                   sessionSalt: salt)
+        let header = PacketHeader(type: .handshake, sequence: 0, timestamp: 0)
+        var packet = header.serialize()
+        packet.append(hs.serialize())
+        tcpChannel.send(packet)
+        ERDLog.info("[Client] Handshake sent (paired as \(pairing.name))")
+    }
+
+    private func handleAudioPayload(_ payload: Data) {
+        guard payload.count >= 8 else {
+            audioPlayer.play(data: payload)
+            return
+        }
+        let frameId = payload.subdata(in: 0..<4).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+        let index = payload.subdata(in: 4..<6).withUnsafeBytes { $0.load(as: UInt16.self).littleEndian }
+        let total = payload.subdata(in: 6..<8).withUnsafeBytes { $0.load(as: UInt16.self).littleEndian }
+        let chunk = payload.subdata(in: 8..<payload.count)
+
+        guard total >= 1, index < total else { return }
+        if total == 1 {
+            audioPlayer.play(data: chunk)
+            return
+        }
+
+        stateQueue.sync {
+            if self.audioFragments.count > 64 { self.audioFragments.removeAll() }
+            var entry = self.audioFragments[frameId] ?? (chunks: [:], total: total)
+            entry.chunks[index] = chunk
+            self.audioFragments[frameId] = entry
+
+            if entry.chunks.count == Int(total) {
+                self.audioFragments.removeValue(forKey: frameId)
+                var assembled = Data()
+                for i in 0..<total {
+                    assembled.append(entry.chunks[i] ?? Data())
+                }
+                self.audioPlayer.play(data: assembled)
+            }
+        }
     }
 
     // MARK: - Stream Configuration

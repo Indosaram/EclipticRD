@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EclipticRD</title>
+  <style>
+    :root {
+      --bg: #141416;
+      --card-bg: #1e1f24;
+      --text: #f3f4f6;
+      --text-muted: #9ca3af;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --danger: #ef4444;
+      --border: #2e3138;
+      --success: #10b981;
+    }
+    body {
+      margin: 0;
+      padding: 24px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+    h1 {
+      font-size: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+    .panel {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 16px;
+      max-width: 600px;
+    }
+    .form-group {
+      display: flex;
+      flex-direction: column;
+      margin-bottom: 12px;
+    }
+    label {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+    input {
+      background: #111215;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 0.95rem;
+    }
+    .row {
+      display: flex;
+      gap: 12px;
+    }
+    .row .form-group {
+      flex: 1;
+    }
+    button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: 10px 16px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease;
+    }
+    button:hover {
+      background: var(--accent-hover);
+    }
+    button.danger {
+      background: var(--danger);
+    }
+    .button-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 12px;
+    }
+    #status-container {
+      margin-top: 16px;
+      font-size: 0.9rem;
+      line-height: 1.5;
+    }
+    .stats-table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+    }
+    .stats-table td {
+      padding: 4px 8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .canvas-container {
+      margin-top: 16px;
+      border: 1px dashed var(--border);
+      border-radius: 8px;
+      width: 100%;
+      height: 200px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--text-muted);
+      user-select: none;
+    }
+  </style>
+</head>
+<body>
+  <h1>EclipticRD Shell</h1>
+
+  <div class="panel">
+    <div class="row">
+      <div class="form-group">
+        <label for="host">Host</label>
+        <input type="text" id="host" value="127.0.0.1" />
+      </div>
+      <div class="form-group">
+        <label for="tcp-port">TCP Port</label>
+        <input type="number" id="tcp-port" value="19730" />
+      </div>
+      <div class="form-group">
+        <label for="udp-port">UDP Port</label>
+        <input type="number" id="udp-port" value="19731" />
+      </div>
+    </div>
+    <div class="form-group">
+      <label for="pin">PIN / Pairing ID</label>
+      <input type="text" id="pin" placeholder="Enter PIN (e.g. 123456) or leave blank for reconnect" />
+    </div>
+    <div class="button-row">
+      <button id="connect-btn" onclick="doConnect()">Connect</button>
+      <button id="disconnect-btn" class="danger" onclick="doDisconnect()">Disconnect</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h3>Session Stats</h3>
+    <div id="status-container">Disconnected</div>
+    <table class="stats-table">
+      <tr>
+        <td>Connected:</td>
+        <td id="stat-connected">false</td>
+      </tr>
+      <tr>
+        <td>Frames Decoded / Received:</td>
+        <td id="stat-frames">0</td>
+      </tr>
+      <tr>
+        <td>Audio Packets:</td>
+        <td id="stat-audio">0</td>
+      </tr>
+      <tr>
+        <td>Latency p50:</td>
+        <td id="stat-p50">-</td>
+      </tr>
+      <tr>
+        <td>Latency p99:</td>
+        <td id="stat-p99">-</td>
+      </tr>
+    </table>
+  </div>
+
+  <div class="panel">
+    <h3>Input Surface</h3>
+    <div class="canvas-container" id="input-surface">
+      Hover and click here to send input events
+    </div>
+  </div>
+
+  <script>
+    const { invoke } = window.__TAURI__.core || window.__TAURI__.tauri || {
+      invoke: async (cmd, args) => console.log('Tauri mock invoke:', cmd, args)
+    };
+
+    async function doConnect() {
+      const host = document.getElementById('host').value.trim();
+      const tcpPort = parseInt(document.getElementById('tcp-port').value, 10);
+      const udpPort = parseInt(document.getElementById('udp-port').value, 10);
+      const pinRaw = document.getElementById('pin').value.trim();
+      const pin = pinRaw.length > 0 ? pinRaw : null;
+
+      try {
+        document.getElementById('status-container').innerText = 'Connecting...';
+        const res = await invoke('connect', { host, tcpPort, udpPort, pin });
+        document.getElementById('status-container').innerText = `Connected: ${JSON.stringify(res)}`;
+      } catch (err) {
+        document.getElementById('status-container').innerText = `Error: ${err}`;
+      }
+    }
+
+    async function doDisconnect() {
+      try {
+        await invoke('disconnect');
+        document.getElementById('status-container').innerText = 'Disconnected';
+      } catch (err) {
+        document.getElementById('status-container').innerText = `Error disconnecting: ${err}`;
+      }
+    }
+
+    async function updateStats() {
+      try {
+        const stats = await invoke('stats');
+        document.getElementById('stat-connected').innerText = stats.connected;
+        document.getElementById('stat-frames').innerText = `${stats.frames_decoded} (assembled: ${stats.frames_received})`;
+        document.getElementById('stat-audio').innerText = stats.audio_packets_received;
+        document.getElementById('stat-p50').innerText = stats.latency_p50_ms != null ? `${stats.latency_p50_ms.toFixed(2)} ms` : 'n/a';
+        document.getElementById('stat-p99').innerText = stats.latency_p99_ms != null ? `${stats.latency_p99_ms.toFixed(2)} ms` : 'n/a';
+      } catch (e) {}
+    }
+
+    setInterval(updateStats, 500);
+
+    const surface = document.getElementById('input-surface');
+    surface.addEventListener('mousemove', (e) => {
+      const rect = surface.getBoundingClientRect();
+      invoke('send_input', {
+        event: {
+          event_type: 'MouseMove',
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top,
+          view_width: rect.width,
+          view_height: rect.height,
+          modifiers: 0,
+          scroll_dx: 0.0,
+          scroll_dy: 0.0
+        }
+      }).catch(() => {});
+    });
+
+    surface.addEventListener('mousedown', (e) => {
+      const rect = surface.getBoundingClientRect();
+      const eventType = e.button === 2 ? 'RightMouseDown' : 'LeftMouseDown';
+      invoke('send_input', {
+        event: {
+          event_type: eventType,
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top,
+          view_width: rect.width,
+          view_height: rect.height,
+          modifiers: 0,
+          scroll_dx: 0.0,
+          scroll_dy: 0.0
+        }
+      }).catch(() => {});
+    });
+
+    surface.addEventListener('mouseup', (e) => {
+      const rect = surface.getBoundingClientRect();
+      const eventType = e.button === 2 ? 'RightMouseUp' : 'LeftMouseUp';
+      invoke('send_input', {
+        event: {
+          event_type: eventType,
+          x: e.clientX - rect.left,
+          y: e.clientY - rect.top,
+          view_width: rect.width,
+          view_height: rect.height,
+          modifiers: 0,
+          scroll_dx: 0.0,
+          scroll_dy: 0.0
+        }
+      }).catch(() => {});
+    });
+
+    surface.addEventListener('contextmenu', (e) => e.preventDefault());
+  </script>
+</body>
+</html>

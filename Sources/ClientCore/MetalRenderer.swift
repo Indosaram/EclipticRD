@@ -3,7 +3,7 @@ import MetalKit
 import CoreVideo
 
 public class MetalRenderer: NSObject, MTKViewDelegate {
-    public var mtkView: MTKView?
+    public weak var mtkView: MTKView?
     private var device: MTLDevice?
     private var commandQueue: MTLCommandQueue?
     private var pipelineState: MTLRenderPipelineState?

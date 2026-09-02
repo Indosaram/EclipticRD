@@ -1,24 +1,30 @@
 # HostCore Knowledge Base
 
-## OVERVIEW
-Implementation of the host-side Remote Desktop logic: screen capture, hardware video encoding, and OS-level input injection.
+<!-- Score: 16 | Domain: Host capture, hardware encoding, OS input injection -->
 
-## STRUCTURE
-- `ServerCore.swift`: Entry point for hosting. Manages client connections and sub-modules.
-- `ScreenCapture.swift`: Uses `ScreenCaptureKit` for high-performance frame retrieval.
-- `VideoEncoder.swift`: Wraps `VideoToolbox` for hardware-accelerated H.264/HEVC encoding.
-- `InputReceiver.swift`: Converts incoming control payloads into `CGEvent` system calls.
-- `FrameSender.swift`: Orchestrates frame transmission timing and flow control.
+## OVERVIEW
+Host-side remote desktop engine orchestrating ScreenCaptureKit capture, VideoToolbox hardware encoding, and CGEvent input injection.
 
 ## WHERE TO LOOK
-- **Input Injection**: `InputReceiver.swift` (Requires Accessibility Permissions).
-- **Encoding Pipeline**: `VideoEncoder.swift` handles the transition from `CVPixelBuffer` to H.264 CMSampleBuffers.
-- **Performance**: Monitor `FrameSender.swift` for congestion control logic.
+| Task | File | Key Symbol |
+|------|------|------------|
+| Host Orchestration | `ServerCore.swift` | `ServerCore` |
+| Screen Capture | `ScreenCapture.swift` | `ScreenCapture`, `ScreenCaptureError` |
+| Video Compression | `VideoEncoder.swift` | `VideoEncoder`, `VideoEncoderError` |
+| Input Simulation | `InputReceiver.swift` | `InputReceiver` |
+| Frame Chunking | `FrameSender.swift` | `FrameSender` |
+
+## KEY INVARIANTS
+- **Keyframe Generation**: IDR frames are forced upon initial client connection and whenever packet loss exceeds recovery threshold.
+- **Color Space & Scaling**: Stream configuration defaults to Rec.709 with hardware-accelerated color conversion.
+- **Packet Fragmentation**: Frames exceeding MTU (1200 bytes) are split into `FrameChunkPayload` packets with monotonic sequence IDs.
 
 ## CONVENTIONS
-- **SCKit Integration**: Always check stream configuration constraints (e.g., color space).
-- **Buffer Recycling**: Ensure `CVPixelBufferPool` is used for efficient memory handling in VideoEncoder.
+- **Buffer Management**: Use `CVPixelBufferPool` for efficient VTCompressionSession allocation without frame copying.
+- **Capture Timing**: ScreenCaptureKit frames are handled on a high-priority serial dispatch queue; avoid locking or blocking.
+- **Accessibility**: Verify system input injection permissions before attempting `CGEventPost`.
 
 ## ANTI-PATTERNS
-- Do not perform expensive image processing on the main thread; use dedicated background dispatch queues.
-- Never use `CoreGraphics` screen capture (`CGDisplayCreateImage`); it is too slow for 60fps streaming.
+- Never use legacy `CGDisplayCreateImage` or `AVFoundation` display capture; SCKit is required for low-latency 60+ FPS.
+- Do not perform frame encoding or network I/O on the main thread.
+- Avoid dropping keyframes without notifying `ServerCore` to schedule an immediate IDR refresh.

@@ -28,11 +28,14 @@ public class BonjourBrowser {
 
     private var browser: NWBrowser?
     private let queue = DispatchQueue(label: "eclipticrd.bonjour")
+    private static let queueKey = DispatchSpecificKey<Bool>()
     private var hosts: [DiscoveredHost] = []
 
     public var onHostsChanged: (@Sendable ([DiscoveredHost]) -> Void)?
 
-    public init() {}
+    public init() {
+        queue.setSpecific(key: Self.queueKey, value: true)
+    }
 
     public func startBrowsing() {
         let params = NWParameters()
@@ -61,11 +64,17 @@ public class BonjourBrowser {
     }
 
     public func stopBrowsing() {
-        // Synchronize on queue to avoid data race with browseResultsChangedHandler
-        queue.sync {
-            browser?.cancel()
-            browser = nil
-            hosts = []
+        // Synchronize on queue to avoid data race with browseResultsChangedHandler.
+        // Inline execution prevents deadlock when called from onHostsChanged.
+        let work = {
+            self.browser?.cancel()
+            self.browser = nil
+            self.hosts = []
+        }
+        if DispatchQueue.getSpecific(key: Self.queueKey) == true {
+            work()
+        } else {
+            queue.sync { work() }
         }
     }
 }

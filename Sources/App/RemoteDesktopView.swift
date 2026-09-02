@@ -760,7 +760,7 @@ struct StatsOverlayView: View {
         let newStats = ClientCore.shared.getStats()
         stats = newStats
         fpsHistory.append(newStats.fps)
-        if fpsHistory.count > 30 {
+        if fpsHistory.count > 60 {
             fpsHistory.removeFirst()
         }
     }
@@ -1125,4 +1125,8 @@ struct MetalViewRepresentable: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: TrackingMTKView, context: Context) {}
+
+    static func dismantleNSView(_ nsView: TrackingMTKView, coordinator: ()) {
+        nsView.delegate = nil
+    }
 }

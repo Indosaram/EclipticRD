@@ -22,7 +22,7 @@ struct EclipticApp: App {
                 }
             }
             .preferredColorScheme(.dark)
-            .frame(minWidth: 450, minHeight: 400)
+            .frame(minWidth: 880, minHeight: 520)
         }
     }
 

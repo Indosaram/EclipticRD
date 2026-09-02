@@ -357,8 +357,8 @@ let stunResult = stunDone.wait(timeout: .now() + 10.0)
 test("STUN fetches public IP") {
     guard stunResult == .success else { return false }
     if let error = stunError {
-        print("    (STUN error: \(error) - may be offline)")
-        return true
+        print("    STUN lookup failed (no silent pass): \(error)")
+        return false
     }
     guard let ip = stunIP else { return false }
     print("    Public IP: \(ip):\(stunPort ?? 0)")
@@ -495,7 +495,11 @@ test("VideoEncoder creates and starts H.265 compression session") {
         }
 
         encoder.stop()
-        return true // Session creation itself is the main test
+        guard encodedCalled else {
+            print("    Session created but no encoded frame callback fired")
+            return false
+        }
+        return true
     } catch {
         print("    Failed: \(error)")
         return false
@@ -522,8 +526,8 @@ test("VideoDecoder initializes and accepts HEVC NALUs") {
     Thread.sleep(forTimeInterval: 0.2)
 
     decoder.stop()
-    print("    Decoder handled invalid data gracefully (no crash)")
-    return true // Main test: doesn't crash on bad data
+    // Garbage input must be rejected silently: no frame out, no crash
+    return !decodedFrame
 }
 
 // ============================================
@@ -657,24 +661,19 @@ test("ScrollWheel event with deltaX/Y sent via TCP") {
 print("\n[TEST 13] InputReceiver CGEvent Injection")
 
 test("InputReceiver creates and injects CGEvents") {
-    let receiver = InputReceiver(screenWidth: 1920, screenHeight: 1080)
+    // Without the Accessibility grant the receiver must no-op; with it the
+    // injection path is real. Either way the test no longer passes blind.
+    guard AXIsProcessTrusted() else {
+        print("    Accessibility permission not granted to the test runner")
+        return false
+    }
+    print("    NOTE: this test moves the real cursor to the host screen center")
 
-    // Test that the receiver can process input without crashing
+    let receiver = InputReceiver(screenWidth: 1920, screenHeight: 1080)
     let mouseMove = InputEventPayload(type: .mouseMove, x: 0.5, y: 0.5)
     receiver.handleInputEvent(mouseMove.serialize())
 
-    let keyDown = InputEventPayload(type: .keyDown, x: 0, y: 0, keyCode: 0,
-                                     modifiers: [.shift, .command])
-    receiver.handleInputEvent(keyDown.serialize())
-
-    let scroll = InputEventPayload(type: .scrollWheel, x: 0.5, y: 0.5,
-                                    scrollDeltaX: 0, scrollDeltaY: 5)
-    receiver.handleInputEvent(scroll.serialize())
-
     receiver.updateScreenSize(width: 2560, height: 1440)
-
-    // If AXIsProcessTrusted() is false, events won't inject but it shouldn't crash
-    print("    InputReceiver processed mouse/key/scroll events without crash")
     return true
 }
 
@@ -774,12 +773,151 @@ test("Encode a pixel buffer to H.265 and decode it back") {
     decoder.stop()
 
     if decResult == .timedOut {
-        print("    ⚠️ Decode timed out (encoded data may need more NALUs)")
-        // Encoding worked, decode needs valid parameter sets chain — partial success
-        return encodedData != nil && (encodedData?.count ?? 0) > 0
+        print("    ⚠️ Decode timed out")
+        return false
     }
 
     return decodedPixelBuffer != nil
+}
+
+// ============================================
+// TEST 15: TLS-PSK Channel Loopback
+// ============================================
+print("\n[TEST 15] TLS-PSK Encrypted Channel Loopback")
+
+let tlsDone = DispatchSemaphore(value: 0)
+var tlsServerReceived: Data?
+var tlsClientConnected = false
+var tlsServerConnected = false
+let tlsSharedKey = ERDCrypto.randomKey()
+let tlsPSK = ERDPSK(identity: "erd-test", key: tlsSharedKey)
+
+let tlsServer = TCPChannel(security: .psk([tlsPSK]))
+let tlsClient = TCPChannel(security: .psk([tlsPSK]))
+
+var tlsSetupError: Error?
+do {
+    try tlsServer.startListening(port: 19780)
+} catch {
+    tlsSetupError = error
+}
+tlsServer.onConnect = { tlsServerConnected = true }
+tlsServer.onReceive = { data in
+    tlsServerReceived = data
+    tlsDone.signal()
+}
+tlsClient.onConnect = {
+    tlsClientConnected = true
+    let header = PacketHeader(type: .ping, sequence: 7, timestamp: 99)
+    var packet = header.serialize()
+    packet.append(Data("over-tls-psk".utf8))
+    tlsClient.send(packet)
+}
+
+tlsClient.onDisconnect = { }
+Thread.sleep(forTimeInterval: 0.2)
+tlsClient.connect(host: "127.0.0.1", port: 19780)
+let tlsResult = tlsDone.wait(timeout: .now() + 6.0)
+let clientFailure = tlsClient.lastFailureDescription
+let serverFailure = tlsServer.lastFailureDescription
+tlsClient.stop()
+tlsServer.stop()
+
+test("TCP TLS-PSK handshake completes and carries traffic") {
+    if let tlsSetupError {
+        print("    Listener setup failed: \(tlsSetupError)")
+        return false
+    }
+    guard tlsClientConnected else {
+        print("    Client TLS handshake did not complete, failure: \(clientFailure ?? "none"), state: \(tlsClient.connectionStateDescription ?? "nil")")
+        return false
+    }
+    guard tlsServerConnected else {
+        print("    Server never accepted the TLS connection, failure: \(serverFailure ?? "none"), state: \(tlsServer.connectionStateDescription ?? "nil")")
+        return false
+    }
+    guard tlsResult == .success, let received = tlsServerReceived else {
+        print("    No payload crossed the encrypted channel")
+        return false
+    }
+    guard let header = PacketHeader.deserialize(from: received) else { return false }
+    let payload = received.subdata(in: ERDConstants.packetHeaderSize..<received.count)
+    return header.type == .ping && header.sequence == 7 && payload == Data("over-tls-psk".utf8)
+}
+
+// ============================================
+// TEST 16: UDP Burst Delivery
+// ============================================
+print("\n[TEST 16] UDP Burst Delivery (20 datagrams)")
+
+let burstDone = DispatchSemaphore(value: 0)
+let burstTotal = 20
+var burstReceived = 0
+
+let burstReceiver = UDPChannel()
+let burstSender = UDPChannel()
+try burstReceiver.startListening(port: 19781)
+burstReceiver.onReceive = { data, _ in
+    burstReceived += 1
+    if burstReceived >= burstTotal { burstDone.signal() }
+}
+Thread.sleep(forTimeInterval: 0.2)
+burstSender.connect(host: "127.0.0.1", port: 19781)
+Thread.sleep(forTimeInterval: 0.3)
+for i in 0..<burstTotal {
+    burstSender.sendPacket(type: .ping, payload: Data([UInt8(i)]))
+}
+let burstResult = burstDone.wait(timeout: .now() + 3.0)
+burstSender.stop()
+burstReceiver.stop()
+
+test("UDP loopback delivers a rapid burst without loss") {
+    print("    Received \(burstReceived)/\(burstTotal) (result: \(burstResult))")
+    return burstReceived >= burstTotal
+}
+
+// ============================================
+// TEST 17: Signaling Round-trip (real ntfy.sh)
+// ============================================
+print("\n[TEST 17] Signaling Round-trip via ntfy.sh (real network)")
+
+let sigPIN = ERDCrypto.randomPIN()
+let signalingServer = SignalingClient(pin: sigPIN, role: "server")
+let signalingClient = SignalingClient(pin: sigPIN, role: "client")
+let serverCandidate = SessionCandidate(role: "server", localIP: "127.0.0.1", localPort: 19730,
+                                        publicIP: "198.51.100.7", publicPort: 2)
+let clientCandidate = SessionCandidate(role: "client", localIP: "127.0.0.1", localPort: 3,
+                                        publicIP: "198.51.100.9", publicPort: 4)
+
+var serverReceivedCandidate: SessionCandidate?
+var clientReceivedCandidate: SessionCandidate?
+var signalingFailure: Error?
+let signalingDone = DispatchSemaphore(value: 0)
+
+Task {
+    do { clientReceivedCandidate = try await signalingClient.exchangeCandidate(clientCandidate) }
+    catch { signalingFailure = error }
+    signalingDone.signal()
+}
+Task {
+    do { serverReceivedCandidate = try await signalingServer.exchangeCandidate(serverCandidate) }
+    catch { signalingFailure = error }
+    signalingDone.signal()
+}
+for _ in 0..<2 where signalingDone.wait(timeout: .now() + 30) == .success {}
+signalingServer.stop()
+signalingClient.stop()
+
+test("Both peers exchange encrypted candidates through ntfy.sh") {
+    if let signalingFailure {
+        print("    Signaling failed (no silent pass): \(signalingFailure)")
+        return false
+    }
+    guard let serverGot = serverReceivedCandidate, let clientGot = clientReceivedCandidate else {
+        print("    One peer never received a candidate")
+        return false
+    }
+    return serverGot.role == "client" && clientGot.role == "server"
 }
 
 // ============================================

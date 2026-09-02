@@ -1,0 +1,134 @@
+name: Rust CI Build Matrix
+
+on:
+  push:
+    paths:
+      - "clients/rust/**"
+      - ".github/workflows/rust-matrix.yml"
+  pull_request:
+    paths:
+      - "clients/rust/**"
+      - ".github/workflows/rust-matrix.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }} (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+            target: aarch64-apple-darwin
+            features: macos-host
+            binary_name: erd-host
+            artifact_name: eclipticrd-macos-aarch64
+          - name: Linux
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            features: default
+            binary_name: erd-client
+            artifact_name: eclipticrd-linux-x86_64
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            features: default
+            binary_name: erd-client.exe
+            artifact_name: eclipticrd-windows-x86_64
+
+    defaults:
+      run:
+        working-directory: clients/rust
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Add Rust Target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Install Linux build dependencies (FFmpeg / Clang / Audio)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang \
+            libasound2-dev \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libclang-dev \
+            libswresample-dev \
+            libswscale-dev \
+            libudev-dev \
+            libva-dev \
+            libwayland-dev \
+            libx264-dev \
+            pkg-config
+
+      - name: Install FFmpeg dependencies (Windows best-effort)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          # Documented best-effort: Chocolatey / vcpkg provide FFmpeg shared headers & libs
+          echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
+          choco install ffmpeg-shared --yes || true
+
+      - name: Build erd-host
+        run: cargo build -p erd-host --features ${{ matrix.features }} --release --target ${{ matrix.target }}
+
+      - name: Build Workspace Binaries
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+
+      - name: Run Workspace Tests
+        run: |
+          # Test workspace where feasible on the host platform
+          cargo test --workspace
+
+      - name: Stage Artifacts (macOS / Linux)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p ../../staging
+          # Copy target release binaries
+          for bin in erd-host erd-client tauri-shell; do
+            if [ -f "target/${{ matrix.target }}/release/${bin}" ]; then
+              cp "target/${{ matrix.target }}/release/${bin}" ../../staging/
+            elif [ -f "target/release/${bin}" ]; then
+              cp "target/release/${bin}" ../../staging/
+            fi
+          done
+          # Copy packaging assets
+          if [ -d "packaging" ]; then
+            cp -r packaging ../../staging/
+          fi
+
+      - name: Stage Artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path ..\..\staging | Out-Null
+          # Copy target release executables
+          @("erd-host.exe", "erd-client.exe", "tauri-shell.exe") | ForEach-Object {
+            $targetPath = "target\${{ matrix.target }}\release\$_"
+            $rootPath = "target\release\$_"
+            if (Test-Path $targetPath) {
+              Copy-Item $targetPath ..\..\staging\
+            } elseif (Test-Path $rootPath) {
+              Copy-Item $rootPath ..\..\staging\
+            }
+          }
+          # Copy packaging assets
+          if (Test-Path "packaging") {
+            Copy-Item -Recurse packaging ..\..\staging\
+          }
+
+      - name: Upload Binary Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: staging/
+          if-no-files-found: warn

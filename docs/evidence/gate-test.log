@@ -1,0 +1,230 @@
+   Compiling erd-decode v0.1.0 (/Users/indo/code/project/EclipticRD-Rewrite/clients/rust/erd-decode)
+   Compiling tauri-shell v0.1.0 (/Users/indo/code/project/EclipticRD-Rewrite/clients/rust/tauri-shell)
+   Compiling erd-host v0.1.0 (/Users/indo/code/project/EclipticRD-Rewrite/clients/rust/erd-host)
+   Compiling erd-app v0.1.0 (/Users/indo/code/project/EclipticRD-Rewrite/clients/rust/erd-app)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.72s
+     Running unittests src/lib.rs (target/debug/deps/erd_app-23b72981edc297d0)
+
+running 4 tests
+test latency::tests::ring_buffer_wraparound_maintains_latest_capacity ... ok
+test latency::tests::empty_recorder_stats ... ok
+test latency::tests::single_sample_stats ... ok
+test latency::tests::synthetic_1000_sample_distribution_sanity ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/bin/erd_client.rs (target/debug/deps/erd_client-493c5d3b8a1d1582)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/core_semantics.rs (target/debug/deps/core_semantics-7b82d272e5cb2800)
+
+running 6 tests
+test abr_reduces_above_five_percent_and_recovers_after_thirty_stable_seconds ... ok
+test windows_virtual_keys_map_to_macos_key_codes ... ok
+test input_normalization_flips_y_and_clamps_edges ... ok
+test audio_reassembly_skips_lost_frame_when_a_newer_frame_arrives ... ok
+test audio_reassembly_accepts_out_of_order_fragments ... ok
+test clipboard_suppresses_echo_duplicate_concealed_and_oversized_text ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/media_reassembly.rs (target/debug/deps/media_reassembly-8fff50eb6a071ec1)
+
+running 3 tests
+test cursor_updates_are_clamped_for_overlay_use ... ok
+test video_reassembly_enforces_protocol_caps ... ok
+test video_chunks_reassemble_out_of_order_and_from_orphans ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/session_mock.rs (target/debug/deps/session_mock-8986ffee105cd5d9)
+
+running 4 tests
+test pre_ready_input_is_refused ... ok
+test connect_with_pairing_direct_round_trip ... ok
+test mock_server_pairing_handshake_and_input_round_trip ... ok
+test handshake_ack_timeout_is_reported ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.29s
+
+     Running unittests src/lib.rs (target/debug/deps/erd_decode-a7f8eab32b103e20)
+
+running 2 tests
+test tests::corrupt_length_prefix_is_a_graceful_error ... ok
+test tests::parameter_set_blob_keeps_four_byte_lengths ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/erd_host-b8cd88778c2499dd)
+
+running 14 tests
+test encode_vt::tests::lan_bitrate_is_clamped_to_requested_range ... ok
+test windows_logic::tests::normalizes_target_monitor_into_virtual_desktop ... ok
+test session::tests::pre_auth_gating_refuses_input_and_control ... ok
+test windows_logic::tests::hashes_and_suppresses_clipboard_echo ... ok
+test inject_macos::tests::coordinates_are_clamped_and_nan_is_rejected ... ok
+test inject_macos::tests::normalized_coordinates_map_to_absolute_host_pixels ... ok
+test windows_logic::tests::clipboard_hash_is_utf8_byte_based ... ok
+test session::tests::timestamp_stats_round_trip ... ok
+test windows_logic::tests::maps_alphabet_digits_navigation_and_modifiers ... ok
+test session::tests::lockout_disables_bootstrap_after_five_failures ... ok
+test encode_vt::tests::annex_b_is_converted_to_avcc_and_parameter_sets_prepend_keyframes ... ok
+test session::tests::direction_keys_arm_and_only_matching_direction_opens ... ok
+test session::tests::pairing_store_mirrors_swift_json_and_is_mode_0600 ... ok
+test session::tests::scripted_loopback_pairs_arms_ciphers_and_receives_ten_timestamped_frames ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.10s
+
+     Running unittests src/lib.rs (target/debug/deps/erd_net-7a91df08a1125b0b)
+
+running 24 tests
+test tls_psk::tests::bootstrap_lockout_matches_identity_semantics ... ok
+test stun::tests::parses_xor_mapped_ipv4_address ... ok
+test stun::tests::rejects_wrong_transaction_id ... ok
+test stun::tests::binding_request_has_rfc5389_header ... ok
+test tls_psk::tests::pairing_identity_uses_opaque_id ... ok
+test stun::tests::skips_padded_unknown_attribute_and_parses_fallback ... ok
+test udp_gcm::tests::hkdf_rfc5869_case_3 ... ok
+test udp_gcm::tests::hkdf_rfc5869_case_1 ... ok
+test udp_gcm::tests::direction_derivation_matches_v3_vectors ... ok
+test signaling::tests::candidate_json_uses_wire_property_names ... ok
+test signaling::tests::live_ntfy_round_trip_when_enabled ... ok
+test udp_gcm::tests::direction_keys_are_incompatible ... ok
+test udp_gcm::tests::aad_mismatch_rejected ... ok
+test udp_gcm::tests::tampered_datagram_rejected ... ok
+test udp_gcm::tests::duplicate_datagram_rejected ... ok
+test udp_gcm::tests::seal_open_round_trip ... ok
+test udp_gcm::tests::complete_datagram_authenticates_header ... ok
+test signaling::tests::topic_is_stable_and_within_ntfy_limit ... ok
+test signaling::tests::payload_encrypt_decrypt_round_trip ... ok
+test signaling::tests::role_filter_searches_newest_to_oldest ... ok
+test udp_gcm::tests::stale_datagram_outside_window_rejected ... ok
+test tls_psk::tests::framing_handles_partial_reads_and_drops_oversized_buffer ... ok
+test tls_psk::tests::psk_loopback_completes_handshake_and_framed_echo ... ok
+test tls_psk::tests::bootstrap_key_is_deterministic_per_pin ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s
+
+     Running unittests src/lib.rs (target/debug/deps/erd_proto-cf18e8c34ed4b427)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/protocol_v3.rs (target/debug/deps/protocol_v3-f26591f4367be6cf)
+
+running 43 tests
+test packet_header_rejects_bad_magic_and_unknown_type ... ok
+test handshake_v3_round_trip_carries_identity_salt_and_all_caps ... ok
+test invalid_utf8_is_rejected ... ok
+test control_rejects_unknown_message_and_payload_enum_values ... ok
+test cursor_and_audio_payloads_round_trip ... ok
+test control_payloads_match_little_endian_layouts ... ok
+test handshake_preserves_unknown_caps_and_rejects_wrong_version ... ok
+test audio_fragment_rejects_invalid_index_count_and_data_length ... ok
+test packet_header_round_trips_every_packet_type ... ok
+test input_normalization_clamps_and_flips_bottom_left_y ... ok
+test every_control_payload_body_round_trips ... ok
+test clipboard_update_rejects_more_than_four_kib_utf8 ... ok
+test handshake_rejects_oversized_pairing_id ... ok
+test every_control_message_type_round_trips ... ok
+test packet_header_matches_swift_vector ... ok
+test input_event_round_trips_every_type_and_modifier_bit ... ok
+test pairing_grant_rejects_wrong_key_length ... ok
+test pairing_payloads_round_trip_and_match_swift_request_vector ... ok
+test tcp_frame_reader_buffers_partial_reads_and_splits_coalesced_frames ... ok
+test tcp_frame_reader_drops_invalid_buffer_then_resynchronizes ... ok
+test tcp_frame_writer_matches_vector_and_rejects_invalid_lengths ... ok
+test truncated_audio_fragment ... ok
+test truncated_audio_fragment_header ... ok
+test truncated_bitrate_adjust ... ok
+test truncated_clipboard_sync_error ... ok
+test truncated_clipboard_sync_request ... ok
+test truncated_clipboard_sync_update ... ok
+test truncated_control_message ... ok
+test truncated_cursor_update ... ok
+test truncated_frame_chunk_header ... ok
+test truncated_frame_header ... ok
+test truncated_handshake ... ok
+test truncated_input_event ... ok
+test truncated_packet_header ... ok
+test truncated_pairing_grant ... ok
+test truncated_pairing_reject ... ok
+test truncated_pairing_request ... ok
+test truncated_stream_configuration ... ok
+test truncated_stream_configuration_error ... ok
+test truncated_stream_configuration_reject ... ok
+test truncated_stream_configuration_request ... ok
+test truncated_stream_configuration_response ... ok
+test video_payloads_round_trip_and_enforce_caps ... ok
+
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/debug/deps/erd_render-95d639809a711d4d)
+
+running 1 test
+test audio::tests::synthetic_five_second_stream_drains_without_underrun ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running unittests src-tauri/src/lib.rs (target/debug/deps/tauri_shell_lib-0a3a49e00f17e362)
+
+running 4 tests
+test tests::convert_keyboard_input_payload ... ok
+test tests::app_state_lifecycle ... ok
+test tests::latency_tracker_calculates_percentiles ... ok
+test tests::convert_pointer_input_payload ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src-tauri/src/main.rs (target/debug/deps/tauri_shell-0ab7e79879b48f65)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests erd_app
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests erd_decode
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests erd_host
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests erd_net
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests erd_proto
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests erd_render
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests tauri_shell_lib
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

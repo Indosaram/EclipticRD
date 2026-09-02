@@ -1,0 +1,390 @@
+//! AES-256-GCM protection for v3 UDP datagrams.
+
+use std::collections::HashMap;
+
+use aes_gcm::{
+    aead::{Aead, KeyInit, Payload},
+    Aes256Gcm, Nonce,
+};
+use erd_proto::{PacketHeader, WireCodec};
+use hkdf::Hkdf;
+use sha2::Sha256;
+use thiserror::Error;
+
+pub const NONCE_SIZE: usize = 12;
+pub const TAG_SIZE: usize = 16;
+pub const REPLAY_WINDOW_SIZE: u64 = 4096;
+const HEADER_SIZE: usize = PacketHeader::SIZE;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    ClientToHost,
+    HostToClient,
+}
+
+impl Direction {
+    fn info(self) -> &'static [u8] {
+        match self {
+            Self::ClientToHost => b"erd/udp-c2h/v3",
+            Self::HostToClient => b"erd/udp-h2c/v3",
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DatagramError {
+    #[error("pairing key must be 32 bytes")]
+    InvalidMasterKey,
+    #[error("session salt must be 16 bytes")]
+    InvalidSessionSalt,
+    #[error("datagram counter exhausted")]
+    CounterExhausted,
+    #[error("datagram is too short")]
+    Truncated,
+    #[error("datagram nonce prefix does not match this direction")]
+    WrongDirection,
+    #[error("datagram is duplicated or outside the replay window")]
+    Replay,
+    #[error("datagram authentication failed")]
+    Authentication,
+    #[error("invalid packet header: {0}")]
+    InvalidHeader(#[from] erd_proto::CodecError),
+}
+
+#[derive(Debug, Default)]
+struct ReplayWindow {
+    highest_received: u64,
+    received_any: bool,
+    blocks: HashMap<u64, u64>,
+}
+
+impl ReplayWindow {
+    fn can_accept(&self, counter: u64) -> bool {
+        if self.received_any
+            && counter < self.highest_received
+            && self.highest_received - counter >= REPLAY_WINDOW_SIZE
+        {
+            return false;
+        }
+
+        let block = counter / 64;
+        let mask = 1_u64 << (counter % 64);
+        self.blocks
+            .get(&block)
+            .map_or(true, |seen| seen & mask == 0)
+    }
+
+    fn record(&mut self, counter: u64) {
+        let block = counter / 64;
+        let mask = 1_u64 << (counter % 64);
+        *self.blocks.entry(block).or_default() |= mask;
+
+        if !self.received_any || counter > self.highest_received {
+            self.highest_received = counter;
+            self.received_any = true;
+        }
+
+        let oldest_counter = self
+            .highest_received
+            .saturating_sub(REPLAY_WINDOW_SIZE.saturating_sub(1));
+        let oldest_block = oldest_counter / 64;
+        self.blocks.retain(|block, _| *block >= oldest_block);
+    }
+}
+
+/// Direction-specific UDP traffic cipher with send-counter and replay state.
+pub struct DatagramCipher {
+    cipher: Aes256Gcm,
+    nonce_prefix: [u8; 4],
+    send_counter: u64,
+    replay: ReplayWindow,
+}
+
+impl DatagramCipher {
+    pub fn derive(
+        master_key: &[u8],
+        session_salt: &[u8],
+        direction: Direction,
+    ) -> Result<Self, DatagramError> {
+        if master_key.len() != 32 {
+            return Err(DatagramError::InvalidMasterKey);
+        }
+        if session_salt.len() != 16 {
+            return Err(DatagramError::InvalidSessionSalt);
+        }
+
+        let udp_ikm = hkdf_sha256(master_key, session_salt, b"erd/udp-ikm/v3", 32);
+        let key = hkdf_sha256(&udp_ikm, session_salt, direction.info(), 32);
+        let mut nonce_info = direction.info().to_vec();
+        nonce_info.extend_from_slice(b"/nonce");
+        let prefix = hkdf_sha256(&udp_ikm, session_salt, &nonce_info, 4);
+
+        let mut nonce_prefix = [0_u8; 4];
+        nonce_prefix.copy_from_slice(&prefix);
+        Ok(Self {
+            cipher: Aes256Gcm::new_from_slice(&key).expect("validated AES-256 key length"),
+            nonce_prefix,
+            send_counter: 0,
+            replay: ReplayWindow::default(),
+        })
+    }
+
+    /// Seals a payload as `nonce || ciphertext || tag`, authenticating `aad`.
+    pub fn seal(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, DatagramError> {
+        self.send_counter = self
+            .send_counter
+            .checked_add(1)
+            .ok_or(DatagramError::CounterExhausted)?;
+
+        let mut nonce_bytes = [0_u8; NONCE_SIZE];
+        nonce_bytes[..4].copy_from_slice(&self.nonce_prefix);
+        nonce_bytes[4..].copy_from_slice(&self.send_counter.to_be_bytes());
+        let ciphertext = self
+            .cipher
+            .encrypt(
+                Nonce::from_slice(&nonce_bytes),
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .map_err(|_| DatagramError::Authentication)?;
+
+        let mut output = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
+        output.extend_from_slice(&nonce_bytes);
+        output.extend_from_slice(&ciphertext);
+        Ok(output)
+    }
+
+    /// Opens `nonce || ciphertext || tag`, rejecting tampering and replay.
+    pub fn open(&mut self, sealed: &[u8], aad: &[u8]) -> Result<Vec<u8>, DatagramError> {
+        if sealed.len() < NONCE_SIZE + TAG_SIZE {
+            return Err(DatagramError::Truncated);
+        }
+        if sealed[..4] != self.nonce_prefix {
+            return Err(DatagramError::WrongDirection);
+        }
+
+        let counter = u64::from_be_bytes(
+            sealed[4..NONCE_SIZE]
+                .try_into()
+                .expect("nonce counter is eight bytes"),
+        );
+        if !self.replay.can_accept(counter) {
+            return Err(DatagramError::Replay);
+        }
+
+        let plaintext = self
+            .cipher
+            .decrypt(
+                Nonce::from_slice(&sealed[..NONCE_SIZE]),
+                Payload {
+                    msg: &sealed[NONCE_SIZE..],
+                    aad,
+                },
+            )
+            .map_err(|_| DatagramError::Authentication)?;
+        self.replay.record(counter);
+        Ok(plaintext)
+    }
+
+    /// Seals a complete v3 datagram: plaintext header plus protected payload.
+    pub fn seal_datagram(
+        &mut self,
+        header: &PacketHeader,
+        payload: &[u8],
+    ) -> Result<Vec<u8>, DatagramError> {
+        let header_bytes = header.encode()?;
+        let sealed = self.seal(payload, &header_bytes)?;
+        let mut datagram = Vec::with_capacity(header_bytes.len() + sealed.len());
+        datagram.extend_from_slice(&header_bytes);
+        datagram.extend_from_slice(&sealed);
+        Ok(datagram)
+    }
+
+    /// Opens a complete v3 datagram and returns its validated header and payload.
+    pub fn open_datagram(
+        &mut self,
+        datagram: &[u8],
+    ) -> Result<(PacketHeader, Vec<u8>), DatagramError> {
+        if datagram.len() < HEADER_SIZE + NONCE_SIZE + TAG_SIZE {
+            return Err(DatagramError::Truncated);
+        }
+        let header_bytes = &datagram[..HEADER_SIZE];
+        let header = PacketHeader::decode(header_bytes)?;
+        let payload = self.open(&datagram[HEADER_SIZE..], header_bytes)?;
+        Ok((header, payload))
+    }
+}
+
+pub(crate) fn hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], length: usize) -> Vec<u8> {
+    let hkdf = Hkdf::<Sha256>::new(Some(salt), ikm);
+    let mut output = vec![0_u8; length];
+    hkdf.expand(info, &mut output)
+        .expect("all protocol HKDF output lengths are valid");
+    output
+}
+
+#[cfg(test)]
+mod tests {
+    use erd_proto::{PacketType, WireCodec};
+
+    use super::*;
+
+    const MASTER_KEY: [u8; 32] = [0x42; 32];
+    const SESSION_SALT: [u8; 16] = [0x24; 16];
+    const AAD: &[u8] = b"erd-packet-header";
+
+    fn matching_pair() -> (DatagramCipher, DatagramCipher) {
+        (
+            DatagramCipher::derive(&MASTER_KEY, &SESSION_SALT, Direction::ClientToHost).unwrap(),
+            DatagramCipher::derive(&MASTER_KEY, &SESSION_SALT, Direction::ClientToHost).unwrap(),
+        )
+    }
+
+    #[test]
+    fn hkdf_rfc5869_case_1() {
+        let ikm = [0x0b; 22];
+        let salt = (0x00_u8..=0x0c).collect::<Vec<_>>();
+        let info = (0xf0_u8..=0xf9).collect::<Vec<_>>();
+        assert_eq!(
+            hkdf_sha256(&ikm, &salt, &info, 42),
+            [
+                0x3c, 0xb2, 0x5f, 0x25, 0xfa, 0xac, 0xd5, 0x7a, 0x90, 0x43, 0x4f, 0x64, 0xd0, 0x36,
+                0x2f, 0x2a, 0x2d, 0x2d, 0x0a, 0x90, 0xcf, 0x1a, 0x5a, 0x4c, 0x5d, 0xb0, 0x2d, 0x56,
+                0xec, 0xc4, 0xc5, 0xbf, 0x34, 0x00, 0x72, 0x08, 0xd5, 0xb8, 0x87, 0x18, 0x58, 0x65,
+            ]
+        );
+    }
+
+    #[test]
+    fn hkdf_rfc5869_case_3() {
+        let ikm = [0x0b; 22];
+        assert_eq!(
+            hkdf_sha256(&ikm, &[], &[], 42),
+            [
+                0x8d, 0xa4, 0xe7, 0x75, 0xa5, 0x63, 0xc1, 0x8f, 0x71, 0x5f, 0x80, 0x2a, 0x06, 0x3c,
+                0x5a, 0x31, 0xb8, 0xa1, 0x1f, 0x5c, 0x5e, 0xe1, 0x87, 0x9e, 0xc3, 0x45, 0x4e, 0x5f,
+                0x3c, 0x73, 0x8d, 0x2d, 0x9d, 0x20, 0x13, 0x95, 0xfa, 0xa4, 0xb6, 0x1a, 0x96, 0xc8,
+            ]
+        );
+    }
+
+    #[test]
+    fn direction_derivation_matches_v3_vectors() {
+        let udp_ikm = hkdf_sha256(&MASTER_KEY, &SESSION_SALT, b"erd/udp-ikm/v3", 32);
+        assert_eq!(
+            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"erd/udp-c2h/v3", 32),
+            [
+                0x7b, 0x6b, 0xe7, 0xd1, 0xaa, 0xe9, 0xb3, 0xd2, 0x3a, 0x4c, 0xb7, 0xcc, 0x9b, 0x56,
+                0x44, 0xcd, 0x88, 0x89, 0x38, 0xdc, 0x81, 0x29, 0x1b, 0x6e, 0x7f, 0x76, 0x98, 0x08,
+                0x37, 0xa0, 0x79, 0x99,
+            ]
+        );
+        assert_eq!(
+            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"erd/udp-c2h/v3/nonce", 4),
+            [0xe2, 0x6c, 0x23, 0xc1]
+        );
+        assert_eq!(
+            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"erd/udp-h2c/v3", 32),
+            [
+                0x13, 0x56, 0x91, 0xaf, 0x33, 0x8c, 0x20, 0x5f, 0x66, 0x92, 0x40, 0xb4, 0x6b, 0xc4,
+                0x34, 0x86, 0x8d, 0x85, 0xfa, 0x66, 0xf8, 0x36, 0xe0, 0x10, 0xf9, 0x1d, 0x27, 0x05,
+                0xac, 0xc9, 0xa5, 0x16,
+            ]
+        );
+        assert_eq!(
+            hkdf_sha256(&udp_ikm, &SESSION_SALT, b"erd/udp-h2c/v3/nonce", 4),
+            [0xcb, 0xbf, 0xd2, 0xe6]
+        );
+    }
+
+    #[test]
+    fn seal_open_round_trip() {
+        let (mut sender, mut receiver) = matching_pair();
+        let plaintext = (0..1000).map(|n| (n % 251) as u8).collect::<Vec<_>>();
+        let datagram = sender.seal(&plaintext, AAD).unwrap();
+        assert_eq!(datagram.len(), plaintext.len() + NONCE_SIZE + TAG_SIZE);
+        assert_eq!(receiver.open(&datagram, AAD).unwrap(), plaintext);
+    }
+
+    #[test]
+    fn tampered_datagram_rejected() {
+        let (mut sender, mut receiver) = matching_pair();
+        let mut datagram = sender.seal(b"payload", AAD).unwrap();
+        *datagram.last_mut().unwrap() ^= 0xff;
+        assert!(matches!(
+            receiver.open(&datagram, AAD),
+            Err(DatagramError::Authentication)
+        ));
+    }
+
+    #[test]
+    fn aad_mismatch_rejected() {
+        let (mut sender, mut receiver) = matching_pair();
+        let datagram = sender.seal(b"payload", AAD).unwrap();
+        assert!(matches!(
+            receiver.open(&datagram, b"different"),
+            Err(DatagramError::Authentication)
+        ));
+    }
+
+    #[test]
+    fn duplicate_datagram_rejected() {
+        let (mut sender, mut receiver) = matching_pair();
+        let datagram = sender.seal(b"once", AAD).unwrap();
+        assert_eq!(receiver.open(&datagram, AAD).unwrap(), b"once");
+        assert!(matches!(
+            receiver.open(&datagram, AAD),
+            Err(DatagramError::Replay)
+        ));
+    }
+
+    #[test]
+    fn stale_datagram_outside_window_rejected() {
+        let (mut sender, mut receiver) = matching_pair();
+        let mut first = Vec::new();
+        let mut latest = Vec::new();
+        for index in 0..=REPLAY_WINDOW_SIZE + 8 {
+            let datagram = sender.seal(b"stale", AAD).unwrap();
+            if index == 0 {
+                first = datagram.clone();
+            }
+            latest = datagram;
+        }
+        assert_eq!(receiver.open(&latest, AAD).unwrap(), b"stale");
+        assert!(matches!(
+            receiver.open(&first, AAD),
+            Err(DatagramError::Replay)
+        ));
+    }
+
+    #[test]
+    fn direction_keys_are_incompatible() {
+        let mut sender =
+            DatagramCipher::derive(&MASTER_KEY, &SESSION_SALT, Direction::ClientToHost).unwrap();
+        let mut wrong_receiver =
+            DatagramCipher::derive(&MASTER_KEY, &SESSION_SALT, Direction::HostToClient).unwrap();
+        let datagram = sender.seal(b"cross", AAD).unwrap();
+        assert!(matches!(
+            wrong_receiver.open(&datagram, AAD),
+            Err(DatagramError::WrongDirection)
+        ));
+    }
+
+    #[test]
+    fn complete_datagram_authenticates_header() {
+        let header = PacketHeader::new(PacketType::FrameChunk, 7, 9, 1);
+        let (mut sender, mut receiver) = matching_pair();
+        let mut datagram = sender.seal_datagram(&header, b"payload").unwrap();
+        let (opened_header, opened_payload) = receiver.open_datagram(&datagram).unwrap();
+        assert_eq!(opened_header, header);
+        assert_eq!(opened_payload, b"payload");
+
+        let (mut sender, mut receiver) = matching_pair();
+        datagram = sender.seal_datagram(&header, b"payload").unwrap();
+        datagram[3] ^= 1;
+        assert!(receiver.open_datagram(&datagram).is_err());
+        assert_eq!(header.encode().unwrap().len(), PacketHeader::SIZE);
+    }
+}

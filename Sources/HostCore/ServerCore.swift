@@ -10,7 +10,7 @@ public class ServerCore {
     private let udpChannel = UDPChannel()
     private var frameSender: FrameSender?
     private var inputReceiver: InputReceiver?
-    private let screenCapture = ScreenCapture()
+    private let screenCapture: FrameSource
     private var videoEncoder: VideoEncoder?
     private var hostname: String = ""
     public private(set) var isRunning = false
@@ -29,26 +29,52 @@ public class ServerCore {
     private var activeStreamConfig: StreamConfiguration?
 
     public var onRunningChanged: (@Sendable (Bool) -> Void)?
+    public var onPairingRequest: (@Sendable (String, @escaping @Sendable (Bool) -> Void) -> Void)?
+    public var onStartFailed: (@Sendable (String) -> Void)?
 
-    private init() {}
+    private var sessionPairingKey: Data?
+    private var sessionSalt = Data()
+    private var isPeerAuthenticated = false
+    private var audioFrameCounter: UInt32 = 0
+
+    private init(frameSource: FrameSource = ScreenCapture()) {
+        self.screenCapture = frameSource
+    }
+
+    /// Test seam: build an orchestrator around a synthetic capture source so
+    /// session logic can be exercised without ScreenCaptureKit or TCC grants.
+    public static func makeForTesting(frameSource: FrameSource) -> ServerCore {
+        ServerCore(frameSource: frameSource)
+    }
 
     public func start(pin: String? = nil) async {
+        await start(bootstrapPIN: pin, signalingPIN: pin)
+    }
+
+    /// - bootstrapPIN: opens the pairing window and arms the listener's
+    ///   bootstrap PSK *before* the bind, so no listener restart is needed.
+    /// - signalingPIN: also joins the NAT-traversal candidate exchange.
+    public func start(bootstrapPIN: String? = nil, signalingPIN: String? = nil) async {
         hostname = ProcessInfo.processInfo.hostName
 
         do {
-            // 1. Start TCP listener for control/input
+            // 1. Arm the pairing window BEFORE binding: the listener's very
+            //    first bind serves the bootstrap key — no restart, no race.
+            let activePIN = beginPairingSession(explicitPIN: bootstrapPIN ?? signalingPIN)
+            tcpChannel.updateSecurity(.psk(PairingManager.shared.hostPSKs()))
+
+            // 2. Start TCP listener for control/input
             try tcpChannel.startListening(port: ERDConstants.tcpPort)
             isRunning = true
             onRunningChanged?(true)
 
-            // 2. Start UDP listener for video frames
+            // 3. Start UDP listener for video frames
             try udpChannel.startListening(port: ERDConstants.udpPort)
             ERDLog.info("[Server] Listening on UDP:\(ERDConstants.udpPort)")
 
             // 3. Set up handlers BEFORE advertising/signaling so incoming connections are handled
             tcpChannel.onConnect = { [weak self] in
-                ERDLog.info("[Server] Client connected!")
-                Task { await self?.startStreaming() }
+                ERDLog.info("[Server] TLS channel established, awaiting client handshake")
             }
             tcpChannel.onDisconnect = { [weak self] in
                 ERDLog.info("[Server] Client disconnected")
@@ -64,9 +90,13 @@ public class ServerCore {
 
                 switch header.type {
                 case .inputEvent:
+                    // Only an authenticated (paired + handshaken) peer may
+                    // drive input; bootstrap connections are pairing-only.
+                    guard self.stateQueue.sync(execute: { self.isPeerAuthenticated }) else { return }
                     let receiver = self.stateQueue.sync { self.inputReceiver }
                     receiver?.handleInputEvent(payload)
                 case .control:
+                    guard self.stateQueue.sync(execute: { self.isPeerAuthenticated }) else { return }
                     if let msg = ControlMessage.deserialize(from: payload) {
                         switch msg.type {
                         case .requestKeyFrame:
@@ -110,13 +140,13 @@ public class ServerCore {
                         }
                     }
                 case .handshake:
-                    if let hs = HandshakePayload.deserialize(from: payload) {
-                        ERDLog.info("[Server] Received handshake from client: \(hs.hostname) caps=\(hs.capabilities.rawValue)")
-                        self.stateQueue.sync { self.peerCapabilities = hs.capabilities }
-                        if self.isStreaming.value {
-                            self.startClipboardSync()
-                        }
+                    self.handleClientHandshake(payload)
+                case .pairingRequest:
+                    if let request = PairingRequestPayload.deserialize(from: payload) {
+                        Task { await self.handlePairingRequest(request) }
                     }
+                case .pairingGrant, .pairingReject:
+                    break // host never receives these
                 default: break
                 }
             }
@@ -125,17 +155,29 @@ public class ServerCore {
             tcpChannel.advertiseService(name: hostname)
             ERDLog.info("[Server] Advertising as '\(hostname)' via Bonjour")
 
-            // 5. If PIN provided, exchange candidates via signaling
-            if let pin = pin {
-                await startSignaling(pin: pin)
+            // 5. Internet mode: the same PIN seeds the signaling topic.
+            tcpChannel.onConnectionFailed = {
+                PairingManager.shared.recordBootstrapFailure()
+            }
+            if signalingPIN != nil {
+                await startSignaling(pin: activePIN)
             }
 
             ERDLog.info("[Server] Waiting for client connection...")
         } catch {
             isRunning = false
             onRunningChanged?(false)
+            onStartFailed?(error.localizedDescription)
             ERDLog.error("[Server] Fatal error: \(error)")
         }
+    }
+
+    /// Open a fresh pairing window (new PIN) and refresh the listener PSKs.
+    @discardableResult
+    public func beginPairingSession(explicitPIN: String? = nil) -> String {
+        let pin = PairingManager.shared.beginPairing(explicitPIN: explicitPIN)
+        tcpChannel.updateSecurity(.psk(PairingManager.shared.hostPSKs()))
+        return pin
     }
 
     private func startSignaling(pin: String) async {
@@ -160,12 +202,6 @@ public class ServerCore {
 
     private func startStreaming() async {
         guard !isStreaming.value else {
-            return
-        }
-
-        guard CGPreflightScreenCaptureAccess() else {
-            ERDLog.warning("[Server] Screen Recording permission not granted")
-            ERDLog.warning("[Server]    Go to System Settings > Privacy & Security > Screen Recording")
             return
         }
 
@@ -263,10 +299,97 @@ public class ServerCore {
 
     public func stop() async {
         await stopStreaming()
+        stateQueue.sync {
+            self.sessionPairingKey = nil
+            self.sessionSalt = Data()
+            self.isPeerAuthenticated = false
+        }
         tcpChannel.stop()
         udpChannel.stop()
         isRunning = false
         onRunningChanged?(false)
+    }
+
+    // MARK: - Pairing & Session Trust
+
+    private func handleClientHandshake(_ payload: Data) {
+        guard let hs = HandshakePayload.deserialize(from: payload) else { return }
+        guard hs.protocolVersion == ERDConstants.protocolVersion else {
+            ERDLog.warning("[Server] Rejecting client with protocol v\(hs.protocolVersion)")
+            tcpChannel.disconnectConnection()
+            return
+        }
+        guard let key = PairingStore.load(id: hs.pairingID)?.key else {
+            ERDLog.warning("[Server] Handshake from unknown pairing id, disconnecting")
+            tcpChannel.disconnectConnection()
+            return
+        }
+        guard hs.sessionSalt.count == 16 else {
+            ERDLog.warning("[Server] Handshake missing session salt, disconnecting")
+            tcpChannel.disconnectConnection()
+            return
+        }
+        stateQueue.sync {
+            self.peerCapabilities = hs.capabilities
+            self.sessionPairingKey = key
+            self.sessionSalt = hs.sessionSalt
+            self.isPeerAuthenticated = true
+        }
+        applyUDPCiphers()
+        ERDLog.info("[Server] Client handshake: \(hs.hostname) caps=\(hs.capabilities.rawValue)")
+        if isStreaming.value {
+            startClipboardSync()
+        } else {
+            Task { await self.startStreaming() }
+        }
+    }
+
+    private func applyUDPCiphers() {
+        let (key, salt) = stateQueue.sync { (self.sessionPairingKey, self.sessionSalt) }
+        guard let key, salt.count == 16 else { return }
+        udpChannel.sendCipher = DatagramCipher.udpCipher(masterKey: key, sessionSalt: salt, clientToHost: false)
+        udpChannel.receiveCipher = DatagramCipher.udpCipher(masterKey: key, sessionSalt: salt, clientToHost: true)
+    }
+
+    private func handlePairingRequest(_ request: PairingRequestPayload) async {
+        guard PairingManager.shared.isPairingActive else {
+            sendPairingReject(.pairingDisabled)
+            return
+        }
+        guard let onPairingRequest = onPairingRequest else {
+            sendPairingReject(.pairingDisabled)
+            return
+        }
+        // Hold the channel open while the host user decides
+        tcpChannel.setTimeout(ERDConstants.pairingPINExpiry)
+
+        let approved = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            onPairingRequest(request.hostname) { approved in
+                continuation.resume(returning: approved)
+            }
+        }
+
+        if approved {
+            let record = PairingManager.shared.grantPairing(hostname: request.hostname)
+            let grant = PairingGrantPayload(pairingID: record.id, hostName: hostname, key: record.key)
+            sendPairingPacket(.pairingGrant, grant.serialize())
+            tcpChannel.updateSecurity(.psk(PairingManager.shared.hostPSKs()))
+            ERDLog.info("[Server] Granted pairing to \(request.hostname)")
+        } else {
+            sendPairingReject(.deniedByHost)
+            tcpChannel.disconnectConnection()
+        }
+    }
+
+    private func sendPairingReject(_ reason: PairingRejectReason) {
+        sendPairingPacket(.pairingReject, PairingRejectPayload(reason: reason).serialize())
+    }
+
+    private func sendPairingPacket(_ type: PacketType, _ payload: Data) {
+        let header = PacketHeader(type: type, sequence: 0, timestamp: 0)
+        var packet = header.serialize()
+        packet.append(payload)
+        tcpChannel.send(packet)
     }
 
     // MARK: - Stream Configuration
@@ -491,8 +614,25 @@ public class ServerCore {
         guard status == noErr, let pointer = dataPointer, length > 0 else { return }
 
         let audioData = Data(bytes: pointer, count: length)
+        sendAudio(audioData)
+    }
 
-        // Send audioFrame packet over UDP for ultra-low latency system audio
-        udpChannel.sendPacket(type: .audioFrame, payload: audioData)
+    private func sendAudio(_ audioData: Data) {
+        let maxChunk = ERDConstants.maxPayloadSize - 8 // [frameId u32][fragIdx u16][fragCount u16]
+        let fragmentCount = Int(ceil(Double(audioData.count) / Double(maxChunk)))
+        guard fragmentCount > 0, fragmentCount <= Int(UInt16.max) else { return }
+        audioFrameCounter &+= 1
+        let frameId = audioFrameCounter
+
+        for index in 0..<fragmentCount {
+            let start = index * maxChunk
+            let end = min(start + maxChunk, audioData.count)
+            var payload = Data(capacity: 8 + (end - start))
+            var id = frameId.littleEndian; payload.append(Data(bytes: &id, count: 4))
+            var idx = UInt16(index).littleEndian; payload.append(Data(bytes: &idx, count: 2))
+            var total = UInt16(fragmentCount).littleEndian; payload.append(Data(bytes: &total, count: 2))
+            payload.append(audioData.subdata(in: start..<end))
+            udpChannel.sendPacket(type: .audioFrame, payload: payload)
+        }
     }
 }

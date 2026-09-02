@@ -1,23 +1,31 @@
 # ClientCore Knowledge Base
 
-## OVERVIEW
-Client-side logic for the Remote Desktop viewer: Metal-based rendering, video decoding, and capture of local user inputs.
+<!-- Score: 18 | Domain: Client rendering, hardware decoding, input capture, audio playback -->
 
-## STRUCTURE
-- `ClientController.swift`: Orchestrates the connection state and feedback loop to the host.
-- `MetalRenderer.swift`: MTKView-based GPU rendering pipeline for YUV/RGB buffers.
-- `InputCapture.swift`: Local event monitor to package keyboard/mouse events.
-- `SessionCoordinator.swift`: Logic for Bonjour discovery and initial handshake.
+## OVERVIEW
+Client-side remote desktop engine managing low-latency video decoding, Metal GPU rendering, audio playback, and local input event dispatch.
 
 ## WHERE TO LOOK
-- **Rendering Pipeline**: `MetalRenderer.swift` (Check MTKViewDelegate).
-- **Input Forwarding**: `InputCapture.swift` (Packaging `InputPayload`).
-- **Connection Logic**: `ClientController.swift`.
+| Task | File | Key Symbol |
+|------|------|------------|
+| Client Orchestration | `ClientCore.swift` | `ClientCore`, `StreamStats` |
+| Metal Video Rendering | `MetalRenderer.swift` | `MetalRenderer`, `TrackingMTKView` |
+| Video Decompression | `VideoDecoder.swift` | `VideoDecoder` |
+| Frame Reassembly | `FrameReceiver.swift` | `FrameReceiver`, `FrameAssembly`, `LossEntry` |
+| Input Event Capture | `InputSender.swift` | `InputSender` |
+| Low-latency Audio | `ClientAudioPlayer.swift` | `ClientAudioPlayer` |
+
+## KEY INVARIANTS
+- **Frame Assembly**: Incomplete frames with missing sequence numbers trigger NACK retransmits or IDR keyframe requests via control channel.
+- **Metal Texture Pipeline**: `CVMetalTextureCache` maps incoming `CVPixelBuffer` YUV/RGB planes directly to Metal textures without intermediate memory copies.
+- **Rolling Telemetry**: `StreamStats` maintains rolling window calculations for current FPS, decode latency, network jitter, and packet loss percentage.
 
 ## CONVENTIONS
-- **GPU Synchronization**: Be mindful of triple buffering in Metal to avoid frame drops.
-- **Input Lag**: Package and send input events immediately; do not batch if delay exceeds 16ms.
+- **GPU Synchronization**: Render `CVPixelBuffer` textures using double/triple buffering to prevent GPU stalls.
+- **Immediate Input**: Dispatch user input payloads immediately without debounce or batching exceeding 16ms.
+- **Loss Recovery**: `FrameReceiver` tracks chunk loss and signals missing frames to trigger keyframe recovery.
 
 ## ANTI-PATTERNS
-- Avoid `UIImageView` or `NSImage` for video stream rendering.
-- Do not block the render loop with networking tasks.
+- Never use `NSImageView` or `NSImage` for high-frequency video stream presentation; use `MetalRenderer`.
+- Do not perform decompression or texture allocation on the main thread.
+- Avoid blocking the MTKView draw loop with synchronization locks or network calls.

@@ -13,13 +13,14 @@ public enum NetworkUtils {
         var fallback: String?
 
         for ptr in sequence(first: firstAddr, next: { $0.pointee.ifa_next }) {
-            let sa = ptr.pointee.ifa_addr.pointee
+            guard let addr = ptr.pointee.ifa_addr else { continue }
+            let sa = addr.pointee
             guard sa.sa_family == UInt8(AF_INET) else { continue }
             let name = String(cString: ptr.pointee.ifa_name)
             guard name.hasPrefix("en") else { continue }
 
             var hostname = [CChar](repeating: 0, count: Int(NI_MAXHOST))
-            getnameinfo(ptr.pointee.ifa_addr, socklen_t(sa.sa_len),
+            getnameinfo(addr, socklen_t(sa.sa_len),
                         &hostname, socklen_t(hostname.count), nil, 0, NI_NUMERICHOST)
             let ip = String(cString: hostname)
 

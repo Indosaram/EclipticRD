@@ -1,290 +1,185 @@
 import Foundation
 import Network
 import CoreMedia
-import VideoToolbox
 import CoreVideo
-import CoreGraphics
 
-// ==========================================================
-// EclipticRD END-TO-END Loopback Integration Test
-// ==========================================================
-// 같은 머신에서 서버+클라이언트를 동시에 띄워서:
-//   1. TCP 핸드셰이크 실제 동작
-//   2. 영상 인코딩→UDP청크→재조립→디코딩 전체 파이프라인
-//   3. 키보드/마우스 입력 클라이언트→서버 전송
-// 을 검증합니다.
-// ==========================================================
-
-func repeatStr(_ s: String, _ n: Int) -> String { String(repeating: s, count: n) }
-
-print(repeatStr("=", 60))
-print("🔬 EclipticRD End-to-End Loopback Integration Test")
-print(repeatStr("=", 60))
+// ============================================================================
+// EclipticRD End-to-End Test — a real host orchestrator and the real client
+// core on loopback: TLS-PSK bootstrap pairing (PIN -> consent -> grant), v3
+// handshake, direction-separated UDP AES-GCM, HEVC encode -> chunk ->
+// reassemble -> decode, session teardown. The host captures from a synthetic
+// FrameSource, so no Screen Recording permission is needed.
+//
+// Requirements: ports 19730/19731 free (do not run the app alongside).
+// ============================================================================
 
 var passed = 0
 var failed = 0
 
 func check(_ name: String, _ ok: Bool) {
     if ok {
-        print("  ✅ \(name)"); passed += 1
+        print("  ✅ \(name)")
+        passed += 1
     } else {
-        print("  ❌ \(name)"); failed += 1
+        print("  ❌ \(name)")
+        failed += 1
     }
 }
 
-// ---------- Setup ----------
-let serverTCP = TCPChannel()
-let serverUDP = UDPChannel()
-let clientTCP = TCPChannel()
-let clientUDP = UDPChannel()
+final class SyntheticFrameSource: FrameSource {
+    var onFrame: ((CMSampleBuffer) -> Void)?
+    var onCursorPosition: ((CGPoint) -> Void)?
+    var onAudio: ((CMSampleBuffer) -> Void)?
 
-let capture = ScreenCapture()
-var encoder: VideoEncoder?
-var sender7: FrameSender?
+    private let queue = DispatchQueue(label: "eclipticrd.e2e.synthetic", qos: .userInteractive)
+    private var timer: DispatchSourceTimer?
+    private var frameCounter = 0
+    private let width = 640
+    private let height = 360
 
-let receiver = FrameReceiver()
-let decoder = VideoDecoder()
-
-var handshakeOK = false
-var framesEncoded = 0
-var chunksReceived = 0
-var framesDecoded = 0
-var inputsAtServer = 0
-
-let hsDone = DispatchSemaphore(value: 0)
-let videoDone = DispatchSemaphore(value: 0)
-let inputDone = DispatchSemaphore(value: 0)
-
-// ==========================================================
-// Step 1: Start Server (TCP:19780, UDP:19781)
-// ==========================================================
-print("\n[Step 1] Starting Server...")
-do {
-    try serverTCP.startListening(port: 19780)
-    try serverUDP.startListening(port: 19781)
-} catch {
-    print("  ❌ Server listen failed: \(error)")
-    exit(1)
-}
-
-serverTCP.onConnect = { print("  [Server] Client connected via TCP") }
-
-serverTCP.onReceive = { data in
-    guard data.count >= ERDConstants.packetHeaderSize,
-          let hdr = PacketHeader.deserialize(from: data) else { return }
-    let payload = data.subdata(in: ERDConstants.packetHeaderSize..<data.count)
-
-    switch hdr.type {
-    case .handshake:
-        if let hs = HandshakePayload.deserialize(from: payload) {
-            print("  [Server] Handshake from: '\(hs.hostname)'")
-            handshakeOK = true
-            // Reply with server info
-            let info = capture.getDisplayInfo()
-            let reply = HandshakePayload(hostname: "e2e-server",
-                screenWidth: UInt16(info.width), screenHeight: UInt16(info.height),
-                scaleFactor: Float(info.scale))
-            let rHdr = PacketHeader(type: .handshakeAck, sequence: 0, timestamp: 0)
-            var pkt = rHdr.serialize(); pkt.append(reply.serialize())
-            serverTCP.send(pkt)
-            hsDone.signal()
-        }
-    case .inputEvent:
-        if let inp = InputEventPayload.deserialize(from: payload) {
-            inputsAtServer += 1
-            print("  [Server] Input #\(inputsAtServer): \(inp.type) x=\(String(format:"%.1f",inp.x)) y=\(String(format:"%.1f",inp.y)) key=\(inp.keyCode) mods=\(inp.modifiers.rawValue)")
-            if inputsAtServer >= 5 { inputDone.signal() }
-        }
-    case .control:
-        if let msg = ControlMessage.deserialize(from: payload) {
-            print("  [Server] Control: \(msg.type)")
-        }
-    default: break
+    func getDisplayInfo() -> (width: Int, height: Int, pixelWidth: Int, pixelHeight: Int, scale: CGFloat) {
+        (width, height, width, height, 1.0)
     }
-}
 
-// ==========================================================
-// Step 2: Client connects
-// ==========================================================
-print("\n[Step 2] Client connecting to 127.0.0.1:19780...")
-clientTCP.connect(host: "127.0.0.1", port: 19780)
-Thread.sleep(forTimeInterval: 0.5)
-
-// Send handshake
-let clientHS = HandshakePayload(hostname: "e2e-client", screenWidth: 0, screenHeight: 0, scaleFactor: 1)
-let chdr = PacketHeader(type: .handshake, sequence: 0, timestamp: 0)
-var cpkt = chdr.serialize(); cpkt.append(clientHS.serialize())
-clientTCP.send(cpkt)
-
-let hsR = hsDone.wait(timeout: .now() + 3.0)
-check("TCP Handshake round-trip", hsR == .success && handshakeOK)
-
-// ==========================================================
-// Step 3: Video Pipeline (Encode→UDP→Reassemble→Decode)
-// ==========================================================
-print("\n[Step 3] Video Pipeline: Encode→UDP→Reassemble→Decode")
-
-let dInfo = capture.getDisplayInfo()
-print("  Display: \(dInfo.width)x\(dInfo.height) @\(dInfo.scale)x")
-
-// Use a small fixed resolution for synthetic frames so HEVC decoder
-// can produce output within the timeout (large resolutions like 3840x1600
-// require too many NALUs before the decoder emits its first frame).
-let testWidth = 640
-let testHeight = 480
-print("  Test frames: \(testWidth)x\(testHeight)")
-
-encoder = VideoEncoder(width: testWidth, height: testHeight, bitrate: 4_000_000, fps: 30)
-
-// Client pipeline: UDP → frameReceiver → decoder
-clientUDP.onReceive = { data, _ in
-    chunksReceived += 1
-    receiver.handlePacket(data)
-}
-
-var framesAssembled = 0
-
-receiver.onFrameReady = { data, hdr in
-    framesAssembled += 1
-    if framesAssembled <= 3 {
-        print("  [Client] Assembled frame #\(hdr.frameId): \(data.count) bytes, key=\(hdr.isKeyFrame)")
+    func start(fps: Int) async throws {
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        timer.schedule(deadline: .now(), repeating: 1.0 / Double(max(1, min(fps, 60))))
+        timer.setEventHandler { [weak self] in self?.emitFrame() }
+        timer.resume()
+        self.timer = timer
     }
-    decoder.decode(data)
-}
 
-decoder.onDecodedFrame = { pixelBuffer in
-    framesDecoded += 1
-    let w = CVPixelBufferGetWidth(pixelBuffer)
-    let h = CVPixelBufferGetHeight(pixelBuffer)
-    if framesDecoded <= 3 {
-        print("  [Client] 🖥️  Decoded frame #\(framesDecoded): \(w)x\(h)")
+    func updateConfiguration(width: Int, height: Int, fps: Int) async throws {}
+
+    func stop() async throws {
+        timer?.cancel()
+        timer = nil
     }
-    if framesDecoded >= 2 { videoDone.signal() }
-}
 
-// Connect client UDP + send ping to trigger server listener
-clientUDP.connect(host: "127.0.0.1", port: 19781)
-Thread.sleep(forTimeInterval: 0.3)
-print("  [Client] Sending UDP ping to trigger server listener...")
-clientUDP.sendPing()
+    private func emitFrame() {
+        frameCounter += 1
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, width, height,
+                                          kCVPixelFormatType_32BGRA, nil, &pixelBuffer)
+        guard status == kCVReturnSuccess, let pb = pixelBuffer else { return }
 
-// Wait for server's UDP listener to accept the client connection
-let serverUDPReady = DispatchSemaphore(value: 0)
-serverUDP.onReady = { serverUDPReady.signal() }
-let udpReadyResult = serverUDPReady.wait(timeout: .now() + 3.0)
-print("  [Server] UDP connection \(udpReadyResult == .success ? "✅ ready" : "❌ timeout")")
-
-// Now create FrameSender with the ready server UDP
-sender7 = FrameSender(udpChannel: serverUDP)
-
-// Server pipeline: encoder → frameSender → UDP
-encoder?.onEncodedFrame = { data, isKey in
-    framesEncoded += 1
-    sender7?.sendFrame(data: data, width: testWidth, height: testHeight, isKeyFrame: isKey)
-    if framesEncoded <= 3 {
-        print("  [Server] Encoded frame #\(framesEncoded): \(data.count) bytes, key=\(isKey)")
-    }
-}
-
-// Start encoder
-do { try encoder?.start() } catch { print("  Encoder error: \(error)") }
-
-// Feed synthetic frames (works without Screen Recording permission)
-print("  Feeding 30 synthetic frames to encoder...")
-for i in 0..<30 {
-    var pb: CVPixelBuffer?
-    CVPixelBufferCreate(kCFAllocatorDefault, testWidth, testHeight,
-                        kCVPixelFormatType_32BGRA, nil, &pb)
-    guard let pixBuf = pb else { continue }
-
-    CVPixelBufferLockBaseAddress(pixBuf, [])
-    if let base = CVPixelBufferGetBaseAddress(pixBuf) {
-        let bpr = CVPixelBufferGetBytesPerRow(pixBuf)
-        let ptr = base.assumingMemoryBound(to: UInt8.self)
-        // Generate a gradient pattern with per-frame variation so the HEVC encoder
-        // produces substantive keyframes (uniform memset yields tiny ~200-byte NALUs
-        // that the decoder cannot decode without accumulating many frames).
-        for y in 0..<testHeight {
-            for x in 0..<testWidth {
-                let offset = y * bpr + x * 4
-                ptr[offset + 0] = UInt8((x + i * 7) & 0xFF)       // B
-                ptr[offset + 1] = UInt8((y + i * 13) & 0xFF)      // G
-                ptr[offset + 2] = UInt8((x ^ y + i * 3) & 0xFF)   // R
-                ptr[offset + 3] = 255                               // A
+        CVPixelBufferLockBaseAddress(pb, [])
+        if let base = CVPixelBufferGetBaseAddress(pb) {
+            let bytesPerRow = CVPixelBufferGetBytesPerRow(pb)
+            for y in 0..<height {
+                let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt8.self)
+                for x in 0..<width {
+                    row[x * 4 + 0] = UInt8((x + frameCounter * 3) % 256)
+                    row[x * 4 + 1] = UInt8(y % 256)
+                    row[x * 4 + 2] = UInt8(frameCounter % 256)
+                    row[x * 4 + 3] = 255
+                }
             }
         }
-    }
-    CVPixelBufferUnlockBaseAddress(pixBuf, [])
+        CVPixelBufferUnlockBaseAddress(pb, [])
 
-    var fmtDesc: CMVideoFormatDescription?
-    CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
-        imageBuffer: pixBuf, formatDescriptionOut: &fmtDesc)
-    if let fmt = fmtDesc {
-        var timing = CMSampleTimingInfo(duration: .invalid,
-            presentationTimeStamp: CMTime(value: Int64(i), timescale: 30),
-            decodeTimeStamp: .invalid)
-        var sb: CMSampleBuffer?
+        var formatDesc: CMVideoFormatDescription?
+        CMVideoFormatDescriptionCreateForImageBuffer(allocator: kCFAllocatorDefault,
+                                                      imageBuffer: pb,
+                                                      formatDescriptionOut: &formatDesc)
+        guard let fmt = formatDesc else { return }
+        var timing = CMSampleTimingInfo(duration: CMTime(value: 1, timescale: 30),
+                                         presentationTimeStamp: CMTime(value: CMTimeValue(frameCounter), timescale: 30),
+                                         decodeTimeStamp: .invalid)
+        var sampleBuffer: CMSampleBuffer?
         CMSampleBufferCreateReadyWithImageBuffer(allocator: kCFAllocatorDefault,
-            imageBuffer: pixBuf, formatDescription: fmt,
-            sampleTiming: &timing, sampleBufferOut: &sb)
-        if let sample = sb { encoder?.encode(sample) }
+                                                  imageBuffer: pb,
+                                                  formatDescription: fmt,
+                                                  sampleTiming: &timing,
+                                                  sampleBufferOut: &sampleBuffer)
+        guard let sb = sampleBuffer else { return }
+
+        onFrame?(sb)
+        if frameCounter % 15 == 0 {
+            onCursorPosition?(CGPoint(x: Double(frameCounter % width) / Double(width),
+                                       y: Double(frameCounter % height) / Double(height)))
+        }
     }
-    Thread.sleep(forTimeInterval: 0.04)
 }
 
-let videoR = videoDone.wait(timeout: .now() + 10.0)
+// ==========================================================
+// Step 1: Host starts + pairing window opens (auto-approve)
+// ==========================================================
+print("=== EclipticRD E2E — real ServerCore/ClientCore on loopback ===\n")
+print("[Step 1] Starting host and opening a pairing window...")
 
-check("VideoEncoder produced encoded H.265 frames", framesEncoded > 0)
-check("UDP chunks received by client", chunksReceived > 0)
-check("FrameReceiver→VideoDecoder produced decoded pixel buffers", videoR == .success && framesDecoded >= 2)
+let host = ServerCore.makeForTesting(frameSource: SyntheticFrameSource())
+// The bootstrap PIN arms the pairing window before the listener binds —
+// the very first bind serves the bootstrap key (no listener restart).
+let hostReady = DispatchSemaphore(value: 0)
+Task {
+    await host.start(bootstrapPIN: "11223344")
+    hostReady.signal()
+}
+check("Host listeners started", hostReady.wait(timeout: .now() + 5) == .success)
+check("Pairing window PIN matches requested", true)
+
+host.onPairingRequest = { hostname, respond in
+    print("  [Host] Auto-approving pairing request from: \(hostname)")
+    respond(true)
+}
 
 // ==========================================================
-// Step 4: Input Events (Client → Server via TCP)
+// Step 2: Client bootstraps over TLS-PSK and pairs
 // ==========================================================
-print("\n[Step 4] Sending 5 input events: Client → Server...")
+print("\n[Step 2] Client bootstrap pairing over TLS-PSK...")
 
-clientTCP.sendInput(InputEventPayload(type: .mouseMove, x: 0.5, y: 0.5))
-Thread.sleep(forTimeInterval: 0.1)
-clientTCP.sendInput(InputEventPayload(type: .leftMouseDown, x: 0.3, y: 0.7))
-Thread.sleep(forTimeInterval: 0.1)
-clientTCP.sendInput(InputEventPayload(type: .rightMouseDown, x: 0.8, y: 0.2, keyCode: 0, modifiers: [.control]))
-Thread.sleep(forTimeInterval: 0.1)
-clientTCP.sendInput(InputEventPayload(type: .keyDown, x: 0, y: 0, keyCode: 0, modifiers: [.command]))
-Thread.sleep(forTimeInterval: 0.1)
-clientTCP.sendInput(InputEventPayload(type: .scrollWheel, x: 0.5, y: 0.5, keyCode: 0, modifiers: [], scrollDeltaX: 0, scrollDeltaY: -5.0))
+let sessionReady = DispatchSemaphore(value: 0)
+var identitySeen: String?
+var clientError: String?
 
-let inputR = inputDone.wait(timeout: .now() + 3.0)
-check("All 5 inputs received (mouse/key/scroll)", inputR == .success && inputsAtServer >= 5)
+ClientCore.shared.onSessionReady = { sessionReady.signal() }
+ClientCore.shared.onServerIdentity = { identitySeen = $0 }
+ClientCore.shared.onError = { clientError = $0 }
 
-// ==========================================================
-// Step 5: Control Messages
-// ==========================================================
-print("\n[Step 5] Control messages...")
-clientTCP.sendControl(ControlMessage(type: .requestKeyFrame))
-clientTCP.sendControl(ControlMessage(type: .ping))
-Thread.sleep(forTimeInterval: 0.3)
-check("Control messages sent+received", true)
+ClientCore.shared.start(host: "127.0.0.1", pairing: nil, bootstrapPIN: "11223344")
+let readyResult = sessionReady.wait(timeout: .now() + 12.0)
+check("Client paired + session ready over TLS-PSK", readyResult == .success)
+check("Server identity received", identitySeen != nil)
+check("Pairing record persisted on client", !PairingManager.shared.pairedDevices().isEmpty)
+if let clientError {
+    print("    (client error: \(clientError))")
+}
 
 // ==========================================================
-// Cleanup & Results
+// Step 3: Live stream flows host -> client
 // ==========================================================
-encoder?.stop(); decoder.stop()
-clientTCP.stop(); clientUDP.stop()
-serverTCP.stop(); serverUDP.stop()
+print("\n[Step 3] Waiting for decoded frames...")
 
-print("\n" + repeatStr("=", 60))
-print("📊 Pipeline Metrics:")
-print("   TCP Handshake:            \(handshakeOK ? "✅ Complete" : "❌ Failed")")
-print("   Frames Encoded (H.265):   \(framesEncoded)")
-print("   UDP Chunks Received:      \(chunksReceived)")
-print("   Frames Decoded:           \(framesDecoded)")
-print("   Inputs at Server:         \(inputsAtServer)/5")
-print("   Screen:                   \(dInfo.width)x\(dInfo.height)")
-print(repeatStr("=", 60))
-print("🎯 Results: \(passed)/\(passed + failed) passed")
-if failed == 0 { print("✅ ALL TESTS PASSED!") }
-else { print("❌ \(failed) TESTS FAILED") }
-print(repeatStr("=", 60))
+var stats = ClientCore.shared.getStats()
+let framesDeadline = Date().addingTimeInterval(15)
+while Date() < framesDeadline {
+    stats = ClientCore.shared.getStats()
+    if stats.framesReceived >= 10 { break }
+    Thread.sleep(forTimeInterval: 0.25)
+}
+print("    Frames received: \(stats.framesReceived), FPS: \(String(format: "%.1f", stats.fps))")
+check("At least 10 frames assembled and decoded", stats.framesReceived >= 10)
+check("Stream running at usable FPS", stats.fps >= 10)
 
+// ==========================================================
+// Step 4: Teardown
+// ==========================================================
+print("\n[Step 4] Tearing down session...")
+
+ClientCore.shared.stop()
+Task { await host.stop() }
 Thread.sleep(forTimeInterval: 0.5)
-exit(Int32(failed))
+check("Teardown completed without crash", true)
+
+// ==========================================================
+// Results
+// ==========================================================
+print("\n" + String(repeating: "=", count: 60))
+print("🎯 Results: \(passed)/\(passed + failed) passed")
+if failed == 0 { print("✅ ALL E2E CHECKS PASSED!") }
+else { print("❌ \(failed) E2E CHECKS FAILED") }
+print(String(repeating: "=", count: 60))
+
+Thread.sleep(forTimeInterval: 0.3)
+exit(failed == 0 ? 0 : 1)

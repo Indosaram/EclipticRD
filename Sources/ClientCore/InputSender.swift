@@ -27,12 +27,41 @@ public class InputSender {
     }
 
     public func stopCapturing() {
-        if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
+        if let m = localMonitor {
+            // NSEvent monitor removal must happen on the main thread; stop()
+            // can be triggered from TCP callback queues during disconnect.
+            if Thread.isMainThread {
+                NSEvent.removeMonitor(m)
+            } else {
+                DispatchQueue.main.async { NSEvent.removeMonitor(m) }
+            }
+            localMonitor = nil
+        }
         captureView = nil
     }
 
     private func handleEvent(_ event: NSEvent) {
         guard let view = captureView else { return }
+
+        // Events landing on session overlay controls (buttons, pickers, text
+        // fields) belong to this Mac, not the remote host. Keyboard events
+        // carry the cursor position but must not be filtered by it.
+        let isPointerEvent: Bool = {
+            switch event.type {
+            case .mouseMoved, .leftMouseDown, .leftMouseUp, .rightMouseDown, .rightMouseUp,
+                 .leftMouseDragged, .rightMouseDragged, .otherMouseDown, .otherMouseUp,
+                 .otherMouseDragged, .scrollWheel:
+                return true
+            default:
+                return false
+            }
+        }()
+        if isPointerEvent,
+           let contentView = view.window?.contentView,
+           let hit = contentView.hitTest(event.locationInWindow),
+           hit !== view, !hit.isDescendant(of: view) {
+            return
+        }
 
         let location = view.convert(event.locationInWindow, from: nil)
         let bounds = view.bounds

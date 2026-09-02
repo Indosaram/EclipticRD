@@ -9,6 +9,8 @@ targets:
     platform: macOS
     sources:
       - path: Sources/App
+        excludes:
+          - "AGENTS.md"
       - path: Sources/Shared
         excludes:
           - "AGENTS.md"
@@ -26,7 +28,6 @@ targets:
       properties:
         com.apple.security.network.server: true
         com.apple.security.network.client: true
-        com.apple.security.cs.allow-unsigned-executable-memory: true
     settings:
       CODE_SIGN_IDENTITY: "-"
       CODE_SIGN_STYLE: Automatic
@@ -45,6 +46,8 @@ targets:
     platform: macOS
     sources:
       - path: Tests
+        excludes:
+          - "XCTests"
       - path: Sources/Shared
       - path: Sources/ClientCore
       - path: Sources/HostCore
@@ -58,7 +61,24 @@ targets:
       - path: Sources/ClientCore
       - path: Sources/HostCore
 
+  EclipticRDLogicTests:
+    type: bundle.unit-test
+    platform: macOS
+    settings:
+      GENERATE_INFOPLIST_FILE: YES
+    sources:
+      - path: Tests/XCTests
+      - path: Sources/Shared
+
 schemes:
+  EclipticRDLogicTests:
+    build:
+      targets:
+        EclipticRDLogicTests: all
+    test:
+      config: Debug
+      targets:
+        - EclipticRDLogicTests
   EclipticRD:
     build:
       targets:

@@ -1,0 +1,40 @@
+========================================================
+  EclipticRD Latency Benchmark (Tart VM)
+  Target: admin@192.168.64.197 | Frames: 200
+========================================================
+[1/4] Syncing Rust workspace to VM...
+Warning: Permanently added '192.168.64.197' (ED25519) to the list of known hosts.
+Transfer starting: 114 files
+
+sent 5501 bytes  received 20 bytes  1346585 bytes/sec
+total size is 997677  speedup is 180.71
+[2/4] Compiling release binaries inside VM...
+Warning: Permanently added '192.168.64.197' (ED25519) to the list of known hosts.
+   Compiling erd-decode v0.1.0 (/Users/admin/erd/erd-decode)
+   Compiling erd-host v0.1.0 (/Users/admin/erd/erd-host)
+   Compiling erd-app v0.1.0 (/Users/admin/erd/erd-app)
+    Finished `release` profile [optimized] target(s) in 3.34s
+[3/4] Running latency benchmark session in VM (>= 200 frames)...
+Warning: Permanently added '192.168.64.197' (ED25519) to the list of known hosts.
+[4/4] Fetching and parsing benchmark results...
+Warning: Permanently added '192.168.64.197' (ED25519) to the list of known hosts.
+Benchmark statistics saved to /Users/indo/code/project/EclipticRD-Rewrite/bench-results.json:
+{"frames":200,"p50_us":3050,"p95_us":3458,"p99_us":5010,"max_us":5876}
+================================================================
+  ECLIPTICRD LATENCY BENCHMARK REPORT
+================================================================
+  Decoded Frames:   200
+  p50 Latency:          3.05 ms (    3050 µs)
+  p95 Latency:          3.46 ms (    3458 µs)
+  p99 Latency:          5.01 ms (    5010 µs)
+  Max Latency:          5.88 ms (    5876 µs)
+----------------------------------------------------------------
+  COMPARISON: EclipticRD (v3 Protocol) vs Moonlight / Sunshine Baseline
+----------------------------------------------------------------
+  Metric           | EclipticRD (VM)    | Moonlight (LAN Ref)
+  -----------------+--------------------+-------------------
+  p50              |           3.05 ms  |          18.50 ms
+  p95              |           3.46 ms  |          28.00 ms
+  p99              |           5.01 ms  |          35.00 ms
+================================================================
+Updated bench-results.json with detailed latency benchmark data.

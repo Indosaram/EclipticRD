@@ -1,0 +1,7 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"error","residency_state":"resident"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/EclipticRD-Rewrite/.omo/senpi-task/children/st_01a05bdb/sessions/st_01a05bdb/2026-09-01T07-20-40-511Z_01a05bd7-6f3f-748c-bed6-f38557ef7a6e.jsonl"}}

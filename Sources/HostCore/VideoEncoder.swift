@@ -41,7 +41,11 @@ public class VideoEncoder {
             refcon: retainedSelf!.toOpaque(),
             compressionSessionOut: &session
         )
-        guard err == noErr, let session = session else { throw VideoEncoderError.sessionCreationFailed }
+        guard err == noErr, let session = session else {
+            retainedSelf?.release()
+            retainedSelf = nil
+            throw VideoEncoderError.sessionCreationFailed
+        }
 
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)

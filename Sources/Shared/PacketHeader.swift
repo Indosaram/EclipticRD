@@ -10,6 +10,9 @@ public enum PacketType: UInt8 {
     case control = 6
     case ping = 7
     case audioFrame = 8
+    case pairingRequest = 9
+    case pairingGrant = 10
+    case pairingReject = 11
 }
 
 public struct PacketHeader {
@@ -39,12 +42,13 @@ public struct PacketHeader {
 
     public static func deserialize(from data: Data) -> PacketHeader? {
         guard data.count >= ERDConstants.packetHeaderSize else { return nil }
-        let magic = data.subdata(in: 0..<2).withUnsafeBytes { $0.load(as: UInt16.self).littleEndian }
-        guard magic == ERDConstants.magic else { return nil }
-        guard let type = PacketType(rawValue: data[2]) else { return nil }
-        let seq = data.subdata(in: 3..<7).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-        let ts = data.subdata(in: 7..<11).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
-        let flags = data[11]
-        return PacketHeader(type: type, sequence: seq, timestamp: ts, flags: flags)
+        return data.withUnsafeBytes { raw in
+            let magic = raw.loadUnaligned(fromByteOffset: 0, as: UInt16.self).littleEndian
+            guard magic == ERDConstants.magic else { return nil }
+            guard let type = PacketType(rawValue: raw[2]) else { return nil }
+            let seq = raw.loadUnaligned(fromByteOffset: 3, as: UInt32.self).littleEndian
+            let ts = raw.loadUnaligned(fromByteOffset: 7, as: UInt32.self).littleEndian
+            return PacketHeader(type: type, sequence: seq, timestamp: ts, flags: raw[11])
+        }
     }
 }

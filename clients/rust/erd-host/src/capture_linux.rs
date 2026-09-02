@@ -1,0 +1,555 @@
+//! Hyprland/wlroots screen capture for the Linux host.
+//!
+//! The fast path talks to `zwlr_screencopy_manager_v1` directly and uses a
+//! reusable `wl_shm` buffer. Hyprland exposes this protocol without opening a
+//! desktop portal chooser, and version 2+ reports compositor damage regions.
+//!
+//! Runtime QA must be performed in a real Hyprland session. The module binds
+//! wlr-screencopy v3, whose `linux_dmabuf` offer is the zero-copy extension; the
+//! current host seam deliberately selects its portable wl_shm BGRA offer so the
+//! CPU encoder fallback has identical input. A future DRM-frame host seam can
+//! import that DMA-BUF directly into VAAPI without changing this API.
+//!
+//! Compositors that do not expose wlr-screencopy (notably GNOME and sandboxed sessions) must use the
+//! XDG Desktop Portal ScreenCast API and consume its PipeWire node. That portal
+//! path is deliberately a deployment fallback rather than an automatic silent
+//! fallback: it requires a user-approved source selection and a persistent
+//! portal session. Install `xdg-desktop-portal-hyprland` and hand the selected
+//! PipeWire node to the host integration when `CaptureError::PortalRequired` is
+//! returned.
+
+use std::{
+    fs::File,
+    io::{Read, Seek, SeekFrom},
+    os::fd::AsFd,
+};
+
+use thiserror::Error;
+use wayland_client::{
+    delegate_noop,
+    protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool},
+    Connection, Dispatch, Proxy, QueueHandle, WEnum,
+};
+use wayland_protocols_wlr::screencopy::v1::client::{
+    zwlr_screencopy_frame_v1, zwlr_screencopy_manager_v1,
+};
+
+/// Pixel-space rectangle reported by the compositor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DamageRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Optional logical-output region to capture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CaptureRegion {
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+/// Selects a Wayland output and whether the cursor is composited into frames.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureConfig {
+    /// `wl_output.name`, for example `DP-1`. `None` selects the first output.
+    pub output_name: Option<String>,
+    pub region: Option<CaptureRegion>,
+    pub overlay_cursor: bool,
+}
+
+impl Default for CaptureConfig {
+    fn default() -> Self {
+        Self {
+            output_name: None,
+            region: None,
+            overlay_cursor: true,
+        }
+    }
+}
+
+/// Output metadata obtained from `wl_output`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputInfo {
+    pub global_name: u32,
+    pub name: Option<String>,
+    /// Native dimensions are populated from the current `wl_output.mode` when
+    /// advertised. Capture buffer dimensions remain authoritative.
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub scale: i32,
+}
+
+impl OutputInfo {
+    pub fn logical_width(&self) -> u32 {
+        self.pixel_width / self.scale.max(1) as u32
+    }
+
+    pub fn logical_height(&self) -> u32 {
+        self.pixel_height / self.scale.max(1) as u32
+    }
+}
+
+/// A tightly packed, top-down BGRA frame.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedFrame {
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+    pub bgra: Vec<u8>,
+    pub damage: Vec<DamageRect>,
+    /// Compositor presentation timestamp. Its epoch is compositor-defined.
+    pub presentation_time_ns: u128,
+}
+
+#[derive(Debug, Error)]
+pub enum CaptureError {
+    #[error("failed to connect to the Wayland compositor: {0}")]
+    Connect(#[from] wayland_client::ConnectError),
+    #[error("Wayland dispatch failed: {0}")]
+    Dispatch(#[from] wayland_client::DispatchError),
+    #[error("the compositor does not expose {0}; use the XDG portal PipeWire fallback")]
+    PortalRequired(&'static str),
+    #[error("Wayland output {0:?} was not found")]
+    OutputNotFound(Option<String>),
+    #[error("the compositor offered unsupported wl_shm format {0}")]
+    UnsupportedFormat(String),
+    #[error("invalid capture buffer: {0}")]
+    InvalidBuffer(&'static str),
+    #[error("the compositor rejected the screencopy request")]
+    CaptureFailed,
+    #[error("screen capture I/O failed: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OutputData {
+    global_name: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BufferDescription {
+    format: wl_shm::Format,
+    width: u32,
+    height: u32,
+    stride: u32,
+}
+
+struct ActiveCapture {
+    file: File,
+    _pool: wl_shm_pool::WlShmPool,
+    _buffer: wl_buffer::WlBuffer,
+    description: BufferDescription,
+    damage: Vec<DamageRect>,
+    y_inverted: bool,
+}
+
+struct CaptureState {
+    manager: Option<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1>,
+    shm: Option<wl_shm::WlShm>,
+    outputs: Vec<(wl_output::WlOutput, OutputInfo)>,
+    offered_buffer: Option<BufferDescription>,
+    active: Option<ActiveCapture>,
+    result: Option<Result<CapturedFrame, CaptureError>>,
+}
+
+impl CaptureState {
+    fn output(&self, requested_name: Option<&str>) -> Option<(wl_output::WlOutput, OutputInfo)> {
+        self.outputs
+            .iter()
+            .find(|(_, info)| match requested_name {
+                Some(requested) => info.name.as_deref() == Some(requested),
+                None => true,
+            })
+            .cloned()
+    }
+
+    fn create_buffer(
+        &mut self,
+        frame: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
+        qh: &QueueHandle<Self>,
+    ) -> Result<(), CaptureError> {
+        let description = self
+            .offered_buffer
+            .take()
+            .ok_or(CaptureError::InvalidBuffer("missing wl_shm buffer offer"))?;
+        let size = u64::from(description.stride)
+            .checked_mul(u64::from(description.height))
+            .ok_or(CaptureError::InvalidBuffer("buffer size overflow"))?;
+        if size == 0 || size > i32::MAX as u64 {
+            return Err(CaptureError::InvalidBuffer(
+                "buffer size is outside Wayland limits",
+            ));
+        }
+        if description.stride < description.width.saturating_mul(4) {
+            return Err(CaptureError::InvalidBuffer(
+                "stride is smaller than BGRA row width",
+            ));
+        }
+
+        let mut file = tempfile::tempfile()?;
+        file.set_len(size)?;
+        file.seek(SeekFrom::Start(0))?;
+
+        let shm = self
+            .shm
+            .as_ref()
+            .ok_or(CaptureError::PortalRequired("wl_shm"))?;
+        let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
+        let buffer = pool.create_buffer(
+            0,
+            description.width as i32,
+            description.height as i32,
+            description.stride as i32,
+            description.format,
+            qh,
+            (),
+        );
+
+        if frame.version() >= 2 {
+            frame.copy_with_damage(&buffer);
+        } else {
+            frame.copy(&buffer);
+        }
+        self.active = Some(ActiveCapture {
+            file,
+            _pool: pool,
+            _buffer: buffer,
+            description,
+            damage: Vec::new(),
+            y_inverted: false,
+        });
+        Ok(())
+    }
+
+    fn finish_capture(
+        &mut self,
+        tv_sec_hi: u32,
+        tv_sec_lo: u32,
+        tv_nsec: u32,
+    ) -> Result<CapturedFrame, CaptureError> {
+        let mut active = self
+            .active
+            .take()
+            .ok_or(CaptureError::InvalidBuffer("ready arrived before copy"))?;
+        let description = active.description;
+        let source_len = description.stride as usize * description.height as usize;
+        let mut source = vec![0_u8; source_len];
+        active.file.seek(SeekFrom::Start(0))?;
+        active.file.read_exact(&mut source)?;
+
+        let row_bytes = description.width as usize * 4;
+        let mut bgra = vec![0_u8; row_bytes * description.height as usize];
+        for destination_y in 0..description.height as usize {
+            let source_y = if active.y_inverted {
+                description.height as usize - 1 - destination_y
+            } else {
+                destination_y
+            };
+            let source_start = source_y * description.stride as usize;
+            let destination_start = destination_y * row_bytes;
+            bgra[destination_start..destination_start + row_bytes]
+                .copy_from_slice(&source[source_start..source_start + row_bytes]);
+        }
+
+        // XRGB8888 has an unused high byte. Making it opaque also gives callers
+        // one stable BGRA contract for both ARGB8888 and XRGB8888.
+        for alpha in bgra[3..].iter_mut().step_by(4) {
+            *alpha = u8::MAX;
+        }
+
+        if active.y_inverted {
+            for rect in &mut active.damage {
+                rect.y = description
+                    .height
+                    .saturating_sub(rect.y.saturating_add(rect.height));
+            }
+        }
+
+        let seconds = (u64::from(tv_sec_hi) << 32) | u64::from(tv_sec_lo);
+        Ok(CapturedFrame {
+            width: description.width,
+            height: description.height,
+            stride: description.width * 4,
+            bgra,
+            damage: active.damage,
+            presentation_time_ns: u128::from(seconds) * 1_000_000_000 + u128::from(tv_nsec),
+        })
+    }
+}
+
+/// Blocking wlr-screencopy source. Run it on the host capture thread.
+pub struct LinuxCapture {
+    _connection: Connection,
+    event_queue: wayland_client::EventQueue<CaptureState>,
+    state: CaptureState,
+    config: CaptureConfig,
+    selected_output: OutputInfo,
+}
+
+impl LinuxCapture {
+    pub fn connect(config: CaptureConfig) -> Result<Self, CaptureError> {
+        let connection = Connection::connect_to_env()?;
+        let mut event_queue = connection.new_event_queue();
+        let qh = event_queue.handle();
+        connection.display().get_registry(&qh, ());
+
+        let mut state = CaptureState {
+            manager: None,
+            shm: None,
+            outputs: Vec::new(),
+            offered_buffer: None,
+            active: None,
+            result: None,
+        };
+        // First roundtrip discovers globals; the second receives wl_output
+        // metadata, including the connector name on wl_output v4.
+        event_queue.roundtrip(&mut state)?;
+        event_queue.roundtrip(&mut state)?;
+
+        if state.manager.is_none() {
+            return Err(CaptureError::PortalRequired("zwlr_screencopy_manager_v1"));
+        }
+        if state.shm.is_none() {
+            return Err(CaptureError::PortalRequired("wl_shm"));
+        }
+        let (_, selected_output) = state
+            .output(config.output_name.as_deref())
+            .ok_or_else(|| CaptureError::OutputNotFound(config.output_name.clone()))?;
+
+        Ok(Self {
+            _connection: connection,
+            event_queue,
+            state,
+            config,
+            selected_output,
+        })
+    }
+
+    pub fn output_info(&self) -> &OutputInfo {
+        &self.selected_output
+    }
+
+    pub fn capture_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
+        self.state.offered_buffer = None;
+        self.state.active = None;
+        self.state.result = None;
+
+        let manager = self
+            .state
+            .manager
+            .as_ref()
+            .ok_or(CaptureError::PortalRequired("zwlr_screencopy_manager_v1"))?
+            .clone();
+        let (output, _) = self
+            .state
+            .output(self.config.output_name.as_deref())
+            .ok_or_else(|| CaptureError::OutputNotFound(self.config.output_name.clone()))?;
+        let qh = self.event_queue.handle();
+        let overlay_cursor = i32::from(self.config.overlay_cursor);
+        if let Some(region) = self.config.region {
+            if region.width <= 0 || region.height <= 0 {
+                return Err(CaptureError::InvalidBuffer("capture region is empty"));
+            }
+            manager.capture_output_region(
+                overlay_cursor,
+                &output,
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+                &qh,
+                (),
+            );
+        } else {
+            manager.capture_output(overlay_cursor, &output, &qh, ());
+        }
+
+        loop {
+            self.event_queue.blocking_dispatch(&mut self.state)?;
+            if let Some(result) = self.state.result.take() {
+                return result;
+            }
+        }
+    }
+}
+
+impl Dispatch<wl_registry::WlRegistry, ()> for CaptureState {
+    fn event(
+        state: &mut Self,
+        registry: &wl_registry::WlRegistry,
+        event: wl_registry::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } if interface
+                == zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1::interface().name =>
+            {
+                state.manager = Some(registry.bind(name, version.min(3), qh, ()));
+            }
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version: _,
+            } if interface == wl_shm::WlShm::interface().name => {
+                state.shm = Some(registry.bind(name, 1, qh, ()));
+            }
+            wl_registry::Event::Global {
+                name,
+                interface,
+                version,
+            } if interface == wl_output::WlOutput::interface().name => {
+                let output =
+                    registry.bind(name, version.min(4), qh, OutputData { global_name: name });
+                state.outputs.push((
+                    output,
+                    OutputInfo {
+                        global_name: name,
+                        name: None,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                        scale: 1,
+                    },
+                ));
+            }
+            wl_registry::Event::GlobalRemove { name } => {
+                state
+                    .outputs
+                    .retain(|(_, output)| output.global_name != name);
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, OutputData> for CaptureState {
+    fn event(
+        state: &mut Self,
+        _: &wl_output::WlOutput,
+        event: wl_output::Event,
+        data: &OutputData,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let Some((_, info)) = state
+            .outputs
+            .iter_mut()
+            .find(|(_, info)| info.global_name == data.global_name)
+        else {
+            return;
+        };
+        match event {
+            wl_output::Event::Mode {
+                flags: WEnum::Value(flags),
+                width,
+                height,
+                ..
+            } if flags.contains(wl_output::Mode::Current) => {
+                info.pixel_width = width.max(0) as u32;
+                info.pixel_height = height.max(0) as u32;
+            }
+            wl_output::Event::Scale { factor } => info.scale = factor.max(1),
+            wl_output::Event::Name { name } => info.name = Some(name),
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for CaptureState {
+    fn event(
+        state: &mut Self,
+        frame: &zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
+        event: zwlr_screencopy_frame_v1::Event,
+        _: &(),
+        _: &Connection,
+        qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_screencopy_frame_v1::Event::Buffer {
+                format,
+                width,
+                height,
+                stride,
+            } => {
+                let format = match format {
+                    WEnum::Value(wl_shm::Format::Argb8888) => wl_shm::Format::Argb8888,
+                    WEnum::Value(wl_shm::Format::Xrgb8888) => wl_shm::Format::Xrgb8888,
+                    other => {
+                        state.result =
+                            Some(Err(CaptureError::UnsupportedFormat(format!("{other:?}"))));
+                        return;
+                    }
+                };
+                state.offered_buffer = Some(BufferDescription {
+                    format,
+                    width,
+                    height,
+                    stride,
+                });
+                // Protocol versions 1 and 2 have no buffer_done event.
+                if frame.version() < 3 {
+                    if let Err(error) = state.create_buffer(frame, qh) {
+                        state.result = Some(Err(error));
+                    }
+                }
+            }
+            zwlr_screencopy_frame_v1::Event::BufferDone => {
+                if let Err(error) = state.create_buffer(frame, qh) {
+                    state.result = Some(Err(error));
+                }
+            }
+            zwlr_screencopy_frame_v1::Event::Flags { flags } => {
+                if let Some(active) = &mut state.active {
+                    active.y_inverted = match flags {
+                        WEnum::Value(flags) => {
+                            flags.contains(zwlr_screencopy_frame_v1::Flags::YInvert)
+                        }
+                        WEnum::Unknown(_) => false,
+                    };
+                }
+            }
+            zwlr_screencopy_frame_v1::Event::Damage {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                if let Some(active) = &mut state.active {
+                    active.damage.push(DamageRect {
+                        x,
+                        y,
+                        width,
+                        height,
+                    });
+                }
+            }
+            zwlr_screencopy_frame_v1::Event::Ready {
+                tv_sec_hi,
+                tv_sec_lo,
+                tv_nsec,
+            } => {
+                state.result = Some(state.finish_capture(tv_sec_hi, tv_sec_lo, tv_nsec));
+                frame.destroy();
+            }
+            zwlr_screencopy_frame_v1::Event::Failed => {
+                state.result = Some(Err(CaptureError::CaptureFailed));
+                frame.destroy();
+            }
+            _ => {}
+        }
+    }
+}
+
+delegate_noop!(CaptureState: ignore wl_shm::WlShm);
+delegate_noop!(CaptureState: ignore wl_shm_pool::WlShmPool);
+delegate_noop!(CaptureState: ignore wl_buffer::WlBuffer);
+delegate_noop!(CaptureState: ignore zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1);

@@ -17,3 +17,4 @@ Packages/
 # auto-added: build artifacts & tooling state
 target/
 .serena/
+clients/rust/target-tauri/

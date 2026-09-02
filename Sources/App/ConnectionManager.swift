@@ -147,13 +147,16 @@ final class ConnectionManager: ObservableObject {
             ClientCore.shared.isAudioMuted.value = isAudioMuted
         }
     }
+    @Published var hostStartError: String?
+    @Published var pairingRequestHostName: String?
+    private var pairingResponder: ((Bool) -> Void)?
 
     private var clipboardToastWorkItem: DispatchWorkItem?
     private var lastBonjourEndpoint: NWEndpoint?
     private var lastBonjourName: String?
     private var lastPIN: String?
     private var reconnectAttempts = 0
-    private var isUserDisconnect = false
+    private var expectingStop = false
     private var reconnectWorkItem: DispatchWorkItem?
     private var streamConfigTimeoutWorkItem: DispatchWorkItem?
     private let maxReconnectAttempts = 3
@@ -180,11 +183,10 @@ final class ConnectionManager: ObservableObject {
                 self.sessionControls.isFullscreen = false
                 self.cancelStreamConfigRequestTimeout()
 
-                if self.isUserDisconnect {
-                    self.isUserDisconnect = false
-                    self.state = .disconnected
-                    self.serverName = nil
-                    self.sessionControls = SessionControlState()
+                // A disconnect event that belongs to a stop() we issued is
+                // stale bookkeeping; only unexpected drops may reconnect.
+                if self.expectingStop {
+                    self.expectingStop = false
                     return
                 }
                 self.attemptReconnect()
@@ -215,25 +217,42 @@ final class ConnectionManager: ObservableObject {
                 self?.triggerClipboardToast(text: text)
             }
         }
+        ServerCore.shared.onStartFailed = { [weak self] message in
+            Task { @MainActor [weak self] in
+                self?.hostStartError = message
+            }
+        }
+        ServerCore.shared.onPairingRequest = { [weak self] hostname, respond in
+            Task { @MainActor [weak self] in
+                guard let self else { respond(false); return }
+                self.pairingResponder = respond
+                self.pairingRequestHostName = hostname
+            }
+        }
+    }
+
+    func respondToPairingRequest(_ approved: Bool) {
+        pairingResponder?(approved)
+        pairingResponder = nil
+        pairingRequestHostName = nil
     }
 
     func connectBonjour(endpoint: NWEndpoint, name: String) {
         cancelStreamConfigRequestTimeout()
         reconnectAttempts = 0
-        isUserDisconnect = false
         state = .connecting
         serverName = name
         sessionControls = SessionControlState()
         lastBonjourEndpoint = endpoint
         lastBonjourName = name
         lastPIN = nil
-        ClientCore.shared.start(endpoint: endpoint, name: name)
+        let pairing = PairingManager.shared.pairedDevices().first
+        ClientCore.shared.start(endpoint: endpoint, name: name, pairing: pairing, bootstrapPIN: nil)
     }
 
     func connectPIN(pin: String) {
         cancelStreamConfigRequestTimeout()
         reconnectAttempts = 0
-        isUserDisconnect = false
         state = .connecting
         sessionControls = SessionControlState()
         lastPIN = pin
@@ -246,7 +265,7 @@ final class ConnectionManager: ObservableObject {
         reconnectWorkItem?.cancel()
         reconnectWorkItem = nil
         cancelStreamConfigRequestTimeout()
-        isUserDisconnect = true
+        expectingStop = true
         reconnectAttempts = 0
         sessionControls.isImmersiveModeEnabled = false
         sessionControls.isFullscreen = false

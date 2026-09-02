@@ -1,0 +1,23 @@
+I read this as a documentation implementation task - I extracted and cross-checked the v3 wire contract, then wrote the complete specification.
+
+Created `docs/protocol-v3.md` with:
+
+- Explicit byte offsets and endianness for all packet and payload layouts
+- Packet types 0 through 11
+- TCP framing and 16 MiB validation cap
+- Handshake v3 capabilities, pairing ID, and session salt
+- Pairing request, grant, reject, TLS-PSK identities, derivation, and flow
+- AES-256-GCM UDP layout, exact HKDF strings, nonces, and replay protection
+- Video, HEVC AVCC, audio fragmentation, input, cursor, and heartbeat rules
+- Control messages 0 through 13, including stream configuration and clipboard payloads
+- ntfy signaling derivation, encryption, JSON candidate schema, and polling behavior
+- RFC 5869 test vectors and fixed packet encoding examples
+- Validation limits needed for a standalone Rust implementation
+
+Verification completed:
+
+- Cross-checked the draft inventory and named Swift protocol sources
+- Inventory script found all 37 required protocol markers
+- `git diff --check` passed
+- Confirmed there are no em dashes, en dashes, or prohibited prose phrases
+- Markdown LSP diagnostics weren't available because the workspace has no Markdown language server configured

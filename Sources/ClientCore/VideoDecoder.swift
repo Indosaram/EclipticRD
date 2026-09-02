@@ -99,6 +99,12 @@ public class VideoDecoder {
 
         guard let format = newFormat else { return }
 
+        // The host re-sends parameter sets with every keyframe; keep the live
+        // hardware session unless the stream parameters actually changed.
+        if let current = formatDescription, session != nil, CMFormatDescriptionEqual(current, otherFormatDescription: format) {
+            return
+        }
+
         if session != nil {
             VTDecompressionSessionInvalidate(session!)
             session = nil
@@ -125,6 +131,10 @@ public class VideoDecoder {
             outputCallback: &callbackRecord,
             decompressionSessionOut: &session
         )
+
+        if let session = session {
+            VTSessionSetProperty(session, key: kVTDecompressionPropertyKey_RealTime, value: kCFBooleanTrue)
+        }
     }
 
     private func decodeNALU(_ nalu: Data) {

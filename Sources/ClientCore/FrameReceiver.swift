@@ -26,6 +26,8 @@ public class FrameReceiver {
     }
 
     private var frames: [UInt32: FrameAssembly] = [:]
+    // Chunks that arrived before their frame header under UDP reordering
+    private var orphanChunks: [UInt32: [UInt16: Data]] = [:]
     private let assemblyQueue = DispatchQueue(label: "eclipticrd.frame-assembly", qos: .userInteractive)
     private var cleanupTimer: DispatchSourceTimer?
     private let timeout: Double = ERDConstants.frameAssemblyTimeout
@@ -74,13 +76,11 @@ public class FrameReceiver {
 
     public func stop() {
         assemblyQueue.sync {
-            self.cleanupTimer?.cancel()
-            self.cleanupTimer = nil
             self.frames.removeAll()
+            self.orphanChunks.removeAll()
             self.completedFrameTimestamps.removeAll()
             self.totalFramesReceived = 0
             self.expectedFrameId = 0
-            self.startCleanupTimer()
         }
         lossLock.lock()
         lossEntries.removeAll()
@@ -125,25 +125,17 @@ public class FrameReceiver {
 
         trackFrameLoss(receivedFrameId: fh.frameId)
         frames[fh.frameId] = FrameAssembly(header: fh, chunks: [:], startTime: Date())
-    }
 
-    private func handleFrameChunk(_ data: Data) {
-        guard let chunk = FrameChunkPayload.deserialize(from: data) else {
-            ERDLog.error("[FrameReceiver] Failed to deserialize chunk from \(data.count) bytes")
-            return
-        }
-        guard frames[chunk.frameId] != nil else {
-            ERDLog.debug("[FrameReceiver] Orphan chunk: frame#\(chunk.frameId) idx=\(chunk.chunkIndex) (no header yet)")
-            return
+        if let pending = orphanChunks.removeValue(forKey: fh.frameId) {
+            for (index, data) in pending where index < fh.totalChunks {
+                frames[fh.frameId]!.chunks[index] = data
+            }
         }
 
-        frames[chunk.frameId]!.chunks[chunk.chunkIndex] = chunk.chunkData
-        let assembly = frames[chunk.frameId]!
-
-        if assembly.isComplete {
-            let completed = frames.removeValue(forKey: chunk.frameId)!
+        // A fully-buffered orphan frame completes the moment its header lands.
+        if frames[fh.frameId]!.isComplete {
+            let completed = frames.removeValue(forKey: fh.frameId)!
             if let frameData = completed.assemble() {
-                ERDLog.video("[FrameReceiver] ✅ Frame #\(chunk.frameId) assembled: \(frameData.count) bytes")
                 totalFramesReceived += 1
                 completedFrameTimestamps.append(Date())
                 let cutoff = Date().addingTimeInterval(-2.0)
@@ -151,6 +143,44 @@ public class FrameReceiver {
                 onFrameReady?(frameData, completed.header)
             }
         }
+    }
+
+    private func handleFrameChunk(_ data: Data) {
+        guard let chunk = FrameChunkPayload.deserialize(from: data) else {
+            ERDLog.error("[FrameReceiver] Failed to deserialize chunk from \(data.count) bytes")
+            return
+        }
+
+        if frames[chunk.frameId] != nil {
+            let assembly = frames[chunk.frameId]!
+            guard chunk.chunkIndex < assembly.header.totalChunks else { return }
+
+            frames[chunk.frameId]!.chunks[chunk.chunkIndex] = chunk.chunkData
+            let updated = frames[chunk.frameId]!
+
+            if updated.isComplete {
+                let completed = frames.removeValue(forKey: chunk.frameId)!
+                if let frameData = completed.assemble() {
+                    ERDLog.video("[FrameReceiver] ✅ Frame #\(chunk.frameId) assembled: \(frameData.count) bytes")
+                    totalFramesReceived += 1
+                    completedFrameTimestamps.append(Date())
+                    let cutoff = Date().addingTimeInterval(-2.0)
+                    completedFrameTimestamps.removeAll { $0 < cutoff }
+                    onFrameReady?(frameData, completed.header)
+                }
+            }
+            return
+        }
+
+        // No header yet: hold the chunk for reassembly when the header lands.
+        guard orphanChunks.count < 16 || orphanChunks[chunk.frameId] != nil else { return }
+        var orphans = orphanChunks[chunk.frameId] ?? [:]
+        guard orphans.count < Int(ERDConstants.maxChunksPerFrame) else {
+            orphanChunks.removeValue(forKey: chunk.frameId)
+            return
+        }
+        orphans[chunk.chunkIndex] = chunk.chunkData
+        orphanChunks[chunk.frameId] = orphans
     }
 
     private func trackFrameLoss(receivedFrameId: UInt32) {
@@ -166,7 +196,7 @@ public class FrameReceiver {
 
         let gap = receivedFrameId > expectedFrameId ? Int(receivedFrameId - expectedFrameId) : 0
         lossEntries.append(LossEntry(timestamp: Date(), lost: gap, total: 1 + gap))
-        expectedFrameId = receivedFrameId + 1
+        expectedFrameId = max(expectedFrameId, receivedFrameId &+ 1)
 
         let cutoff = Date().addingTimeInterval(-10.0)
         lossEntries.removeAll { $0.timestamp < cutoff }
@@ -179,6 +209,7 @@ public class FrameReceiver {
             guard let self = self else { return }
             let now = Date()
             self.frames = self.frames.filter { now.timeIntervalSince($0.value.startTime) < self.timeout }
+            self.orphanChunks.removeAll()
         }
         timer.resume()
         cleanupTimer = timer

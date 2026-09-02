@@ -17,8 +17,9 @@ class HomeBonjourBrowserManager: ObservableObject {
 struct HomeView: View {
     @EnvironmentObject var connectionManager: ConnectionManager
     @State private var isServerRunning = ServerCore.shared.isRunning
-    @State private var serverPIN = String(format: "%06d", Int.random(in: 0..<1_000_000))
+    @State private var serverPIN = ERDCrypto.randomPIN()
     @State private var manualPIN = ""
+    @State private var pairedDevices: [PairingRecord] = []
     
     // Sidebar Navigation Tab enum
     enum Tab {
@@ -31,12 +32,11 @@ struct HomeView: View {
     @State private var showDiscoveryEmptyState = false
     @State private var discoveryStateTask: Task<Void, Never>?
 
-    @AppStorage("preferredCodec") private var preferredCodec = "HEVC"
     @AppStorage("preferredFPS") private var preferredFPS = 60
     @AppStorage("hostAudioEnabled") private var hostAudioEnabled = true
 
     private var isManualPINValid: Bool {
-        manualPIN.trimmingCharacters(in: .whitespacesAndNewlines).count == 6
+        manualPIN.trimmingCharacters(in: .whitespacesAndNewlines).count == ERDConstants.pinLength
     }
 
     var body: some View {
@@ -55,6 +55,7 @@ struct HomeView: View {
         .preferredColorScheme(.dark)
         .onAppear {
             isServerRunning = ServerCore.shared.isRunning
+            pairedDevices = PairingManager.shared.pairedDevices()
             ServerCore.shared.onRunningChanged = { running in
                 DispatchQueue.main.async {
                     isServerRunning = running
@@ -63,10 +64,38 @@ struct HomeView: View {
             beginDiscoveryPresentation()
         }
         .onDisappear {
-            ServerCore.shared.onRunningChanged = nil
             discoveryStateTask?.cancel()
             discoveryStateTask = nil
             browserManager.stopBrowsing()
+        }
+        .alert(
+            "New Device Pairing Request",
+            isPresented: Binding(
+                get: { connectionManager.pairingRequestHostName != nil },
+                set: { if !$0 { connectionManager.respondToPairingRequest(false) } }
+            )
+        ) {
+            Button("Allow") {
+                connectionManager.respondToPairingRequest(true)
+            }
+            Button("Deny", role: .cancel) {
+                connectionManager.respondToPairingRequest(false)
+            }
+        } message: {
+            Text("\(connectionManager.pairingRequestHostName ?? "An unknown device") wants to view this Mac's screen and control its keyboard and mouse.")
+        }
+        .alert(
+            "Hosting Failed",
+            isPresented: Binding(
+                get: { connectionManager.hostStartError != nil },
+                set: { if !$0 { connectionManager.hostStartError = nil } }
+            )
+        ) {
+            Button("OK") {
+                connectionManager.hostStartError = nil
+            }
+        } message: {
+            Text(connectionManager.hostStartError ?? "The host could not be started.")
         }
     }
 
@@ -244,16 +273,24 @@ struct HomeView: View {
 
             Spacer(minLength: ERDTheme.Spacing.section)
 
-            Button(isServerRunning ? "Stop Broadcasting" : "Start Hosting") {
-                Task {
-                    if isServerRunning {
-                        await ServerCore.shared.stop()
-                    } else {
-                        await ServerCore.shared.start(pin: serverPIN)
+            HStack(spacing: ERDTheme.Spacing.compact) {
+                Button(isServerRunning ? "Stop Broadcasting" : "Start Hosting") {
+                    Task {
+                        if isServerRunning {
+                            await ServerCore.shared.stop()
+                        } else {
+                            await ServerCore.shared.start(pin: serverPIN)
+                        }
                     }
                 }
+                .buttonStyle(ERDActionButtonStyle(tint: isServerRunning ? ERDTheme.red : ERDTheme.blue))
+
+                Button("New PIN") {
+                    serverPIN = ServerCore.shared.beginPairingSession()
+                }
+                .buttonStyle(ERDActionButtonStyle(tint: ERDTheme.softBorder, isProminent: false))
+                .disabled(!isServerRunning)
             }
-            .buttonStyle(ERDActionButtonStyle(tint: isServerRunning ? ERDTheme.red : ERDTheme.blue))
         }
     }
 
@@ -268,7 +305,7 @@ struct HomeView: View {
 
             VStack(alignment: .leading, spacing: ERDTheme.Spacing.small) {
                 HStack(alignment: .center, spacing: ERDTheme.Spacing.compact) {
-                    TextField("Enter 6-digit PIN", text: $manualPIN)
+                    TextField("Enter \(ERDConstants.pinLength)-digit PIN", text: $manualPIN)
                         .textFieldStyle(.plain)
                         .erdInputField()
                         .frame(maxWidth: .infinity)
@@ -287,7 +324,7 @@ struct HomeView: View {
                     
                     Spacer()
                     
-                    Text("\(manualPIN.count) / 6")
+                    Text("\(manualPIN.count) / \(ERDConstants.pinLength)")
                         .font(ERDTheme.Typography.caption)
                         .foregroundStyle(isManualPINValid ? ERDTheme.green : ERDTheme.mutedText)
                         .monospacedDigit()
@@ -425,20 +462,6 @@ struct HomeView: View {
                         )
 
                         VStack(alignment: .leading, spacing: ERDTheme.Spacing.section) {
-                            // Preferred Video Codec
-                            VStack(alignment: .leading, spacing: ERDTheme.Spacing.micro) {
-                                Text("PREFERRED VIDEO CODEC")
-                                    .font(ERDTheme.Typography.eyebrow)
-                                    .foregroundStyle(ERDTheme.mutedText)
-
-                                Picker("", selection: $preferredCodec) {
-                                    Text("H.265 (HEVC)").tag("HEVC")
-                                    Text("H.264").tag("H.264")
-                                }
-                                .pickerStyle(.segmented)
-                                .labelsHidden()
-                            }
-
                             // Frame Rate FPS
                             VStack(alignment: .leading, spacing: ERDTheme.Spacing.micro) {
                                 Text("STREAMING FRAME RATE")
@@ -489,6 +512,44 @@ struct HomeView: View {
                         }
                         .padding(.vertical, ERDTheme.Spacing.micro)
                     }
+
+                    // Paired Devices Card
+                    ERDPanel {
+                        ERDSectionHeader(
+                            eyebrow: "Security",
+                            title: "Paired Devices",
+                            detail: ""
+                        )
+
+                        VStack(alignment: .leading, spacing: ERDTheme.Spacing.small) {
+                            if pairedDevices.isEmpty {
+                                Text("No paired devices yet. New devices pair with the access PIN.")
+                                    .font(ERDTheme.Typography.caption)
+                                    .foregroundStyle(ERDTheme.mutedText)
+                            } else {
+                                ForEach(pairedDevices) { device in
+                                    HStack(alignment: .center) {
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(device.name)
+                                                .font(ERDTheme.Typography.bodyEmphasized)
+                                                .foregroundStyle(ERDTheme.strongText)
+                                            Text("Paired \(device.addedAt.formatted(date: .abbreviated, time: .omitted))")
+                                                .font(ERDTheme.Typography.caption)
+                                                .foregroundStyle(ERDTheme.mutedText)
+                                        }
+                                        Spacer()
+                                        Button("Remove") {
+                                            PairingManager.shared.revokePairing(id: device.id)
+                                            pairedDevices = PairingManager.shared.pairedDevices()
+                                        }
+                                        .buttonStyle(.plain)
+                                        .foregroundStyle(ERDTheme.red)
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.vertical, ERDTheme.Spacing.micro)
+                    }
                 }
             }
             .padding(ERDTheme.Spacing.screen * 1.2)
@@ -496,9 +557,9 @@ struct HomeView: View {
     }
 
     private func formatPIN(_ pin: String) -> String {
-        guard pin.count == 6 else { return pin }
-        let index3 = pin.index(pin.startIndex, offsetBy: 3)
-        return "\(pin[..<index3]) \(pin[index3...])"
+        guard pin.count == ERDConstants.pinLength else { return pin }
+        let mid = pin.index(pin.startIndex, offsetBy: pin.count / 2)
+        return "\(pin[..<mid]) \(pin[mid...])"
     }
 
     // State surface layout for connecting/error sheets (remains uniform)

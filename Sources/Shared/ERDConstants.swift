@@ -25,7 +25,22 @@ public enum ERDConstants {
     public static let frameAssemblyTimeout: Double = 1.0
     public static let inputBatchInterval: Double = 1.0 / 120.0
 
-    public static let legacyProtocolVersion: UInt8 = 1
-    public static let protocolVersion: UInt8 = 2
+    public static let legacyProtocolVersion: UInt8 = 1 // rejected on connect (v3 broke wire compat)
+    public static let protocolVersion: UInt8 = 3
     public static let maxClipboardTextBytes: Int = 4096
+
+    // v3: allocation caps against wire-driven amplification
+    public static let maxFrameBytes = 33_554_432 // 32 MiB hard cap per assembled frame
+
+    // v3: pairing / bootstrap (see ERDIdentity.swift)
+    public static let pinLength = 8
+    public static let pairingPINExpiry: Double = 300
+    public static let pairingAttemptWindow: Double = 60
+    public static let maxPairingAttempts = 5
+    public static let pairingLockout: Double = 300
+
+    public static let maxInputEventsPerSecond = 200
+    public static let inputBurstCapacity = 400
+
+    public static let bootstrapPINStretchRounds: UInt32 = 600_000
 }

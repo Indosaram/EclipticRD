@@ -36,6 +36,7 @@ public struct FrameHeaderPayload {
         let kf = data[8] != 0
         let tc = data.subdata(in: 9..<11).withUnsafeBytes { $0.load(as: UInt16.self).littleEndian }
         let ts = data.subdata(in: 12..<16).withUnsafeBytes { $0.load(as: UInt32.self).littleEndian }
+        guard tc <= ERDConstants.maxChunksPerFrame, ts <= ERDConstants.maxFrameBytes else { return nil }
         return FrameHeaderPayload(frameId: fid, width: w, height: h, isKeyFrame: kf, totalChunks: tc, totalSize: ts)
     }
 }

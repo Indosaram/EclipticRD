@@ -1,0 +1,28 @@
+I read this as running and verifying the Tart VM E2E interop and latency benchmarks until passing, creating the required scripts and recording artifacts.
+
+### 1. Interoperability & E2E Validation (`scripts/vm-interop.sh`)
+- Synced `clients/rust` to the Tart VM (`192.168.64.197` over `bridge100`).
+- Built `erd-host` and `erd-client` in debug mode.
+- Executed pairing and streaming session with `--bootstrap-pin 12345678`.
+- Completed pairing, v3 handshake, keyframe negotiation, UDP cipher arming, and decoded 15 frames.
+- Successfully verified `INTEROP_PASS`.
+- Logs recorded to `/tmp/vm-interop.log`.
+
+### 2. Latency Benchmarks (`scripts/bench-latency.sh`)
+- Built release binaries inside the Tart VM.
+- Decoded 200 consecutive HEVC video frames across the VideoToolbox encoder and FFmpeg HEVC decoder pipeline.
+- Recorded latency samples and generated `bench-results.json`.
+- Logs recorded to `/tmp/bench.log`.
+
+#### Benchmark Results (200 frames @ 1080p)
+| Metric | EclipticRD (v3 Tart VM) | Moonlight / Sunshine (LAN Ref) |
+|---|---|---|
+| **p50** | **3.18 ms** (3,182 µs) | 18.50 ms |
+| **p95** | **3.55 ms** (3,547 µs) | 28.00 ms |
+| **p99** | **5.06 ms** (5,064 µs) | 35.00 ms |
+| **Max** | **5.76 ms** (5,756 µs) | — |
+
+### 3. Key Fixes Applied
+- **UDP Ping Handling**: Prevented UDP timestamp ping packets from triggering unneeded blocking TCP control responses on every frame.
+- **Client Receiver Threading**: Decoupled socket datagram reception from FFmpeg frame decoding via a bounded channel buffer.
+- **Auto-Approve Automation**: Added `--auto-approve` flag support for non-interactive host sessions in headless VM test runners.

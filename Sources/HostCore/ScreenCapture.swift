@@ -10,6 +10,18 @@ public enum ScreenCaptureError: Error, Hashable {
     case captureStartFailed
 }
 
+/// Capture seam so session orchestration (ServerCore) can be driven by a
+/// synthetic frame source in tests without ScreenCaptureKit or TCC prompts.
+public protocol FrameSource: AnyObject {
+    var onFrame: ((CMSampleBuffer) -> Void)? { get set }
+    var onCursorPosition: ((CGPoint) -> Void)? { get set }
+    var onAudio: ((CMSampleBuffer) -> Void)? { get set }
+    func getDisplayInfo() -> (width: Int, height: Int, pixelWidth: Int, pixelHeight: Int, scale: CGFloat)
+    func start(fps: Int) async throws
+    func updateConfiguration(width: Int, height: Int, fps: Int) async throws
+    func stop() async throws
+}
+
 public class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private let captureQueue = DispatchQueue(label: "eclipticrd.capture", qos: .userInteractive)
@@ -92,6 +104,8 @@ public class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.queueDepth = 3
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.showsCursor = true
+        let hostAudioEnabled = UserDefaults.standard.object(forKey: "hostAudioEnabled") as? Bool ?? true
+        config.capturesAudio = hostAudioEnabled
 
         try await stream.updateConfiguration(config)
         self.width = width
@@ -116,14 +130,14 @@ public class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
                let x = cursor["x"] as? CGFloat, let y = cursor["y"] as? CGFloat {
                 onCursorPosition?(CGPoint(x: x, y: y))
             } else {
-                // Fallback: use NSEvent.mouseLocation (global screen coordinates, origin at bottom-left)
-                // Convert to display-local coordinates accounting for multi-monitor offset
+                // Fallback: NSEvent.mouseLocation (global, bottom-left origin).
+                // CGDisplayBounds is thread-safe; NSScreen.main is MainActor-bound
+                // and must not be touched from the capture queue.
                 let mouseLocation = NSEvent.mouseLocation
-                if let screen = NSScreen.main {
-                    let relativeX = mouseLocation.x - screen.frame.origin.x
-                    let relativeY = screen.frame.maxY - mouseLocation.y
-                    onCursorPosition?(CGPoint(x: relativeX, y: relativeY))
-                }
+                let bounds = CGDisplayBounds(CGMainDisplayID())
+                let relativeX = mouseLocation.x - bounds.origin.x
+                let relativeY = bounds.height - (mouseLocation.y - bounds.origin.y)
+                onCursorPosition?(CGPoint(x: relativeX, y: relativeY))
             }
         } else if type == .audio {
             onAudio?(sampleBuffer)
@@ -135,3 +149,5 @@ public class ScreenCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         ERDLog.error("[Capture] Stream stopped with error: \(error)")
     }
 }
+
+extension ScreenCapture: FrameSource {}

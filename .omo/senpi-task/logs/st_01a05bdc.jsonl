@@ -1,0 +1,12 @@
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"running","residency_state":"resident"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"retry_fallback_applied","payload":{"from":"quotio/gpt-5.6-sol","to":"quotio/gemini-3.7-flash-high","chain_key":"quotio/gpt-5.6-sol","reason":"transient"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"child_error","payload":{"message":"Connection error.","stop_reason":"error"}}
+{"type":"retry_fallback_exhausted","payload":{"chain_key":"quotio/gpt-5.6-sol","last_error":"Connection error."}}
+{"type":"transition_applied","payload":{"type":"transition_applied","status":"error","residency_state":"resident"}}
+{"type":"reconcile_reattached","payload":{"session_path":"/Users/indo/code/project/EclipticRD-Rewrite/.omo/senpi-task/children/st_01a05bdc/sessions/st_01a05bdc/2026-09-01T07-20-40-522Z_01a05bd7-6f4a-7eb2-902a-67673777a178.jsonl"}}

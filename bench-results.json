@@ -1,0 +1,22 @@
+{
+  "protocol": "v3",
+  "environment": "Tart macOS VM (Paravirtualized)",
+  "frames_evaluated": 200,
+  "latency_us": {
+    "p50": 3050,
+    "p95": 3458,
+    "p99": 5010,
+    "max": 5876
+  },
+  "latency_ms": {
+    "p50": 3.05,
+    "p95": 3.46,
+    "p99": 5.01,
+    "max": 5.88
+  },
+  "moonlight_reference_ms": {
+    "p50": 18.5,
+    "p95": 28.0,
+    "p99": 35.0
+  }
+}

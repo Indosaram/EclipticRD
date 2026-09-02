@@ -1,0 +1,56 @@
+name: Rust Client
+
+on:
+  push:
+    paths:
+      - "clients/rust/**"
+      - ".github/workflows/rust-client.yml"
+  pull_request:
+    paths:
+      - "clients/rust/**"
+      - ".github/workflows/rust-client.yml"
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: clients/rust
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+
+  ubuntu:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clients/rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
+            libclang-dev libswscale-dev libudev-dev libva-dev libwayland-dev \
+            libx264-dev pkg-config
+      - run: cargo check -p erd-host --target x86_64-unknown-linux-gnu
+      - run: cargo build --workspace
+      - run: cargo test --workspace
+
+  windows:
+    runs-on: windows-latest
+    env:
+      OPENSSL_STATIC: "1"
+    defaults:
+      run:
+        working-directory: clients/rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile Windows host backends
+        run: cargo build -p erd-host --lib
+      - name: Test Windows host and portable backend logic
+        run: cargo test -p erd-host --lib
+      - run: cargo build --workspace
+      - run: cargo test --workspace
