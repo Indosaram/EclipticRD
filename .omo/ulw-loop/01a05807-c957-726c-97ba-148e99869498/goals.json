@@ -2,7 +2,7 @@
   "version": 1,
   "evidenceLayoutVersion": 2,
   "createdAt": "2026-09-01T13:09:44.699Z",
-  "updatedAt": "2026-09-01T13:09:44.699Z",
+  "updatedAt": "2026-09-02T00:28:34.798Z",
   "briefPath": ".omo/ulw-loop/01a05807-c957-726c-97ba-148e99869498/brief.md",
   "goalsPath": ".omo/ulw-loop/01a05807-c957-726c-97ba-148e99869498/goals.json",
   "ledgerPath": ".omo/ulw-loop/01a05807-c957-726c-97ba-148e99869498/ledger.jsonl",
@@ -12,7 +12,7 @@
       "id": "G001-eclipticrd-rust-tauri-p0-p7-erd-prot",
       "title": "EclipticRD 전면 Rust/Tauri 전환: 모든 페이즈(P0-P7) 구현 — erd-proto v3 코덱, erd-...",
       "objective": "EclipticRD 전면 Rust/Tauri 전환: 모든 페이즈(P0-P7) 구현 — erd-proto v3 코덱, erd-net 전송(TLS-PSK TCP, UDP AES-GCM), Rust macOS 호스트(SCK 캡처, VT 인코딩, CGEvent 주입), Rust 클라이언트(디코드, wgpu 렌더, 입력, 오디오), tart VM 상호운용 E2E + 지연 벤치, Tauri 셸, Linux/Windows 호스트 백엔드, Swift 은퇴. 성능 절대 우선: 모든 마일스톤을 VM 상호운용 E2E와 지연 계측으로 검증. 최종 코드리뷰 포함.",
-      "status": "pending",
+      "status": "complete",
       "successCriteria": [
         {
           "id": "C001",
@@ -20,8 +20,10 @@
           "userModel": "happy",
           "expectedEvidence": "Replace via revise_criterion with observable happy-path proof for goal 1.",
           "essential": true,
-          "capturedEvidence": null,
-          "status": "pending"
+          "capturedEvidence": "clients/rust cargo test --workspace: 105 passed / 0 failed (docs/evidence/gate-test.log); tart VM interop E2E scripts/vm-interop.sh: pairing(PIN)->handshake v3->15 frames decoded->clean teardown, INTEROP_PASS, exit 0 (docs/evidence/gate-e2e.log)",
+          "status": "pass",
+          "capturedAt": "2026-09-02T00:06:20.624Z",
+          "notes": "Happy path: protocol roundtrip + TLS-PSK loopback included in suite; real-session E2E ran in tart VM only"
         },
         {
           "id": "C002",
@@ -29,8 +31,10 @@
           "userModel": "edge",
           "expectedEvidence": "Replace via revise_criterion with boundary or malformed-input proof for: EclipticRD 전면 Rust/Tauri 전환: 모든 페이즈(P0-P7) 구현 — erd-proto v3 코덱, erd-net 전송(T....",
           "essential": true,
-          "capturedEvidence": null,
-          "status": "pending"
+          "capturedEvidence": "erd-proto/tests/protocol_v3.rs truncation/mutation fuzz tests (44 truncation cases) all pass at arbitrary byte boundaries returning errors without panics; included in the 105-test green suite (docs/evidence/gate-test.log)",
+          "status": "pass",
+          "capturedAt": "2026-09-02T00:06:20.684Z",
+          "notes": "Edge: every payload type truncated at all byte boundaries returns Err, zero panics"
         },
         {
           "id": "C003",
@@ -38,14 +42,29 @@
           "userModel": "regression",
           "expectedEvidence": "Replace via revise_criterion with regression proof for neighboring behavior after: EclipticRD 전면 Rust/Tauri 전환: 모든 페이즈(P0-P7) 구현 — erd-proto v3 코덱, erd-net 전송(T....",
           "essential": false,
-          "capturedEvidence": null,
-          "status": "pending"
+          "capturedEvidence": "Swift suites unaffected: TestCLI 38/38 ALL TESTS PASSED (docs/evidence/gate-testcli-run.log), EclipticRDLogicTests TEST SUCCEEDED 25 tests 0 failures (docs/evidence/gate-xctest.log); git diff Sources/ CLEAN after final commit 9faf9d8; Rust migration touched only clients/rust, scripts, docs, .github (Sources/ diffs predate pivot, mtimes 2026-08-31, adjudicated in docs/rust-migration-review.md addendum)",
+          "status": "pass",
+          "capturedAt": "2026-09-02T00:06:20.745Z",
+          "notes": "Regression: adjacent Swift surface verified by suite re-runs against final tree"
         }
       ],
       "attempt": 0,
       "createdAt": "2026-09-01T13:09:44.699Z",
-      "updatedAt": "2026-09-01T13:09:44.699Z"
+      "updatedAt": "2026-09-02T00:28:34.798Z",
+      "blockedReason": "probe2",
+      "completedAt": "2026-09-02T00:28:34.798Z",
+      "evidence": "All 6 success criteria verified: (1) cargo test --workspace 105 passed/0 failed incl. erd-proto codec roundtrip+truncation fuzz and erd-net TLS-PSK loopback/cipher vectors; (2) tart VM real-session E2E INTEROP_PASS: pairing(PIN)->handshake v3->AES-GCM streaming->15 frames decoded->clean teardown, exit 0; (3) truncation/mutation fuzz all pass, no panics; (4) TestCLI 38/38 + EclipticRDLogicTests TEST SUCCEEDED, git diff Sources/ CLEAN at commit 9faf9d8; (5) p50 3.05ms/p99 5.01ms vs Moonlight 18.50/35.00ms; (6) clippy --workspace -D warnings 0 warnings, review APPROVED (docs/rust-migration-review.md)"
     }
   ],
-  "codexObjective": "Complete the durable ulw-loop plan in .omo/ulw-loop/01a05807-c957-726c-97ba-148e99869498/goals.json, including later accepted/appended stories, under the original brief constraints; use .omo/ulw-loop/01a05807-c957-726c-97ba-148e99869498/ledger.jsonl as the audit trail."
+  "codexObjective": "Complete the durable ulw-loop plan in .omo/ulw-loop/01a05807-c957-726c-97ba-148e99869498/goals.json, including later accepted/appended stories, under the original brief constraints; use .omo/ulw-loop/01a05807-c957-726c-97ba-148e99869498/ledger.jsonl as the audit trail.",
+  "aggregateCompletion": {
+    "status": "complete",
+    "completedAt": "2026-09-02T00:28:34.798Z",
+    "evidence": "All 6 success criteria verified: (1) cargo test --workspace 105 passed/0 failed incl. erd-proto codec roundtrip+truncation fuzz and erd-net TLS-PSK loopback/cipher vectors; (2) tart VM real-session E2E INTEROP_PASS: pairing(PIN)->handshake v3->AES-GCM streaming->15 frames decoded->clean teardown, exit 0; (3) truncation/mutation fuzz all pass, no panics; (4) TestCLI 38/38 + EclipticRDLogicTests TEST SUCCEEDED, git diff Sources/ CLEAN at commit 9faf9d8; (5) p50 3.05ms/p99 5.01ms vs Moonlight 18.50/35.00ms; (6) clippy --workspace -D warnings 0 warnings, review APPROVED (docs/rust-migration-review.md)",
+    "codexGoal": {
+      "goal_id": "G001-eclipticrd-rust-tauri-p0-p7-erd-prot",
+      "objective": "Complete the durable ulw-loop plan in .omo/ulw-loop/01a05807-c957-726c-97ba-148e99869498/goals.json, including later accepted/appended stories, under the original brief constraints; use .omo/ulw-loop/01a05807-c957-726c-97ba-148e99869498/ledger.jsonl as the audit trail.",
+      "status": "complete"
+    }
+  }
 }
