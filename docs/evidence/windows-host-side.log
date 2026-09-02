@@ -1,0 +1,8 @@
+EclipticRD bootstrap PIN: 12345678
+TCP listening on 0.0.0.0:19730
+UDP listening on 0.0.0.0:19731
+Pairing approval requests will appear in this terminal.
+[2m2026-09-02T03:13:34.050311Z[0m [32m INFO[0m [2merd_host::session[0m[2m:[0m TLS-PSK session established [3midentity[0m[2m=[0m"erd-b1" [3mpeer[0m[2m=[0m100.78.73.127:63154
+[2m2026-09-02T03:13:34.070707Z[0m [32m INFO[0m [2merd_host::session[0m[2m:[0m v3 handshake authenticated; UDP ciphers armed [3mclient[0m[2m=[0m"erd-headless-client"
+[2m2026-09-02T03:13:34.077466Z[0m [32m INFO[0m [2merd_host::session[0m[2m:[0m Starting UDP sender thread [3mpeer[0m[2m=[0m100.78.73.127:58067
+[2m2026-09-02T03:13:46.924591Z[0m [32m INFO[0m [2merd_host::session[0m[2m:[0m UDP sender received stop signal

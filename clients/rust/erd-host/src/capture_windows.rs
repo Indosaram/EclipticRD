@@ -71,6 +71,24 @@ pub struct WindowsCapture {
 }
 
 impl WindowsCapture {
+    /// Pixel dimensions of the primary DXGI output, for session negotiation
+    /// before a full capture pipeline starts. Captures a single frame to read
+    /// the output description, then drops the duplication interface.
+    pub fn primary_output_geometry() -> Result<(u32, u32), CaptureError> {
+        let mut manager = DXGIManager::new(1_000)
+            .map_err(|error| CaptureError::Initialization(error.to_string()))?;
+        manager.set_capture_source_index(0);
+        let (_, (width, height), _) =
+            manager
+                .capture_frame_components_with_metadata()
+                .map_err(|error| match error {
+                    DxgiCaptureError::Timeout => CaptureError::Timeout,
+                    DxgiCaptureError::AccessDenied => CaptureError::AccessDenied,
+                    other => CaptureError::Capture(other.to_string()),
+                })?;
+        Ok((width.try_into().unwrap(), height.try_into().unwrap()))
+    }
+
     pub fn new(display_index: usize, timeout: Duration) -> Result<Self, CaptureError> {
         let mut manager = DXGIManager::new(duration_ms(timeout))
             .map_err(|error| CaptureError::Initialization(error.to_string()))?;

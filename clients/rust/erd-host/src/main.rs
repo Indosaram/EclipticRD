@@ -3,17 +3,16 @@ use std::sync::mpsc;
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use erd_host::{
-    accessibility_is_trusted, random_pin, request_accessibility, ConsentPrompt, HostConfig,
-    HostServer, PairingStore,
-};
+#[cfg(target_os = "macos")]
+use erd_host::{accessibility_is_trusted, request_accessibility};
+use erd_host::{random_pin, ConsentPrompt, HostConfig, HostServer, PairingStore};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(
     name = "erd-host",
     version,
-    about = "EclipticRD v3 macOS screen streaming host",
+    about = "EclipticRD v3 screen streaming host",
     long_about = "EclipticRD v3 macOS screen streaming host.\n\nFirst run: macOS prompts for Screen Recording and Accessibility. Grant both in System Settings > Privacy & Security, then relaunch the host. Screen Recording is required for capture; Accessibility is required for remote input injection."
 )]
 struct Cli {
@@ -104,7 +103,20 @@ fn main() -> Result<()> {
         })
         .context("failed to start consent UI channel")?;
 
-    let mut config = HostConfig::macos_default(Some(pin.clone()), store)?;
+    let mut config = {
+        #[cfg(target_os = "macos")]
+        {
+            HostConfig::macos_default(Some(pin.clone()), store)?
+        }
+        #[cfg(target_os = "windows")]
+        {
+            HostConfig::windows_default(Some(pin.clone()), store)?
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            bail!("erd-host does not support this platform yet (macOS and Windows are wired)");
+        }
+    };
     config.capture_audio = !cli.no_audio;
     config.consent_sender = Some(consent_tx);
     if let Some(mbps) = cli.lan_bitrate_mbps {
@@ -165,5 +177,14 @@ fn onboard_permissions() {
 
 #[cfg(not(target_os = "macos"))]
 fn onboard_permissions() {
-    eprintln!("erd-host capture and input require macOS; this build can run protocol tests only.");
+    #[cfg(target_os = "windows")]
+    {
+        eprintln!(
+            "Windows host: DXGI Desktop Duplication + Media Foundation/NVENC are used; no TCC-style permission prompts are needed."
+        );
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        eprintln!("erd-host capture and input are not wired for this platform yet.");
+    }
 }

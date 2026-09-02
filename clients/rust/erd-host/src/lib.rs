@@ -22,12 +22,11 @@ pub mod inject_linux;
 pub mod inject_macos;
 #[cfg(target_os = "windows")]
 pub mod inject_windows;
-#[cfg(target_os = "macos")]
 pub mod session;
 pub mod windows_logic;
 
 #[cfg(target_os = "macos")]
-pub use capture_macos::{CaptureConfig, CaptureEvent, CaptureFrame, DisplayInfo, ScreenCapture};
+pub use capture_macos::{CaptureConfig, CaptureEvent, CaptureFrame, ScreenCapture};
 #[cfg(target_os = "windows")]
 pub use capture_windows::WindowsCapture;
 #[cfg(target_os = "windows")]
@@ -40,8 +39,7 @@ pub use encode_windows::MediaFoundationEncoder;
 pub use inject_macos::{accessibility_is_trusted, request_accessibility, InputInjector};
 #[cfg(target_os = "windows")]
 pub use inject_windows::WindowsInputInjector;
-#[cfg(target_os = "macos")]
 pub use session::{
-    random_pin, ConsentPrompt, HostConfig, HostServer, PairingRecord, PairingStore, SessionState,
-    TimestampStats,
+    random_pin, ConsentPrompt, DisplayInfo, HostConfig, HostServer, PairingRecord, PairingStore,
+    SessionState, TimestampStats, VideoFrame,
 };

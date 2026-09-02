@@ -12,7 +12,6 @@ path = "src/lib.rs"
 [[bin]]
 name = "erd-host"
 path = "src/main.rs"
-required-features = ["macos-host"]
 
 [features]
 default = []

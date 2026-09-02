@@ -3,20 +3,7 @@ use std::time::Instant;
 
 use thiserror::Error;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DisplayInfo {
-    pub logical_width: u32,
-    pub logical_height: u32,
-    pub pixel_width: u32,
-    pub pixel_height: u32,
-    pub scale_factor_milli: u32,
-}
-
-impl DisplayInfo {
-    pub fn scale_factor(self) -> f32 {
-        self.scale_factor_milli as f32 / 1_000.0
-    }
-}
+use crate::session::DisplayInfo;
 
 #[derive(Debug, Clone, Copy)]
 pub struct CaptureConfig {

@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::net::{SocketAddr, TcpListener, TcpStream, UdpSocket};
+#[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -25,9 +26,18 @@ use thiserror::Error;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::capture_macos::{CaptureConfig, CaptureEvent, CaptureFrame, DisplayInfo, ScreenCapture};
-use crate::encode_vt::{EncodedFrame, EncoderConfig, VideoToolboxEncoder, DEFAULT_BITRATE};
+#[cfg(target_os = "macos")]
+use crate::capture_macos::{CaptureConfig, CaptureEvent, CaptureFrame, ScreenCapture};
+#[cfg(target_os = "windows")]
+use crate::capture_windows::{CaptureError, WindowsCapture};
+#[cfg(target_os = "macos")]
+use crate::encode_vt::{EncoderConfig, VideoToolboxEncoder, DEFAULT_BITRATE};
+#[cfg(target_os = "windows")]
+use crate::encode_windows::{EncoderConfig, MediaFoundationEncoder, VideoCodec};
+#[cfg(target_os = "macos")]
 use crate::inject_macos::InputInjector;
+#[cfg(target_os = "windows")]
+use crate::inject_windows::WindowsInputInjector;
 
 pub const DEFAULT_TCP_PORT: u16 = 19_730;
 pub const DEFAULT_UDP_PORT: u16 = 19_731;
@@ -157,18 +167,25 @@ impl PairingStore {
         let bytes =
             serde_json::to_vec(&disk).map_err(|error| SessionError::Store(error.to_string()))?;
         let temporary = self.path.with_extension("json.tmp");
-        let mut file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .mode(0o600)
-            .open(&temporary)?;
+        let mut options = OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        {
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
         use std::io::Write;
         file.write_all(&bytes)?;
         file.sync_all()?;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600))?;
+        }
         fs::rename(&temporary, &self.path)?;
-        fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
+        #[cfg(unix)]
+        {
+            fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 }
@@ -216,6 +233,7 @@ pub struct HostConfig {
 }
 
 impl HostConfig {
+    #[cfg(target_os = "macos")]
     pub fn macos_default(
         bootstrap_pin: Option<String>,
         pairing_store: PairingStore,
@@ -235,6 +253,38 @@ impl HostConfig {
             frames_per_second: 60,
             bitrate: DEFAULT_BITRATE,
             capture_audio: true,
+            consent_sender: None,
+        })
+    }
+
+    #[cfg(target_os = "windows")]
+    pub fn windows_default(
+        bootstrap_pin: Option<String>,
+        pairing_store: PairingStore,
+    ) -> Result<Self, SessionError> {
+        let (pixel_width, pixel_height) =
+            crate::capture_windows::WindowsCapture::primary_output_geometry()
+                .map_err(|error| SessionError::Io(io::Error::other(error.to_string())))?;
+        Ok(Self {
+            tcp_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_TCP_PORT)),
+            udp_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_UDP_PORT)),
+            bootstrap_pin,
+            pairing_window: PAIRING_WINDOW,
+            pairing_store,
+            host_name: hostname::get()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+            display: DisplayInfo {
+                logical_width: pixel_width,
+                logical_height: pixel_height,
+                pixel_width,
+                pixel_height,
+                scale_factor_milli: 1_000,
+            },
+            frames_per_second: 60,
+            bitrate: WINDOWS_DEFAULT_BITRATE,
+            capture_audio: false,
             consent_sender: None,
         })
     }
@@ -312,8 +362,10 @@ pub enum SessionError {
     Codec(#[from] erd_proto::CodecError),
     #[error("UDP cipher failed: {0}")]
     Cipher(#[from] erd_net::DatagramError),
+    #[cfg(target_os = "macos")]
     #[error("capture failed: {0}")]
     Capture(#[from] crate::capture_macos::CaptureError),
+    #[cfg(target_os = "macos")]
     #[error("encoder failed: {0}")]
     Encode(#[from] crate::encode_vt::EncodeError),
     #[error("pairing store failed: {0}")]
@@ -340,10 +392,42 @@ pub enum SessionError {
 
 #[derive(Debug)]
 enum MediaEvent {
-    Video(EncodedFrame),
+    Video(VideoFrame),
+    /// Windows pipeline has no audio source yet; the variant is kept so the
+    /// wire shape stays identical across platforms.
+    #[allow(dead_code)]
     Audio(Vec<u8>),
     Error(String),
 }
+
+/// Platform-neutral encoded frame handed from a [`MediaSource`] to the wire.
+#[derive(Debug, Clone)]
+pub struct VideoFrame {
+    pub data: Vec<u8>,
+    pub is_key_frame: bool,
+    pub capture_at: Instant,
+    pub encode_started_at: Instant,
+    pub encode_completed_at: Instant,
+}
+
+/// Platform-neutral display geometry shared by every media backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayInfo {
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub scale_factor_milli: u32,
+}
+
+impl DisplayInfo {
+    pub fn scale_factor(self) -> f32 {
+        self.scale_factor_milli as f32 / 1_000.0
+    }
+}
+
+#[cfg(target_os = "windows")]
+const WINDOWS_DEFAULT_BITRATE: u32 = 8_000_000;
 
 trait MediaHandle {
     fn force_key_frame(&self) -> Result<(), SessionError>;
@@ -355,11 +439,12 @@ trait MediaSource: Send + Sync {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError>;
 }
 
+#[cfg(target_os = "macos")]
 struct MacMediaSource {
     config: CaptureConfig,
     encoder: EncoderConfig,
 }
-
+#[cfg(target_os = "macos")]
 struct MacMediaHandle {
     capture: Option<ScreenCapture>,
     encoder: Option<VideoToolboxEncoder>,
@@ -367,6 +452,7 @@ struct MacMediaHandle {
     encoded_bridge: Option<thread::JoinHandle<()>>,
 }
 
+#[cfg(target_os = "macos")]
 impl MediaSource for MacMediaSource {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
         let (capture, capture_rx) = match ScreenCapture::start(self.config) {
@@ -432,10 +518,7 @@ impl MediaSource for MacMediaSource {
                             }
                         }
                         CaptureEvent::Audio { pcm_f32_le, .. } => {
-                            if capture_sender
-                                .send(MediaEvent::Audio(pcm_f32_le))
-                                .is_err()
-                            {
+                            if capture_sender.send(MediaEvent::Audio(pcm_f32_le)).is_err() {
                                 break;
                             }
                         }
@@ -455,9 +538,20 @@ impl MediaSource for MacMediaSource {
                         Ok(frame) => {
                             enc_count += 1;
                             if enc_count == 1 || enc_count % 60 == 0 {
-                                info!(enc_count, size = frame.data.len(), is_key = frame.is_key_frame, "Encoded bridge received frame");
+                                info!(
+                                    enc_count,
+                                    size = frame.data.len(),
+                                    is_key = frame.is_key_frame,
+                                    "Encoded bridge received frame"
+                                );
                             }
-                            MediaEvent::Video(frame)
+                            MediaEvent::Video(VideoFrame {
+                                data: frame.data,
+                                is_key_frame: frame.is_key_frame,
+                                capture_at: frame.capture_at,
+                                encode_started_at: frame.encode_started_at,
+                                encode_completed_at: frame.encode_completed_at,
+                            })
                         }
                         Err(error) => {
                             warn!(%error, "Encoded bridge error");
@@ -478,6 +572,7 @@ impl MediaSource for MacMediaSource {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl MediaHandle for MacMediaHandle {
     fn force_key_frame(&self) -> Result<(), SessionError> {
         self.encoder
@@ -511,6 +606,7 @@ impl MediaHandle for MacMediaHandle {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for MacMediaHandle {
     fn drop(&mut self) {
         self.stop();
@@ -540,7 +636,7 @@ impl MediaSource for SyntheticMediaSource {
                 let nalu = [0x26, 0x01, index as u8];
                 data.extend_from_slice(&(nalu.len() as u32).to_be_bytes());
                 data.extend_from_slice(&nalu);
-                let frame = EncodedFrame {
+                let frame = VideoFrame {
                     data,
                     is_key_frame: index == 0,
                     capture_at,
@@ -572,6 +668,225 @@ impl MediaHandle for SyntheticMediaHandle {
     fn stop(&mut self) {}
 }
 
+#[cfg(target_os = "windows")]
+struct WindowsMediaSource {
+    display_index: usize,
+    fps: u32,
+    width: u32,
+    height: u32,
+    bitrate: u32,
+    codec: VideoCodec,
+}
+
+#[cfg(target_os = "windows")]
+impl MediaSource for WindowsMediaSource {
+    fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::mpsc::channel;
+
+        enum PipelineFrame {
+            Video {
+                nv12: Vec<u8>,
+            },
+            /// Explicit stop frame; currently the channel closing plays this role.
+            #[allow(dead_code)]
+            Stop,
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+        let (frame_tx, frame_rx) = channel::<PipelineFrame>();
+
+        // Capture thread: polls DXGI Desktop Duplication at the target cadence and
+        // converts BGRA frames to NV12 for the hardware encoder.
+        {
+            let sender = sender.clone();
+            let stop = Arc::clone(&stop);
+            let display_index = self.display_index;
+            let fps = self.fps.max(1);
+            std::thread::Builder::new()
+                .name("erd-win-capture".into())
+                .spawn(move || {
+                    let interval = Duration::from_micros(1_000_000 / fps as u64);
+                    let mut capture =
+                        match WindowsCapture::new(display_index, Duration::from_millis(1_000)) {
+                            Ok(capture) => capture,
+                            Err(error) => {
+                                let _ =
+                                    sender.send(MediaEvent::Error(format!("dxgi init: {error}")));
+                                return;
+                            }
+                        };
+                    while !stop.load(Ordering::Relaxed) {
+                        let started = Instant::now();
+                        match capture.acquire_next_frame(Duration::from_millis(250)) {
+                            Ok(frame) => {
+                                let nv12 = match bgra_to_nv12(
+                                    frame.width,
+                                    frame.height,
+                                    &frame.bgra,
+                                    frame.stride as usize,
+                                ) {
+                                    Ok(nv12) => nv12,
+                                    Err(error) => {
+                                        let _ = sender.send(MediaEvent::Error(format!(
+                                            "nv12 conversion: {error}"
+                                        )));
+                                        return;
+                                    }
+                                };
+                                if frame_tx.send(PipelineFrame::Video { nv12 }).is_err() {
+                                    return;
+                                }
+                            }
+                            Err(CaptureError::Timeout) => {}
+                            Err(CaptureError::AccessLost) => {
+                                capture = match WindowsCapture::new(
+                                    display_index,
+                                    Duration::from_millis(1_000),
+                                ) {
+                                    Ok(capture) => capture,
+                                    Err(error) => {
+                                        let _ = sender.send(MediaEvent::Error(format!(
+                                            "dxgi reacquire: {error}"
+                                        )));
+                                        return;
+                                    }
+                                };
+                            }
+                            Err(error) => {
+                                let _ = sender.send(MediaEvent::Error(format!("dxgi: {error}")));
+                                return;
+                            }
+                        }
+                        let elapsed = started.elapsed();
+                        if elapsed < interval {
+                            std::thread::sleep(interval - elapsed);
+                        }
+                    }
+                })
+                .map_err(|error| SessionError::Io(io::Error::other(error)))?;
+        }
+
+        // Encode thread: NV12 -> H264/HEVC via Media Foundation (or NVENC when present).
+        {
+            let stop = Arc::clone(&stop);
+            let config = EncoderConfig {
+                width: self.width,
+                height: self.height,
+                bitrate: self.bitrate,
+                fps: self.fps.max(1),
+                keyframe_interval: self.fps.max(1),
+                preferred_codec: self.codec,
+            };
+            std::thread::Builder::new()
+                .name("erd-win-encode".into())
+                .spawn(move || {
+                    let mut encoder = match MediaFoundationEncoder::new(config) {
+                        Ok(encoder) => encoder,
+                        Err(error) => {
+                            let _ = sender.send(MediaEvent::Error(format!("mf init: {error}")));
+                            return;
+                        }
+                    };
+                    for frame in frame_rx {
+                        match frame {
+                            PipelineFrame::Stop => break,
+                            PipelineFrame::Video { nv12 } => match encoder.encode_nv12(&nv12) {
+                                Ok(Some(encoded)) => {
+                                    let now = Instant::now();
+                                    let _ = sender.send(MediaEvent::Video(VideoFrame {
+                                        data: encoded.data,
+                                        is_key_frame: encoded.is_key_frame,
+                                        capture_at: now,
+                                        encode_started_at: now,
+                                        encode_completed_at: now,
+                                    }));
+                                }
+                                Ok(None) => {}
+                                Err(error) => {
+                                    let _ = sender
+                                        .send(MediaEvent::Error(format!("mf encode: {error}")));
+                                    return;
+                                }
+                            },
+                        }
+                    }
+                    stop.store(true, Ordering::Relaxed);
+                })
+                .map_err(|error| SessionError::Io(io::Error::other(error)))?;
+        }
+
+        Ok(Box::new(WindowsMediaHandle { stop }))
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsMediaHandle {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(target_os = "windows")]
+impl MediaHandle for WindowsMediaHandle {
+    fn force_key_frame(&self) -> Result<(), SessionError> {
+        // Media Foundation inserts key frames on its own cadence; the wire
+        // protocol tolerates waiting for the next natural one.
+        Ok(())
+    }
+
+    fn update_bitrate(&self, _bitrate: u32) -> Result<(), SessionError> {
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// BT.601 limited-range BGRA8 -> NV12 conversion for tightly packed input.
+#[cfg(target_os = "windows")]
+fn bgra_to_nv12(
+    width: u32,
+    height: u32,
+    bgra: &[u8],
+    stride: usize,
+) -> Result<Vec<u8>, &'static str> {
+    let (w, h) = (width as usize, height as usize);
+    if w == 0 || h == 0 || w % 2 != 0 || h % 2 != 0 {
+        return Err("display dimensions must be non-zero and even");
+    }
+    if bgra.len() < stride * h || stride < w * 4 {
+        return Err("bgra buffer smaller than stride * height");
+    }
+    let y_plane = w * h;
+    let mut nv12 = vec![128u8; y_plane + y_plane / 2];
+    let (y_plane, uv_plane) = nv12.split_at_mut(y_plane);
+    for row in 0..h {
+        let src = &bgra[row * stride..row * stride + w * 4];
+        let y_row = &mut y_plane[row * w..(row + 1) * w];
+        for col in (0..w).step_by(2) {
+            let (b0, g0, r0) = (
+                src[col * 4] as u32,
+                src[col * 4 + 1] as u32,
+                src[col * 4 + 2] as u32,
+            );
+            let (b1, g1, r1) = (
+                src[col * 4 + 4] as u32,
+                src[col * 4 + 5] as u32,
+                src[col * 4 + 6] as u32,
+            );
+            y_row[col] = ((77 * r0 + 150 * g0 + 29 * b0) >> 8) as u8;
+            y_row[col + 1] = ((77 * r1 + 150 * g1 + 29 * b1) >> 8) as u8;
+            let (b_avg, g_avg, r_avg) = ((b0 + b1) / 2, (g0 + g1) / 2, (r0 + r1) / 2);
+            let uv_index = (row / 2) * w + col;
+            uv_plane[uv_index] =
+                (128 + ((-43 * r_avg as i32 - 85 * g_avg as i32 + 128 * b_avg as i32) >> 8)) as u8;
+            uv_plane[uv_index + 1] =
+                (128 + ((128 * r_avg as i32 - 107 * g_avg as i32 - 21 * b_avg as i32) >> 8)) as u8;
+        }
+    }
+    Ok(nv12)
+}
+
 pub struct HostServer {
     config: HostConfig,
     tcp_listener: TcpListener,
@@ -583,8 +898,21 @@ pub struct HostServer {
 
 impl HostServer {
     pub fn bind(config: HostConfig) -> Result<Self, SessionError> {
-        let fps = if config.frames_per_second == 0 { 60 } else { config.frames_per_second };
-        let media_source: Arc<dyn MediaSource> = Arc::new(MacMediaSource {
+        let fps = if config.frames_per_second == 0 {
+            60
+        } else {
+            config.frames_per_second
+        };
+        let media_source = Self::default_media_source(&config, fps)?;
+        Self::bind_with_media(config, media_source)
+    }
+
+    #[cfg(target_os = "macos")]
+    fn default_media_source(
+        config: &HostConfig,
+        fps: u32,
+    ) -> Result<Arc<dyn MediaSource>, SessionError> {
+        Ok(Arc::new(MacMediaSource {
             config: CaptureConfig {
                 width: config.display.pixel_width,
                 height: config.display.pixel_height,
@@ -598,8 +926,32 @@ impl HostServer {
                 bitrate: config.bitrate,
                 key_frame_interval: fps,
             },
-        });
-        Self::bind_with_media(config, media_source)
+        }))
+    }
+
+    #[cfg(target_os = "windows")]
+    fn default_media_source(
+        config: &HostConfig,
+        fps: u32,
+    ) -> Result<Arc<dyn MediaSource>, SessionError> {
+        Ok(Arc::new(WindowsMediaSource {
+            display_index: 0,
+            fps,
+            width: config.display.pixel_width,
+            height: config.display.pixel_height,
+            bitrate: config.bitrate,
+            codec: VideoCodec::H264,
+        }))
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn default_media_source(
+        _config: &HostConfig,
+        _fps: u32,
+    ) -> Result<Arc<dyn MediaSource>, SessionError> {
+        Err(SessionError::Store(
+            "no media source is wired for this platform yet".into(),
+        ))
     }
 
     #[cfg(test)]
@@ -749,10 +1101,13 @@ impl HostServer {
         let mut udp_peer = None;
         let mut media_receiver: Option<Receiver<MediaEvent>> = None;
         let mut media_handle: Option<Box<dyn MediaHandle>> = None;
+        #[cfg(target_os = "macos")]
         let input = InputInjector::new(
             self.config.display.logical_width as f32,
             self.config.display.logical_height as f32,
         );
+        #[cfg(target_os = "windows")]
+        let mut input = WindowsInputInjector::new(None).map_err(|error| SessionError::Io(error))?;
         let session_origin = Instant::now();
         info!(identity = negotiated_identity, peer = %tcp_peer, "TLS-PSK session established");
         let mut last_pong = Instant::now();
@@ -800,7 +1155,12 @@ impl HostServer {
                                         }
                                     }
                                     Ok(MediaEvent::Audio(bytes)) => {
-                                        let _ = sender.send_audio(&udp_socket, peer, &mut cipher, &bytes);
+                                        let _ = sender.send_audio(
+                                            &udp_socket,
+                                            peer,
+                                            &mut cipher,
+                                            &bytes,
+                                        );
                                     }
                                     Ok(MediaEvent::Error(err)) => {
                                         warn!(%err, "Media event error in sender thread");
@@ -1062,7 +1422,7 @@ impl UdpSender {
         cipher: &mut DatagramCipher,
         width: u32,
         height: u32,
-        frame: EncodedFrame,
+        frame: VideoFrame,
         session_origin: Instant,
     ) -> Result<(), SessionError> {
         self.frame_id = self.frame_id.wrapping_add(1);

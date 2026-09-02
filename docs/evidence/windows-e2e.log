@@ -1,0 +1,2 @@
+# Windows E2E evidence — 2026-09-02, Mac(100.78.73.127) ↔ maho-win/desktop-1lapjmp(100.126.171.58) via Tailscale
+# Session: pairing(PIN 12345678) -> TLS-PSK handshake v3 -> AES-GCM UDP -> 15 frames decoded -> clean teardown, exit 0

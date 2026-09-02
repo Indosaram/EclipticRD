@@ -111,6 +111,60 @@ pub fn hevc_parameter_set_blob(access_unit: &[u8]) -> Result<Vec<u8>, DecodeErro
     Ok(output)
 }
 
+/// H.264 analog of [`hevc_parameter_set_blob`]: SPS (NAL type 7) then PPS (8).
+pub fn h264_parameter_set_blob(access_unit: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    let mut parameter_sets: [Option<&[u8]>; 2] = [None, None];
+    for nalu in parse_length_prefixed_nalus(access_unit)? {
+        // The shared parser reports HEVC-style nal_type; H.264 lives in the
+        // low 5 bits of the header byte instead.
+        let h264_type = nalu.data.first().map(|byte| byte & 0x1f).unwrap_or(0);
+        match h264_type {
+            7 => parameter_sets[0] = Some(nalu.data),
+            8 => parameter_sets[1] = Some(nalu.data),
+            _ => {}
+        }
+    }
+    if parameter_sets.iter().any(Option::is_none) {
+        return Err(DecodeError::MissingParameterSets);
+    }
+    let mut output = Vec::new();
+    for parameter_set in parameter_sets.into_iter().flatten() {
+        output.extend_from_slice(&(parameter_set.len() as u32).to_be_bytes());
+        output.extend_from_slice(parameter_set);
+    }
+    Ok(output)
+}
+
+/// Which video codec an access unit carries, inferred from its parameter-set
+/// NAL units. The wire protocol does not carry a codec field, so the decoder
+/// sniffs the first keyframe instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodecKind {
+    Hevc,
+    H264,
+}
+
+/// Classifies the first parameter-set NAL of an access unit. H.264 SPS has
+/// nal_type 7 (mask 0x1F) while HEVC VPS/SPS/PPS are 32/33/34 after the
+/// 1-bit-zero + 6-bit-type shift.
+pub fn detect_codec(access_unit: &[u8]) -> Result<CodecKind, DecodeError> {
+    for nalu in parse_length_prefixed_nalus(access_unit)? {
+        if nalu.data.is_empty() {
+            continue;
+        }
+        let first = nalu.data[0];
+        let h264_type = first & 0x1F;
+        let hevc_type = (first >> 1) & 0x3F;
+        if h264_type == 7 {
+            return Ok(CodecKind::H264);
+        }
+        if hevc_type == 32 || hevc_type == 33 || hevc_type == 34 {
+            return Ok(CodecKind::Hevc);
+        }
+    }
+    Err(DecodeError::MissingParameterSets)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nv12Frame {
     pub width: u32,
@@ -146,16 +200,30 @@ mod ffmpeg_impl {
 
     impl HevcDecoder {
         pub fn new(extradata: &[u8]) -> Result<Self, DecodeError> {
+            Self::with_codec(extradata, codec::Id::HEVC, "HEVC decoder is unavailable")
+        }
+
+        /// H.264 variant for hosts whose Media Foundation pipeline emits H.264
+        /// (e.g. the Windows software encoder MFT). Parameter sets are SPS/PPS.
+        pub fn new_h264(extradata: &[u8]) -> Result<Self, DecodeError> {
+            Self::with_codec(extradata, codec::Id::H264, "H264 decoder is unavailable")
+        }
+
+        fn with_codec(
+            extradata: &[u8],
+            codec_id: codec::Id,
+            missing_message: &str,
+        ) -> Result<Self, DecodeError> {
             ffmpeg::init().map_err(|error| DecodeError::FfmpegInit(error.to_string()))?;
             if extradata.is_empty() {
                 return Err(DecodeError::MissingParameterSets);
             }
-            let codec = codec::decoder::find(codec::Id::HEVC)
-                .ok_or_else(|| DecodeError::Ffmpeg("HEVC decoder is unavailable".to_owned()))?;
+            let codec = codec::decoder::find(codec_id)
+                .ok_or_else(|| DecodeError::Ffmpeg(missing_message.to_owned()))?;
             let mut context = codec::Context::new_with_codec(codec);
             unsafe {
-                (*context.as_mut_ptr()).err_recognition = ffmpeg::ffi::AV_EF_CRCCHECK
-                    | ffmpeg::ffi::AV_EF_BUFFER;
+                (*context.as_mut_ptr()).err_recognition =
+                    ffmpeg::ffi::AV_EF_CRCCHECK | ffmpeg::ffi::AV_EF_BUFFER;
                 (*context.as_mut_ptr()).flags |= ffmpeg::ffi::AV_CODEC_FLAG_LOW_DELAY as i32;
                 (*context.as_mut_ptr()).flags2 |= ffmpeg::ffi::AV_CODEC_FLAG2_FAST;
             }
@@ -186,6 +254,22 @@ mod ffmpeg_impl {
 
         pub fn from_keyframe(keyframe: &[u8]) -> Result<Self, DecodeError> {
             Self::new(&hevc_parameter_set_blob(keyframe)?)
+        }
+
+        /// Builds a decoder from the first keyframe, sniffing H.264 vs HEVC
+        /// from its parameter-set NAL units. Windows hosts emit H.264; macOS
+        /// hosts emit HEVC.
+        pub fn from_keyframe_auto(
+            keyframe: &[u8],
+        ) -> Result<(super::CodecKind, Self), DecodeError> {
+            let kind = super::detect_codec(keyframe)?;
+            let decoder = match kind {
+                super::CodecKind::Hevc => Self::new(&super::hevc_parameter_set_blob(keyframe)?),
+                super::CodecKind::H264 => {
+                    Self::new_h264(&super::h264_parameter_set_blob(keyframe)?)
+                }
+            }?;
+            Ok((kind, decoder))
         }
 
         pub fn acceleration(&self) -> HardwareAcceleration {

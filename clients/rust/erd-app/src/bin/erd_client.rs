@@ -10,9 +10,7 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use erd_app::{
-    ClientSession, LatencyRecorder, PairingRecord, SessionConfig, SessionEvent,
-};
+use erd_app::{ClientSession, LatencyRecorder, PairingRecord, SessionConfig, SessionEvent};
 use erd_decode::HevcDecoder;
 use erd_proto::{Capabilities, ControlMessage};
 use tracing::{debug, error, info, warn};
@@ -77,7 +75,10 @@ struct Cli {
 fn parse_hex_32(hex_str: &str) -> Result<Vec<u8>> {
     let trimmed = hex_str.trim();
     if trimmed.len() != 64 {
-        bail!("psk-hex must be exactly 64 hex characters (32 bytes), got length {}", trimmed.len());
+        bail!(
+            "psk-hex must be exactly 64 hex characters (32 bytes), got length {}",
+            trimmed.len()
+        );
     }
     let mut bytes = Vec::with_capacity(32);
     for i in (0..64).step_by(2) {
@@ -131,12 +132,15 @@ fn run_client(cli: Cli) -> Result<()> {
         "Initializing headless client session"
     );
 
-    let session = ClientSession::new(session_config).context("failed to construct ClientSession")?;
+    let session =
+        ClientSession::new(session_config).context("failed to construct ClientSession")?;
 
     let ready = match (&cli.pin, &cli.psk_hex) {
         (Some(pin), None) => {
             info!("Initiating bootstrap pairing with host via PIN");
-            session.pair_with_pin(pin).context("bootstrap pairing failed")?
+            session
+                .pair_with_pin(pin)
+                .context("bootstrap pairing failed")?
         }
         (None, Some(psk_hex)) => {
             let key = parse_hex_32(psk_hex).context("invalid --psk-hex argument")?;
@@ -236,7 +240,10 @@ fn run_client(cli: Cli) -> Result<()> {
 
     while running.load(Ordering::Relaxed) {
         if start_time.elapsed() >= timeout {
-            error!(decoded_frames, target_frames, "Session timed out after {} seconds", cli.timeout_secs);
+            error!(
+                decoded_frames,
+                target_frames, "Session timed out after {} seconds", cli.timeout_secs
+            );
             break;
         }
 
@@ -266,12 +273,16 @@ fn run_client(cli: Cli) -> Result<()> {
             Ok((assembled_frame, receive_ts)) => {
                 let is_key = assembled_frame.header.is_key_frame;
                 let data = &assembled_frame.data;
-                debug!(is_key, size = data.len(), "Received assembled video frame from UDP");
+                debug!(
+                    is_key,
+                    size = data.len(),
+                    "Received assembled video frame from UDP"
+                );
 
                 if decoder.is_none() {
-                    match HevcDecoder::from_keyframe(data) {
-                        Ok(dec) => {
-                            info!("HEVC decoder initialized from keyframe");
+                    match HevcDecoder::from_keyframe_auto(data) {
+                        Ok((codec_kind, dec)) => {
+                            info!(?codec_kind, "decoder initialized from keyframe");
                             decoder = Some(dec);
                         }
                         Err(err) => {
@@ -289,7 +300,8 @@ fn run_client(cli: Cli) -> Result<()> {
                         Ok(nv12_frames) => {
                             if !nv12_frames.is_empty() {
                                 decoded_any = true;
-                                decoded_frames = decoded_frames.saturating_add(nv12_frames.len() as u64);
+                                decoded_frames =
+                                    decoded_frames.saturating_add(nv12_frames.len() as u64);
                             }
                         }
                         Err(err) => {
@@ -302,7 +314,10 @@ fn run_client(cli: Cli) -> Result<()> {
                 if decoded_any {
                     // Record latency sample: receive/capture -> decode -> present
                     latency_recorder.record_sample(Some(receive_ts), decode_start, present_ts);
-                    if decoded_frames <= 10 || decoded_frames % 20 == 0 || decoded_frames >= target_frames {
+                    if decoded_frames <= 10
+                        || decoded_frames % 20 == 0
+                        || decoded_frames >= target_frames
+                    {
                         info!(decoded_frames, target_frames, "Decoded frame progress");
                     }
                 }
@@ -321,8 +336,7 @@ fn run_client(cli: Cli) -> Result<()> {
 
     info!(
         decoded_frames,
-        target_frames,
-        "Cleaning up session transport..."
+        target_frames, "Cleaning up session transport..."
     );
     teardown(&session, &mut tcp_runtime)?;
     let _ = udp_receiver_handle.join();
@@ -344,10 +358,7 @@ fn run_client(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn teardown(
-    session: &ClientSession,
-    tcp_runtime: &mut erd_app::SessionRuntime,
-) -> Result<()> {
+fn teardown(session: &ClientSession, tcp_runtime: &mut erd_app::SessionRuntime) -> Result<()> {
     // Send Disconnect / BYE control message
     let _ = session.send_control(ControlMessage::Disconnect);
     tcp_runtime.stop();

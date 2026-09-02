@@ -35,7 +35,7 @@ use windows::{
             MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
             MFVideoInterlace_Progressive, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER,
             MFT_ENUM_FLAG, MFT_ENUM_FLAG_ALL, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-            MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
+            MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
             MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
             MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
             MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
@@ -432,9 +432,14 @@ impl Drop for MediaFoundationEncoder {
 }
 
 fn create_transform(codec: VideoCodec) -> Result<(IMFTransform, EncoderBackend), EncodeError> {
-    let hardware_flags = MFT_ENUM_FLAG(MFT_ENUM_FLAG_HARDWARE.0 | MFT_ENUM_FLAG_SORTANDFILTER.0);
-    if let Some(transform) = enumerate_transform(codec, hardware_flags)? {
-        return Ok((transform, EncoderBackend::MediaFoundationHardware));
+    // Synchronous MFTs first: the Microsoft Software H.264/HEVC encoders work
+    // with the synchronous processInput/processMessage pipeline below. Hardware
+    // MFTs (NVIDIA etc.) are asynchronous and require the event-driven
+    // IMFMediaEventGenerator pipeline, which is not implemented yet — they are
+    // deliberately skipped until that lands.
+    let sync_flags = MFT_ENUM_FLAG(MFT_ENUM_FLAG_SYNCMFT.0 | MFT_ENUM_FLAG_SORTANDFILTER.0);
+    if let Some(transform) = enumerate_transform(codec, sync_flags)? {
+        return Ok((transform, EncoderBackend::MediaFoundationSoftware));
     }
     if let Some(transform) = enumerate_transform(codec, MFT_ENUM_FLAG_ALL)? {
         return Ok((transform, EncoderBackend::MediaFoundationSoftware));
