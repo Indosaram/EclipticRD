@@ -21,6 +21,7 @@ sha2.workspace = true
 thiserror.workspace = true
 rustix.workspace = true
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 clap = { version = "4", features = ["derive"] }
 
 [[bin]]
@@ -33,3 +34,4 @@ objc2-foundation = { version = "0.3.1", default-features = false, features = ["N
 
 [dev-dependencies]
 tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }

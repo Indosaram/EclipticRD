@@ -173,6 +173,7 @@ impl TlsPskClient {
         address: A,
     ) -> Result<TlsPskStream<TcpStream>, TlsPskError> {
         let tcp = TcpStream::connect(address)?;
+        let _ = tcp.set_nodelay(true);
         self.connect_stream(tcp)
     }
 
@@ -239,6 +240,111 @@ impl TlsPskServer {
         let stream = self.acceptor.accept(stream).map_err(handshake_error)?;
         Ok(TlsPskStream::new(stream))
     }
+
+    pub fn accept_stream_until(
+        &self,
+        stream: TcpStream,
+        deadline: Instant,
+    ) -> Result<TlsPskStream<TcpStream>, TlsPskError> {
+        let readiness = DeadlineReadiness::new(&stream)?;
+        stream.set_nonblocking(true)?;
+        check_deadline(deadline)?;
+        let mut result = self.acceptor.accept(stream);
+        loop {
+            check_deadline(deadline)?;
+            match result {
+                Ok(stream) => {
+                    stream.get_ref().set_nonblocking(false)?;
+                    return Ok(TlsPskStream::new(stream));
+                }
+                Err(HandshakeError::WouldBlock(mid)) => {
+                    let interest = handshake_interest(mid.error().code());
+                    let mut next = None;
+                    let mut mid = Some(mid);
+                    readiness.wait_io(deadline, interest, || {
+                        let resumed = mid.take().unwrap().handshake();
+                        let blocked = matches!(&resumed, Err(HandshakeError::WouldBlock(m))
+                            if handshake_interest(m.error().code()) == interest);
+                        if blocked {
+                            if let Err(HandshakeError::WouldBlock(m)) = resumed {
+                                mid = Some(m);
+                            }
+                            Err(io::ErrorKind::WouldBlock.into())
+                        } else {
+                            next = Some(resumed);
+                            Ok(())
+                        }
+                    })?;
+                    result = next.unwrap();
+                }
+                Err(error) => return Err(handshake_error(error)),
+            }
+        }
+    }
+}
+
+fn check_deadline(deadline: Instant) -> io::Result<()> {
+    if Instant::now() >= deadline {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "TLS deadline expired",
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn handshake_interest(code: openssl::ssl::ErrorCode) -> tokio::io::Interest {
+    if code == openssl::ssl::ErrorCode::WANT_WRITE {
+        tokio::io::Interest::WRITABLE
+    } else {
+        tokio::io::Interest::READABLE
+    }
+}
+
+// These synchronous APIs run on the host's blocking connection thread, not a
+// Tokio executor. Register a duplicate handle; OpenSSL retains the original.
+struct DeadlineReadiness {
+    socket: tokio::net::TcpStream,
+    runtime: tokio::runtime::Runtime,
+}
+
+impl DeadlineReadiness {
+    fn new(stream: &TcpStream) -> io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let socket = stream.try_clone()?;
+        socket.set_nonblocking(true)?;
+        let socket = {
+            let _guard = runtime.enter();
+            tokio::net::TcpStream::from_std(socket)?
+        };
+        Ok(Self { socket, runtime })
+    }
+
+    fn wait_io<T>(
+        &self,
+        deadline: Instant,
+        interest: tokio::io::Interest,
+        mut operation: impl FnMut() -> io::Result<T>,
+    ) -> io::Result<T> {
+        self.runtime.block_on(async {
+            tokio::time::timeout_at(deadline.into(), async {
+                loop {
+                    check_deadline(deadline)?;
+                    self.socket.ready(interest).await?;
+                    check_deadline(deadline)?;
+                    match self.socket.try_io(interest, &mut operation) {
+                        Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                        result => return result,
+                    }
+                }
+            })
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "TLS deadline expired"))?
+        })
+    }
 }
 
 pub struct TlsPskListener {
@@ -253,6 +359,7 @@ impl TlsPskListener {
 
     pub fn accept(&self) -> Result<TlsPskStream<TcpStream>, TlsPskError> {
         let (stream, _) = self.listener.accept()?;
+        let _ = stream.set_nodelay(true);
         self.server.accept_stream(stream)
     }
 }
@@ -261,6 +368,7 @@ pub struct TlsPskStream<S> {
     stream: SslStream<S>,
     frame_reader: TcpFrameReader,
     pending_events: VecDeque<TcpFrameEvent>,
+    read_needs_write: bool,
 }
 
 impl<S: Read + Write> TlsPskStream<S> {
@@ -269,6 +377,7 @@ impl<S: Read + Write> TlsPskStream<S> {
             stream,
             frame_reader: TcpFrameReader::new(),
             pending_events: VecDeque::new(),
+            read_needs_write: false,
         }
     }
 
@@ -294,18 +403,37 @@ impl<S: Read + Write> TlsPskStream<S> {
     /// Reads one framed payload, buffering partial reads and coalesced frames.
     /// Zero or oversized lengths drop the complete pending framing buffer.
     pub fn read_frame(&mut self) -> Result<Vec<u8>, TlsPskError> {
-        let mut buffer = [0_u8; 64 * 1024];
         loop {
-            if let Some(event) = self.pending_events.pop_front() {
-                return match event {
-                    TcpFrameEvent::Frame(frame) => Ok(frame),
-                    TcpFrameEvent::DroppedInvalidLength(length) => {
-                        Err(TlsPskError::InvalidFrameLength(length))
-                    }
-                };
+            if let Some(frame) = self.read_frame_step()? {
+                return Ok(frame);
             }
+        }
+    }
 
-            let count = self.stream.read(&mut buffer)?;
+    /// Performs at most one TLS read, retaining incomplete framing for the next step.
+    pub fn read_frame_step(&mut self) -> Result<Option<Vec<u8>>, TlsPskError> {
+        if self.pending_events.is_empty() {
+            let mut buffer = [0_u8; 64 * 1024];
+            self.read_needs_write = false;
+            let count = match self.stream.ssl_read(&mut buffer) {
+                Ok(count) => count,
+                Err(error) if error.code() == openssl::ssl::ErrorCode::ZERO_RETURN => 0,
+                Err(error)
+                    if matches!(
+                        error.code(),
+                        openssl::ssl::ErrorCode::WANT_READ | openssl::ssl::ErrorCode::WANT_WRITE
+                    ) =>
+                {
+                    self.read_needs_write = error.code() == openssl::ssl::ErrorCode::WANT_WRITE;
+                    return Err(io::Error::from(io::ErrorKind::WouldBlock).into());
+                }
+                Err(error) => {
+                    return Err(error
+                        .into_io_error()
+                        .unwrap_or_else(io::Error::other)
+                        .into())
+                }
+            };
             if count == 0 {
                 return Err(TlsPskError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -315,6 +443,56 @@ impl<S: Read + Write> TlsPskStream<S> {
             self.pending_events
                 .extend(self.frame_reader.push(&buffer[..count]));
         }
+        match self.pending_events.pop_front() {
+            Some(TcpFrameEvent::Frame(frame)) => Ok(Some(frame)),
+            Some(TcpFrameEvent::DroppedInvalidLength(length)) => {
+                Err(TlsPskError::InvalidFrameLength(length))
+            }
+            None => Ok(None),
+        }
+    }
+
+    pub fn read_needs_write(&self) -> bool {
+        self.read_needs_write
+    }
+}
+
+impl TlsPskStream<TcpStream> {
+    /// Reads a framing step under an absolute deadline. Partial frames survive
+    /// subsequent calls. The socket is returned to blocking mode on every exit.
+    /// Call from a blocking thread, like the other synchronous TLS APIs.
+    pub fn read_frame_until(&mut self, deadline: Instant) -> Result<Option<Vec<u8>>, TlsPskError> {
+        check_deadline(deadline)?;
+        let readiness = DeadlineReadiness::new(self.stream.get_ref())?;
+        let result = (|| loop {
+            check_deadline(deadline)?;
+            match self.read_frame_step() {
+                Err(TlsPskError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {}
+                result => return result,
+            }
+            let interest = if self.read_needs_write {
+                tokio::io::Interest::WRITABLE
+            } else {
+                tokio::io::Interest::READABLE
+            };
+            let result = readiness.wait_io(deadline, interest, || {
+                    let result = self.read_frame_step();
+                    let next_interest = if self.read_needs_write { tokio::io::Interest::WRITABLE } else { tokio::io::Interest::READABLE };
+                    if matches!(&result, Err(TlsPskError::Io(e)) if e.kind() == io::ErrorKind::WouldBlock) && next_interest == interest {
+                        Err(io::ErrorKind::WouldBlock.into())
+                    } else {
+                        Ok(result)
+                    }
+                })?;
+            match result {
+                Err(TlsPskError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
+                    continue
+                }
+                result => return result,
+            }
+        })();
+        self.stream.get_ref().set_nonblocking(false)?;
+        result
     }
 }
 
@@ -367,6 +545,155 @@ mod tests {
     use erd_proto::MAX_TCP_FRAME_SIZE;
 
     use super::*;
+
+    // Time is the behavior under test: this writer supplies an incomplete TLS
+    // record at intervals shorter than a per-read timeout. A completion channel
+    // stops it immediately; it never relies on a sleep to synchronize threads.
+    fn trickle_record(mut tcp: TcpStream, stop: std::sync::mpsc::Receiver<()>) -> usize {
+        tcp.write_all(&[22, 3, 3, 0x40, 0]).unwrap();
+        let mut count = 0;
+        loop {
+            match stop.recv_timeout(Duration::from_millis(20)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return count,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    if tcp.write_all(&[0]).is_err() {
+                        return count;
+                    }
+                    count += 1;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deadline_handshake_trickle_cannot_extend_budget() {
+        let server =
+            TlsPskServer::new([PskIdentity::pairing("trickle", &[7; 32]).unwrap()]).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let tcp = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _) = listener.accept().unwrap();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let writer = thread::spawn(move || trickle_record(tcp, stop_rx));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result =
+                server.accept_stream_until(accepted, Instant::now() + Duration::from_millis(200));
+            done_tx.send(matches!(result, Err(TlsPskError::Io(e)) if e.kind() == io::ErrorKind::TimedOut)).unwrap();
+        });
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        stop_tx.send(()).ok();
+        writer.join().unwrap();
+        worker.join().unwrap();
+        assert_eq!(
+            result,
+            Ok(true),
+            "record trickle must not renew handshake deadline"
+        );
+    }
+
+    #[test]
+    fn deadline_frame_retains_partial_data_and_rejects_expired_budget() {
+        let psk = PskIdentity::pairing("frame", &[7; 32]).unwrap();
+        let server = TlsPskServer::new([psk.clone()]).unwrap();
+        let listener = server.bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (partial_tx, partial_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap();
+            assert_eq!(
+                stream
+                    .read_frame_until(Instant::now() + Duration::from_secs(5))
+                    .unwrap(),
+                None
+            );
+            partial_tx.send(()).unwrap();
+            assert_eq!(
+                stream
+                    .read_frame_until(Instant::now() + Duration::from_secs(5))
+                    .unwrap(),
+                Some(b"frame".to_vec())
+            );
+            assert!(
+                matches!(stream.read_frame_until(Instant::now()), Err(TlsPskError::Io(e)) if e.kind() == io::ErrorKind::TimedOut)
+            );
+        });
+        let mut client = TlsPskClient::new(psk).unwrap().connect(address).unwrap();
+        let frame = TcpFrameWriter::encode(b"frame").unwrap();
+        client.ssl_stream_mut().write_all(&frame[..2]).unwrap();
+        partial_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        client.ssl_stream_mut().write_all(&frame[2..]).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn deadline_frame_internal_record_trickle_cannot_extend_budget() {
+        let psk = PskIdentity::pairing("record", &[7; 32]).unwrap();
+        let server = TlsPskServer::new([psk.clone()]).unwrap();
+        let listener = server.bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap();
+            let result = stream.read_frame_until(Instant::now() + Duration::from_millis(200));
+            done_tx.send(matches!(result, Err(TlsPskError::Io(e)) if e.kind() == io::ErrorKind::TimedOut)).unwrap();
+        });
+        let client = TlsPskClient::new(psk).unwrap().connect(address).unwrap();
+        let raw = client.ssl_stream().get_ref().try_clone().unwrap();
+        let (stop_tx, stop_rx) = std::sync::mpsc::channel();
+        let writer = thread::spawn(move || trickle_record(raw, stop_rx));
+        let result = done_rx.recv_timeout(Duration::from_secs(2));
+        stop_tx.send(()).ok();
+        writer.join().unwrap();
+        drop(client);
+        worker.join().unwrap();
+        assert_eq!(
+            result,
+            Ok(true),
+            "partial TLS record must not renew frame deadline"
+        );
+    }
+
+    #[test]
+    fn deadline_silent_peer_then_valid_psk() {
+        let psk = PskIdentity::pairing("deadline", &[7; 32]).unwrap();
+        let server = TlsPskServer::new([psk.clone()]).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            let (tcp, _) = listener.accept().unwrap();
+            let result =
+                server.accept_stream_until(tcp, Instant::now() + Duration::from_millis(100));
+            done_tx.send(matches!(result, Err(TlsPskError::Io(ref e)) if e.kind() == io::ErrorKind::TimedOut)).unwrap();
+            let (tcp, _) = listener.accept().unwrap();
+            let mut stream = server
+                .accept_stream_until(tcp, Instant::now() + Duration::from_secs(5))
+                .unwrap();
+            assert_eq!(
+                stream.negotiated_identity(),
+                Some(psk.identity().as_bytes())
+            );
+            assert_eq!(stream.read_frame().unwrap(), b"deadline echo");
+            stream.write_frame(b"deadline echo").unwrap();
+        });
+        let silent = TcpStream::connect(address).unwrap();
+        let timed_out = done_rx.recv_timeout(Duration::from_secs(2));
+        drop(silent);
+        assert_eq!(
+            timed_out,
+            Ok(true),
+            "silent peer must reach the total handshake deadline"
+        );
+        let client =
+            TlsPskClient::new(PskIdentity::pairing("deadline", &[7; 32]).unwrap()).unwrap();
+        let tcp = TcpStream::connect(address).unwrap();
+        tcp.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        tcp.set_write_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut stream = client.connect_stream(tcp).unwrap();
+        stream.write_frame(b"deadline echo").unwrap();
+        assert_eq!(stream.read_frame().unwrap(), b"deadline echo");
+        worker.join().unwrap();
+    }
 
     #[test]
     fn bootstrap_key_is_deterministic_per_pin() {

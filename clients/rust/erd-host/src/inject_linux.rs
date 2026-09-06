@@ -58,7 +58,9 @@ pub fn map_normalized_to_output(
     geometry: OutputGeometry,
 ) -> (u32, u32) {
     let x = normalized_x.clamp(0.0, 1.0) * geometry.width.saturating_sub(1) as f32;
-    let y = normalized_y.clamp(0.0, 1.0) * geometry.height.saturating_sub(1) as f32;
+    // Protocol convention inverts Y (1.0 - y) for legacy macOS compatibility.
+    // Invert it back so (0,0) is top-left on Linux.
+    let y = (1.0 - normalized_y).clamp(0.0, 1.0) * geometry.height.saturating_sub(1) as f32;
     (
         (i64::from(geometry.x) + x.round() as i64).max(0) as u32,
         (i64::from(geometry.y) + y.round() as i64).max(0) as u32,
@@ -232,6 +234,7 @@ fn modifier_events(previous: Modifiers, current: Modifiers) -> Vec<InputEvent> {
 
 pub struct LinuxInputInjector {
     pointer: VirtualDevice,
+    wheel: VirtualDevice,
     keyboard: VirtualDevice,
     geometry: OutputGeometry,
     modifiers: Modifiers,
@@ -252,21 +255,32 @@ impl LinuxInputInjector {
 
         let pointer_keys =
             AttributeSet::from_iter([KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE]);
+        let props = AttributeSet::from_iter([evdev::PropType::DIRECT]);
+        let max_x = geometry.desktop_width.max(1) as i32;
+        let max_y = geometry.desktop_height.max(1) as i32;
+        let abs_info_x = AbsInfo::new(0, 0, max_x, 0, 0, 28);
+        let abs_info_y = AbsInfo::new(0, 0, max_y, 0, 0, 28);
+        let abs_x = UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, abs_info_x);
+        let abs_y = UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs_info_y);
+        let pointer = VirtualDevice::builder()?
+            .name("EclipticRD Virtual Pointer")
+            .with_properties(&props)?
+            .with_keys(&pointer_keys)?
+            .with_absolute_axis(&abs_x)?
+            .with_absolute_axis(&abs_y)?
+            .build()?;
+
         let relative_axes = AttributeSet::from_iter([
             RelativeAxisCode::REL_WHEEL,
             RelativeAxisCode::REL_HWHEEL,
             RelativeAxisCode::REL_WHEEL_HI_RES,
             RelativeAxisCode::REL_HWHEEL_HI_RES,
+            RelativeAxisCode::REL_X,
+            RelativeAxisCode::REL_Y,
         ]);
-        let abs_info = AbsInfo::new(0, 0, ABSOLUTE_AXIS_MAX, 0, 0, 1);
-        let abs_x = UinputAbsSetup::new(AbsoluteAxisCode::ABS_X, abs_info);
-        let abs_y = UinputAbsSetup::new(AbsoluteAxisCode::ABS_Y, abs_info);
-        let pointer = VirtualDevice::builder()?
-            .name("EclipticRD Virtual Pointer")
-            .with_keys(&pointer_keys)?
+        let wheel = VirtualDevice::builder()?
+            .name("EclipticRD Virtual Wheel")
             .with_relative_axes(&relative_axes)?
-            .with_absolute_axis(&abs_x)?
-            .with_absolute_axis(&abs_y)?
             .build()?;
 
         let mut keyboard_keys = AttributeSet::<KeyCode>::new();
@@ -291,6 +305,7 @@ impl LinuxInputInjector {
 
         Ok(Self {
             pointer,
+            wheel,
             keyboard,
             geometry,
             modifiers: Modifiers::empty(),
@@ -317,29 +332,76 @@ impl LinuxInputInjector {
             | InputEventType::LeftMouseDown
             | InputEventType::LeftMouseUp
             | InputEventType::RightMouseDown
-            | InputEventType::RightMouseUp => {
+            | InputEventType::RightMouseUp
+            | InputEventType::MiddleMouseDown
+            | InputEventType::MiddleMouseUp => {
                 let (pixel_x, pixel_y) = map_normalized_to_output(event.x, event.y, self.geometry);
                 let mut events = vec![
-                    *AbsoluteAxisEvent::new(
-                        AbsoluteAxisCode::ABS_X,
-                        scale_to_uinput(pixel_x, self.geometry.desktop_width),
-                    ),
-                    *AbsoluteAxisEvent::new(
-                        AbsoluteAxisCode::ABS_Y,
-                        scale_to_uinput(pixel_y, self.geometry.desktop_height),
-                    ),
+                    *AbsoluteAxisEvent::new(AbsoluteAxisCode::ABS_X, pixel_x as i32),
+                    *AbsoluteAxisEvent::new(AbsoluteAxisCode::ABS_Y, pixel_y as i32),
                 ];
                 let button = match event.event_type {
                     InputEventType::LeftMouseDown => Some((KeyCode::BTN_LEFT, 1)),
                     InputEventType::LeftMouseUp => Some((KeyCode::BTN_LEFT, 0)),
                     InputEventType::RightMouseDown => Some((KeyCode::BTN_RIGHT, 1)),
                     InputEventType::RightMouseUp => Some((KeyCode::BTN_RIGHT, 0)),
+                    InputEventType::MiddleMouseDown => Some((KeyCode::BTN_MIDDLE, 1)),
+                    InputEventType::MiddleMouseUp => Some((KeyCode::BTN_MIDDLE, 0)),
                     _ => None,
                 };
                 if let Some((key, value)) = button {
                     events.push(InputEvent::new(EventType::KEY.0, key.code(), value));
                 }
                 self.pointer.emit(&events)
+            }
+            InputEventType::RelativeMove => {
+                let dx = event.scroll_dx.round() as i32;
+                let dy = event.scroll_dy.round() as i32;
+                let mut events = Vec::with_capacity(2);
+                if dx != 0 {
+                    events.push(InputEvent::new(
+                        EventType::RELATIVE.0,
+                        RelativeAxisCode::REL_X.0,
+                        dx,
+                    ));
+                }
+                if dy != 0 {
+                    events.push(InputEvent::new(
+                        EventType::RELATIVE.0,
+                        RelativeAxisCode::REL_Y.0,
+                        dy,
+                    ));
+                }
+                if events.is_empty() {
+                    Ok(())
+                } else {
+                    self.wheel.emit(&events)
+                }
+            }
+            InputEventType::Reset => {
+                let pointer_events = vec![
+                    InputEvent::new(EventType::KEY.0, KeyCode::BTN_LEFT.code(), 0),
+                    InputEvent::new(EventType::KEY.0, KeyCode::BTN_RIGHT.code(), 0),
+                    InputEvent::new(EventType::KEY.0, KeyCode::BTN_MIDDLE.code(), 0),
+                ];
+                let _ = self.pointer.emit(&pointer_events);
+                let mut kb_events = Vec::new();
+                for &modifier in &[
+                    Modifiers::SHIFT,
+                    Modifiers::CONTROL,
+                    Modifiers::OPTION,
+                    Modifiers::COMMAND,
+                    Modifiers::CAPS_LOCK,
+                ] {
+                    if let Some(key) = modifier_key(modifier) {
+                        kb_events.push(InputEvent::new(EventType::KEY.0, key.code(), 0));
+                    }
+                }
+                self.modifiers = Modifiers::empty();
+                if !kb_events.is_empty() {
+                    let _ = self.keyboard.emit(&kb_events);
+                }
+                Ok(())
             }
             InputEventType::ScrollWheel => {
                 let vertical = scroll_units(event.scroll_dy);
@@ -372,21 +434,39 @@ impl LinuxInputInjector {
                 if events.is_empty() {
                     Ok(())
                 } else {
-                    self.pointer.emit(&events)
+                    self.wheel.emit(&events)
                 }
             }
             InputEventType::KeyDown | InputEventType::KeyUp => {
-                let modifier_changes = modifier_events(self.modifiers, event.modifiers);
-                if !modifier_changes.is_empty() {
-                    self.keyboard.emit(&modifier_changes)?;
-                }
-                self.modifiers = event.modifiers;
+                let is_down = event.event_type == InputEventType::KeyDown;
                 if let Some(key) = macos_keycode_to_evdev(event.key_code) {
-                    self.keyboard.emit(&[InputEvent::new(
+                    let mut events = Vec::with_capacity(6);
+                    // Only sync modifiers if not a modifier key itself
+                    let is_mod_key = matches!(
+                        key,
+                        KeyCode::KEY_LEFTSHIFT
+                            | KeyCode::KEY_RIGHTSHIFT
+                            | KeyCode::KEY_LEFTCTRL
+                            | KeyCode::KEY_RIGHTCTRL
+                            | KeyCode::KEY_LEFTALT
+                            | KeyCode::KEY_RIGHTALT
+                            | KeyCode::KEY_LEFTMETA
+                            | KeyCode::KEY_RIGHTMETA
+                            | KeyCode::KEY_CAPSLOCK
+                    );
+
+                    if !is_mod_key {
+                        let mod_changes = modifier_events(self.modifiers, event.modifiers);
+                        events.extend(mod_changes);
+                        self.modifiers = event.modifiers;
+                    }
+
+                    events.push(InputEvent::new(
                         EventType::KEY.0,
                         key.code(),
-                        i32::from(event.event_type == InputEventType::KeyDown),
-                    )])?;
+                        i32::from(is_down),
+                    ));
+                    self.keyboard.emit(&events)?;
                 }
                 Ok(())
             }
@@ -439,9 +519,17 @@ mod tests {
             desktop_width: 4480,
             desktop_height: 1540,
         };
-        assert_eq!(map_normalized_to_output(0.0, 0.0, geometry), (1920, 100));
-        assert_eq!(map_normalized_to_output(1.0, 1.0, geometry), (4479, 1539));
-        assert_eq!(map_normalized_to_output(-2.0, 2.0, geometry), (1920, 1539));
+        for ((local_x, local_y), expected) in [
+            ((0.0, 0.0), (1920, 100)),
+            ((2560.0, 1440.0), (4479, 1539)),
+            ((-5120.0, 2880.0), (1920, 1539)),
+        ] {
+            let (wire_x, wire_y) =
+                erd_proto::normalize_client_coordinates(local_x, local_y, 2560.0, 1440.0);
+            assert_eq!(map_normalized_to_output(wire_x, wire_y, geometry), expected);
+        }
+        assert_eq!(map_normalized_to_output(0.0, 0.0, geometry), (1920, 1539));
+        assert_eq!(map_normalized_to_output(-2.0, 2.0, geometry), (1920, 100));
     }
 
     #[test]
@@ -457,5 +545,12 @@ mod tests {
         assert!(events.iter().all(|event| event.value() == 1));
         let releases = modifier_events(flags, Modifiers::empty());
         assert!(releases.iter().all(|event| event.value() == 0));
+    }
+
+    #[test]
+    fn maps_middle_click_and_reset_button_codes() {
+        assert_eq!(KeyCode::BTN_MIDDLE.code(), 0x112);
+        assert_eq!(KeyCode::BTN_LEFT.code(), 0x110);
+        assert_eq!(KeyCode::BTN_RIGHT.code(), 0x111);
     }
 }

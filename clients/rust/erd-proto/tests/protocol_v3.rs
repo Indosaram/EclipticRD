@@ -248,6 +248,23 @@ fn input_event_round_trips_every_type_and_modifier_bit() {
 }
 
 #[test]
+fn input_event_supports_agent_control_types() {
+    assert_eq!(
+        InputEventType::try_from(11).unwrap(),
+        InputEventType::MiddleMouseDown
+    );
+    assert_eq!(
+        InputEventType::try_from(12).unwrap(),
+        InputEventType::MiddleMouseUp
+    );
+    assert_eq!(InputEventType::try_from(13).unwrap(), InputEventType::Reset);
+    assert_eq!(
+        InputEventType::try_from(14).unwrap(),
+        InputEventType::RelativeMove
+    );
+}
+
+#[test]
 fn input_normalization_clamps_and_flips_bottom_left_y() {
     assert_eq!(
         normalize_client_coordinates(50.0, 25.0, 100.0, 100.0),

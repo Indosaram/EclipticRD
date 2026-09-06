@@ -14,9 +14,9 @@ use erd_net::{
     BOOTSTRAP_IDENTITY, PAIRING_IDENTITY_PREFIX,
 };
 use erd_proto::{
-    AudioFragment, AudioFragmentHeader, BitrateAdjust, Capabilities, ControlMessage, FrameChunk,
-    FrameHeader, Handshake, InputEvent, PacketHeader, PacketType, PairingGrant, PairingReject,
-    PairingRejectReason, PairingRequest, WireCodec, MAX_AUDIO_FRAGMENT_BYTES,
+    AudioFragment, AudioFragmentHeader, BitrateAdjust, Capabilities, ControlMessage, CursorUpdate,
+    FrameChunk, FrameHeader, Handshake, InputEvent, PacketHeader, PacketType, PairingGrant,
+    PairingReject, PairingRejectReason, PairingRequest, WireCodec, MAX_AUDIO_FRAGMENT_BYTES,
     MAX_VIDEO_CHUNK_BYTES, PROTOCOL_VERSION,
 };
 use openssl::base64;
@@ -312,7 +312,7 @@ impl HostConfig {
             output_name: output_name.clone(),
             ..LinuxCaptureConfig::default()
         };
-        let mut capture = LinuxCapture::connect(config)
+        let capture = LinuxCapture::connect(config)
             .map_err(|error| SessionError::Io(io::Error::other(error.to_string())))?;
         let output = capture.output_info();
         let display = DisplayInfo {
@@ -450,6 +450,10 @@ enum MediaEvent {
     /// wire shape stays identical across platforms.
     #[allow(dead_code)]
     Audio(Vec<u8>),
+    #[cfg(target_os = "linux")]
+    NativeAudio(Arc<native_pipeline::LatestAudio>),
+    #[allow(dead_code)]
+    Cursor(CursorUpdate),
     Error(String),
 }
 
@@ -485,12 +489,49 @@ const WINDOWS_DEFAULT_BITRATE: u32 = 8_000_000;
 #[cfg(target_os = "linux")]
 const LINUX_DEFAULT_BITRATE: u32 = 8_000_000;
 
-/// Name of the compositor's focused output, for hosts that expose several
-/// outputs (e.g. Hyprland headless outputs). Best effort: None when the
-/// compositor is unknown or the probe fails, which makes the capture fall
-/// back to the first output.
+/// Selects the focused output name from compositor monitor information,
+/// falling back to the first available named monitor if none is marked focused.
+pub fn select_focused_output(monitors: &serde_json::Value) -> Option<String> {
+    let array = monitors.as_array()?;
+    if let Some(name) = array
+        .iter()
+        .find(|monitor| monitor.get("focused").and_then(serde_json::Value::as_bool) == Some(true))
+        .and_then(|monitor| monitor.get("name"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(name.to_owned());
+    }
+    array
+        .iter()
+        .find_map(|monitor| monitor.get("name").and_then(serde_json::Value::as_str))
+        .map(str::to_owned)
+}
+
+/// Resolves the output target based on strict precedence:
+/// 1. Explicit CLI argument (`--output <NAME>`) — strict, preserved as-is.
+/// 2. Explicit environment variable (`ERD_OUTPUT=<NAME>`) — strict, preserved as-is.
+/// 3. Auto-detection via compositor monitor information:
+///    a. If a monitor has `"focused": true`, select it.
+///    b. If no monitor is focused, fall back to the first available named monitor.
+///    c. If no monitors are available, return `None`.
+pub fn resolve_output_target(
+    cli_output: Option<String>,
+    env_output: Option<String>,
+    monitors: Option<&serde_json::Value>,
+) -> Option<String> {
+    if let Some(name) = cli_output.filter(|s| !s.trim().is_empty()) {
+        return Some(name);
+    }
+    if let Some(name) = env_output.filter(|s| !s.trim().is_empty()) {
+        return Some(name);
+    }
+    let monitors = monitors?;
+    select_focused_output(monitors)
+}
+
+/// Probes Hyprland monitors using `hyprctl monitors -j`.
 #[cfg(target_os = "linux")]
-pub fn focused_output_name() -> Option<String> {
+pub fn probe_hyprland_monitors() -> Option<serde_json::Value> {
     let output = std::process::Command::new("hyprctl")
         .arg("monitors")
         .arg("-j")
@@ -499,14 +540,17 @@ pub fn focused_output_name() -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let monitors: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    monitors
-        .as_array()?
-        .iter()
-        .find(|monitor| monitor.get("focused").and_then(serde_json::Value::as_bool) == Some(true))
-        .and_then(|monitor| monitor.get("name"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+    serde_json::from_slice(&output.stdout).ok()
+}
+
+/// Name of the compositor's focused output, for hosts that expose several
+/// outputs (e.g. Hyprland headless outputs). Best effort: None when the
+/// compositor is unknown or the probe fails, which makes the capture fall
+/// back to the first output.
+#[cfg(target_os = "linux")]
+pub fn focused_output_name() -> Option<String> {
+    let monitors = probe_hyprland_monitors();
+    resolve_output_target(None, std::env::var("ERD_OUTPUT").ok(), monitors.as_ref())
 }
 
 trait MediaHandle {
@@ -517,6 +561,8 @@ trait MediaHandle {
 
 trait MediaSource: Send + Sync {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError>;
+    #[cfg(test)]
+    fn sender_exited(&self) {}
 }
 
 #[cfg(target_os = "macos")]
@@ -524,164 +570,259 @@ struct MacMediaSource {
     config: CaptureConfig,
     encoder: EncoderConfig,
 }
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct MacMediaControls {
+    force_key_frame: bool,
+    bitrate: Option<u32>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Default)]
+struct MacMediaState {
+    cancelled: std::sync::atomic::AtomicBool,
+    controls: Mutex<MacMediaControls>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacMediaState {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    // Keep the pending compressed packet until sent. Only cancellation or an
+    // output disconnect may abandon it; raw capture has its own bounded queue.
+    fn publish(&self, sender: &SyncSender<MediaEvent>, mut event: MediaEvent) -> bool {
+        while !self.is_cancelled() {
+            match sender.try_send(event) {
+                Ok(()) => return true,
+                Err(mpsc::TrySendError::Full(pending)) => event = pending,
+                Err(mpsc::TrySendError::Disconnected(_)) => return false,
+            }
+            // std mpsc has no cancellable send. Stop/control unpark the owner;
+            // the bounded retry also observes receiver progress/disconnection.
+            thread::park_timeout(Duration::from_millis(2));
+        }
+        false
+    }
+
+    fn flush_controls(
+        &self,
+        sender: &SyncSender<crate::encode_vt::Command>,
+    ) -> Result<(), SessionError> {
+        use crate::encode_vt::Command;
+        let mut controls = self
+            .controls
+            .lock()
+            .map_err(|_| SessionError::MediaStopped)?;
+        if controls.force_key_frame {
+            match sender.try_send(Command::ForceKeyFrame) {
+                Ok(()) => controls.force_key_frame = false,
+                Err(mpsc::TrySendError::Full(_)) => return Ok(()),
+                Err(mpsc::TrySendError::Disconnected(_)) => return Err(SessionError::MediaStopped),
+            }
+        }
+        if let Some(bitrate) = controls.bitrate {
+            match sender.try_send(Command::UpdateBitrate(bitrate)) {
+                Ok(()) => controls.bitrate = None,
+                Err(mpsc::TrySendError::Full(_)) => {}
+                Err(mpsc::TrySendError::Disconnected(_)) => return Err(SessionError::MediaStopped),
+            }
+        }
+        Ok(())
+    }
+}
+
 #[cfg(target_os = "macos")]
 struct MacMediaHandle {
-    capture: Option<ScreenCapture>,
-    encoder: Option<VideoToolboxEncoder>,
-    capture_bridge: Option<thread::JoinHandle<()>>,
-    encoded_bridge: Option<thread::JoinHandle<()>>,
+    state: Arc<MacMediaState>,
+    worker: Option<thread::JoinHandle<()>>,
+}
+
+// Created and destroyed on the owner thread, including encoder init failures.
+#[cfg(target_os = "macos")]
+struct MacCaptureOwner(Option<ScreenCapture>);
+
+#[cfg(target_os = "macos")]
+impl Drop for MacCaptureOwner {
+    fn drop(&mut self) {
+        if let Some(capture) = self.0.take() {
+            if let Err(error) = capture.stop() {
+                warn!(%error, "macOS capture stop failed");
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl MacMediaHandle {
+    fn spawn(
+        sender: SyncSender<MediaEvent>,
+        run: impl FnOnce(&MacMediaState, &SyncSender<MediaEvent>) -> Result<(), SessionError>
+            + Send
+            + 'static,
+    ) -> Result<Self, SessionError> {
+        let state = Arc::new(MacMediaState::default());
+        let worker_state = Arc::clone(&state);
+        let worker = thread::Builder::new()
+            .name("erd-host-macos-media".into())
+            .spawn(move || {
+                if let Err(error) = run(&worker_state, &sender) {
+                    if !worker_state.is_cancelled() {
+                        worker_state.publish(&sender, MediaEvent::Error(error.to_string()));
+                    }
+                }
+                worker_state
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+            })?;
+        Ok(Self {
+            state,
+            worker: Some(worker),
+        })
+    }
+
+    fn wake(&self) {
+        if let Some(worker) = &self.worker {
+            worker.thread().unpark();
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]
 impl MediaSource for MacMediaSource {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
-        let (capture, capture_rx) = match ScreenCapture::start(self.config) {
-            Ok((capture, rx)) => (Some(capture), rx),
-            Err(err) => {
-                warn!(%err, "ScreenCaptureKit unavailable; falling back to synthetic capture");
-                let (tx, rx) = mpsc::sync_channel(2);
-                let width = self.config.width;
-                let height = self.config.height;
-                let bytes_per_row = (width as usize) * 4;
-                let frame_size = bytes_per_row * (height as usize);
-                thread::Builder::new()
-                    .name("erd-host-synthetic-capture".into())
-                    .spawn(move || {
-                        let mut frame_idx: u32 = 0;
-                        let mut bgra = vec![0u8; frame_size];
-                        for chunk in bgra.chunks_exact_mut(4) {
-                            chunk[1] = 128;
-                            chunk[2] = 200;
-                            chunk[3] = 255;
-                        }
-                        loop {
-                            let c = (frame_idx % 256) as u8;
-                            // Update only the first 256 bytes for fast pattern
-                            for (i, chunk) in bgra.chunks_exact_mut(4).take(1024).enumerate() {
-                                chunk[0] = c.wrapping_add((i & 0xff) as u8);
+        let config = self.config;
+        let encoder_config = self.encoder;
+        Ok(Box::new(MacMediaHandle::spawn(
+            sender,
+            move |state, sender| {
+                // SCK objects never cross this thread boundary. The caller already
+                // owns the cancellation handle while native callbacks are pending.
+                let (capture, capture_rx) = ScreenCapture::start_cancellable(
+                    config,
+                    &state.cancelled,
+                    Instant::now() + Duration::from_secs(15),
+                )?;
+                let _capture = MacCaptureOwner(Some(capture));
+                if state.is_cancelled() {
+                    return Ok(());
+                }
+                let (encoder, encoded_rx) = VideoToolboxEncoder::start(encoder_config)?;
+                let result = (|| {
+                    while !state.is_cancelled() {
+                        state.flush_controls(&encoder.sender)?;
+                        let mut progressed = false;
+                        // One packet at a time preserves compressed output order and
+                        // bounds pending memory even if the session receiver stalls.
+                        match encoded_rx.try_recv() {
+                            Ok(Ok(frame)) => {
+                                progressed = true;
+                                if !state.publish(
+                                    sender,
+                                    MediaEvent::Video(VideoFrame {
+                                        data: frame.data,
+                                        is_key_frame: frame.is_key_frame,
+                                        capture_at: frame.capture_at,
+                                        encode_started_at: frame.encode_started_at,
+                                        encode_completed_at: frame.encode_completed_at,
+                                    }),
+                                ) {
+                                    return Ok(());
+                                }
                             }
-                            let frame = CaptureFrame {
-                                width,
-                                height,
-                                bytes_per_row,
-                                bgra: bgra.clone(),
-                                captured_at: Instant::now(),
-                            };
-                            if tx.send(CaptureEvent::Video(frame)).is_err() {
-                                break;
-                            }
-                            frame_idx = frame_idx.wrapping_add(1);
-                        }
-                    })?;
-                (None, rx)
-            }
-        };
-        let (encoder, encoded_rx) = VideoToolboxEncoder::start(self.encoder)?;
-        let command_sender = encoder.sender.clone();
-        let capture_sender = sender.clone();
-        let capture_bridge = thread::Builder::new()
-            .name("erd-host-capture-bridge".into())
-            .spawn(move || {
-                let mut captured_count: u64 = 0;
-                while let Ok(event) = capture_rx.recv() {
-                    match event {
-                        CaptureEvent::Video(frame) => {
-                            captured_count += 1;
-                            if captured_count == 1 || captured_count % 60 == 0 {
-                                info!(captured_count, "Capture bridge received video frame");
-                            }
-                            if command_sender
-                                .send(crate::encode_vt::Command::Frame(frame))
-                                .is_err()
-                            {
-                                break;
+                            Ok(Err(error)) => return Err(SessionError::from(error)),
+                            Err(mpsc::TryRecvError::Empty) => {}
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                return Err(SessionError::MediaStopped)
                             }
                         }
-                        CaptureEvent::Audio { pcm_f32_le, .. } => {
-                            if capture_sender.send(MediaEvent::Audio(pcm_f32_le)).is_err() {
-                                break;
+                        match capture_rx.try_recv() {
+                            Ok(CaptureEvent::Video(frame)) => {
+                                progressed = true;
+                                if !submit_capture_frame(&encoder.sender, frame) {
+                                    return Err(SessionError::MediaStopped);
+                                }
+                            }
+                            Ok(CaptureEvent::Audio { pcm_f32_le, .. }) => {
+                                progressed = true;
+                                if !state.publish(sender, MediaEvent::Audio(pcm_f32_le)) {
+                                    return Ok(());
+                                }
+                            }
+                            Ok(CaptureEvent::Stopped(error)) => {
+                                return Err(SessionError::Io(io::Error::other(error)));
+                            }
+                            Err(mpsc::TryRecvError::Empty) => {}
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                return Err(SessionError::MediaStopped)
                             }
                         }
-                        CaptureEvent::Stopped(error) => {
-                            let _ = capture_sender.send(MediaEvent::Error(error));
-                            break;
+                        if !progressed {
+                            thread::park_timeout(Duration::from_millis(2));
                         }
                     }
-                }
-            })?;
-        let encoded_bridge = thread::Builder::new()
-            .name("erd-host-encoded-bridge".into())
-            .spawn(move || {
-                let mut enc_count: u64 = 0;
-                while let Ok(result) = encoded_rx.recv() {
-                    let event = match result {
-                        Ok(frame) => {
-                            enc_count += 1;
-                            if enc_count == 1 || enc_count % 60 == 0 {
-                                info!(
-                                    enc_count,
-                                    size = frame.data.len(),
-                                    is_key = frame.is_key_frame,
-                                    "Encoded bridge received frame"
-                                );
-                            }
-                            MediaEvent::Video(VideoFrame {
-                                data: frame.data,
-                                is_key_frame: frame.is_key_frame,
-                                capture_at: frame.capture_at,
-                                encode_started_at: frame.encode_started_at,
-                                encode_completed_at: frame.encode_completed_at,
-                            })
-                        }
-                        Err(error) => {
-                            warn!(%error, "Encoded bridge error");
-                            MediaEvent::Error(error.to_string())
-                        }
-                    };
-                    if sender.send(event).is_err() {
-                        break;
-                    }
-                }
-            })?;
-        Ok(Box::new(MacMediaHandle {
-            capture,
-            encoder: Some(encoder),
-            capture_bridge: Some(capture_bridge),
-            encoded_bridge: Some(encoded_bridge),
-        }))
+                    Ok(())
+                })();
+                // Release native output backpressure before stopping its producer.
+                // No bridge spawn can fail after capture/encoder initialization.
+                drop(encoded_rx);
+                encoder.stop();
+                result
+            },
+        )?))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn submit_capture_frame(
+    sender: &SyncSender<crate::encode_vt::Command>,
+    frame: CaptureFrame,
+) -> bool {
+    match sender.try_send(crate::encode_vt::Command::Frame(frame)) {
+        Ok(()) | Err(mpsc::TrySendError::Full(_)) => true,
+        Err(mpsc::TrySendError::Disconnected(_)) => false,
     }
 }
 
 #[cfg(target_os = "macos")]
 impl MediaHandle for MacMediaHandle {
     fn force_key_frame(&self) -> Result<(), SessionError> {
-        self.encoder
-            .as_ref()
-            .ok_or(SessionError::MediaStopped)?
-            .force_key_frame()?;
+        if self.state.is_cancelled() {
+            return Err(SessionError::MediaStopped);
+        }
+        self.state
+            .controls
+            .lock()
+            .map_err(|_| SessionError::MediaStopped)?
+            .force_key_frame = true;
+        self.wake();
         Ok(())
     }
 
     fn update_bitrate(&self, bitrate: u32) -> Result<(), SessionError> {
-        self.encoder
-            .as_ref()
-            .ok_or(SessionError::MediaStopped)?
-            .update_bitrate(bitrate)?;
+        if self.state.is_cancelled() {
+            return Err(SessionError::MediaStopped);
+        }
+        self.state
+            .controls
+            .lock()
+            .map_err(|_| SessionError::MediaStopped)?
+            .bitrate = Some(bitrate);
+        self.wake();
         Ok(())
     }
 
     fn stop(&mut self) {
-        if let Some(capture) = self.capture.take() {
-            let _ = capture.stop();
-        }
-        if let Some(encoder) = self.encoder.take() {
-            encoder.stop();
-        }
-        if let Some(bridge) = self.capture_bridge.take() {
-            let _ = bridge.join();
-        }
-        if let Some(bridge) = self.encoded_bridge.take() {
-            let _ = bridge.join();
+        self.state
+            .cancelled
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.wake();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                warn!("macOS media worker panicked");
+            }
         }
     }
 }
@@ -693,22 +834,171 @@ impl Drop for MacMediaHandle {
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+mod mac_media_tests {
+    use super::*;
+    use crate::encode_vt::Command;
+
+    const BOUND: Duration = Duration::from_secs(2);
+
+    #[test]
+    fn pending_startup_accepts_coalesced_controls_and_stop_joins() {
+        // Given: the production owner-worker protocol with a native callback
+        // that never arrives. The non-Send resource stays inside that owner.
+        let (output, _receiver) = mpsc::sync_channel(1);
+        let (entered_tx, entered) = mpsc::channel();
+        let (exited_tx, exited) = mpsc::channel();
+        let handle = MacMediaHandle::spawn(output, move |state, _| {
+            let resource = std::rc::Rc::new(());
+            entered_tx.send(()).unwrap();
+            while !state.is_cancelled() {
+                thread::park();
+            }
+            drop(resource);
+            exited_tx.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        entered.recv_timeout(BOUND).unwrap();
+        // When: controls arrive during startup, followed by disconnect.
+        for bitrate in 1..=10_000 {
+            handle.force_key_frame().unwrap();
+            handle.update_bitrate(bitrate).unwrap();
+        }
+        {
+            let controls = handle.state.controls.lock().unwrap();
+            assert!(controls.force_key_frame);
+            assert_eq!(controls.bitrate, Some(10_000));
+        }
+        let (done_tx, done) = mpsc::channel();
+        let stopper = thread::spawn(move || {
+            let mut handle = handle;
+            handle.stop();
+            assert!(matches!(
+                handle.force_key_frame(),
+                Err(SessionError::MediaStopped)
+            ));
+            handle.stop(); // Idempotent, including subsequent Drop.
+            done_tx.send(()).unwrap();
+        });
+        // Then: stop owns the join and does not require a native callback.
+        let stopped = done.recv_timeout(BOUND);
+        assert_eq!(exited.recv_timeout(BOUND), Ok(()));
+        stopper.join().unwrap();
+        assert_eq!(stopped, Ok(()));
+    }
+
+    #[test]
+    fn full_output_stop_joins_before_receiver_is_released() {
+        // Given: full output with its receiver intentionally retained.
+        let (output, receiver) = mpsc::sync_channel(1);
+        output.send(MediaEvent::Audio(vec![1])).unwrap();
+        let (entered_tx, entered) = mpsc::channel();
+        let handle = MacMediaHandle::spawn(output, move |state, sender| {
+            entered_tx.send(()).unwrap();
+            state.publish(sender, MediaEvent::Audio(vec![2]));
+            Ok(())
+        })
+        .unwrap();
+        entered.recv_timeout(BOUND).unwrap();
+        let (done_tx, done) = mpsc::channel();
+        // When: disconnect while the worker forwards to the full queue.
+        let stopper = thread::spawn(move || {
+            let mut handle = handle;
+            handle.stop();
+            done_tx.send(()).unwrap();
+        });
+        let stopped = done.recv_timeout(BOUND);
+        drop(receiver); // Rescue a blocking-send regression before asserting.
+        stopper.join().unwrap();
+        // Then: output backpressure did not prevent owned shutdown.
+        assert_eq!(stopped, Ok(()), "full output blocked media stop");
+    }
+
+    #[test]
+    fn startup_controls_survive_full_encoder_queue_and_deliver_latest_bitrate() {
+        // Given: startup pending and the actual encoder command queue full.
+        let (output, _receiver) = mpsc::sync_channel(1);
+        let (commands, receiver) = mpsc::sync_channel(2);
+        commands.send(Command::UpdateBitrate(1)).unwrap();
+        commands.send(Command::UpdateBitrate(2)).unwrap();
+        let (resume_tx, resume) = mpsc::channel();
+        let (full_tx, full) = mpsc::channel();
+        let (drained_tx, drained) = mpsc::channel();
+        let (delivered_tx, delivered) = mpsc::channel();
+        let mut handle = MacMediaHandle::spawn(output, move |state, _| {
+            resume.recv_timeout(BOUND).unwrap();
+            state.flush_controls(&commands)?;
+            full_tx.send(()).unwrap();
+            drained.recv_timeout(BOUND).unwrap();
+            state.flush_controls(&commands)?;
+            delivered_tx.send(()).unwrap();
+            Ok(())
+        })
+        .unwrap();
+        // When: repeated controls are queued before startup completes.
+        for bitrate in 3..=10_000 {
+            handle.force_key_frame().unwrap();
+            handle.update_bitrate(bitrate).unwrap();
+        }
+        resume_tx.send(()).unwrap();
+        full.recv_timeout(BOUND).unwrap();
+        assert!(matches!(
+            receiver.recv_timeout(BOUND),
+            Ok(Command::UpdateBitrate(1))
+        ));
+        assert!(matches!(
+            receiver.recv_timeout(BOUND),
+            Ok(Command::UpdateBitrate(2))
+        ));
+        drained_tx.send(()).unwrap();
+        delivered.recv_timeout(BOUND).unwrap();
+        // Then: overload retained exactly one keyframe and the latest bitrate.
+        assert!(matches!(
+            receiver.recv_timeout(BOUND),
+            Ok(Command::ForceKeyFrame)
+        ));
+        assert!(matches!(
+            receiver.recv_timeout(BOUND),
+            Ok(Command::UpdateBitrate(10_000))
+        ));
+        handle.stop();
+    }
+
+    #[test]
+    fn startup_permission_error_is_forwarded_as_media_error() {
+        // Given: the native boundary rejects Screen Recording permission.
+        let (output, receiver) = mpsc::sync_channel(1);
+        let mut handle = MacMediaHandle::spawn(output, |_, _| {
+            Err(crate::capture_macos::CaptureError::PermissionDenied.into())
+        })
+        .unwrap();
+        // When: observe startup through the same session output protocol.
+        let event = receiver.recv_timeout(BOUND).unwrap();
+        handle.stop();
+        // Then: a failure is emitted, not a synthetic desktop frame.
+        assert!(matches!(event, MediaEvent::Error(_)));
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 struct SyntheticMediaSource {
     frame_count: u32,
-    interval: Duration,
 }
 
 #[cfg(test)]
-struct SyntheticMediaHandle;
+struct SyntheticMediaHandle(Option<thread::JoinHandle<()>>);
 
 #[cfg(test)]
 impl MediaSource for SyntheticMediaSource {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
         let count = self.frame_count;
-        let interval = self.interval;
-        thread::spawn(move || {
+        let producer = thread::spawn(move || {
             for index in 0..count {
                 let capture_at = Instant::now();
                 let encode_started_at = Instant::now();
@@ -726,12 +1016,9 @@ impl MediaSource for SyntheticMediaSource {
                 if sender.send(MediaEvent::Video(frame)).is_err() {
                     break;
                 }
-                if !interval.is_zero() {
-                    thread::sleep(interval);
-                }
             }
         });
-        Ok(Box::new(SyntheticMediaHandle))
+        Ok(Box::new(SyntheticMediaHandle(Some(producer))))
     }
 }
 
@@ -745,7 +1032,33 @@ impl MediaHandle for SyntheticMediaHandle {
         Ok(())
     }
 
-    fn stop(&mut self) {}
+    fn stop(&mut self) {
+        if let Some(producer) = self.0.take() {
+            producer.join().unwrap();
+        }
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
+#[path = "native_pipeline.rs"]
+mod native_pipeline;
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn native_media_error<T>(
+    handoff: &native_pipeline::Handoff<T>,
+    sender: &SyncSender<MediaEvent>,
+    error: String,
+) {
+    // Never block a failing worker behind compressed output. Cancellation wakes
+    // its sibling before reporting; a full queue is logged, not waited upon.
+    handoff.stop();
+    warn!(%error, "Native media pipeline stopped");
+    match sender.try_send(MediaEvent::Error(error)) {
+        Ok(()) | Err(mpsc::TrySendError::Disconnected(_)) => {}
+        Err(mpsc::TrySendError::Full(_)) => {
+            warn!("Native media error notification could not enter the full media queue");
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -759,166 +1072,318 @@ struct WindowsMediaSource {
 }
 
 #[cfg(target_os = "windows")]
+#[derive(Clone)]
+struct WindowsRawFrame {
+    nv12: Arc<Vec<u8>>,
+    captured_at: Instant,
+}
+
+#[cfg(target_os = "windows")]
+mod display_power {
+    const ES_CONTINUOUS: u32 = 0x8000_0000;
+    const ES_DISPLAY_REQUIRED: u32 = 0x0000_0002;
+    const ES_SYSTEM_REQUIRED: u32 = 0x0000_0001;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn SetThreadExecutionState(es_flags: u32) -> u32;
+    }
+
+    /// Keeps the console display (and system) awake while a streaming session
+    /// is active — DXGI Desktop Duplication produces no frames while the panel
+    /// is in DPMS sleep, which would leave clients with a black canvas.
+    pub fn set_keep_awake(enabled: bool) {
+        unsafe {
+            let flags = if enabled {
+                ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED
+            } else {
+                ES_CONTINUOUS
+            };
+            SetThreadExecutionState(flags);
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod cursor_jiggle {
+    #[repr(C)]
+    #[derive(Default)]
+    pub struct POINT {
+        pub x: i32,
+        pub y: i32,
+    }
+
+    #[link(name = "user32")]
+    extern "system" {
+        pub fn GetCursorPos(point: *mut POINT) -> i32;
+        fn SetCursorPos(x: i32, y: i32) -> i32;
+    }
+
+    /// Nudges the cursor by one pixel (alternating direction). Pointer updates
+    /// force DWM to compose a frame even on an otherwise static desktop, which
+    /// unblocks Desktop Duplication before the first frame ever arrives. Only
+    /// called while no frame has been captured yet, so active sessions are
+    /// never disturbed.
+    pub fn nudge(odd: bool) {
+        unsafe {
+            let mut point = POINT::default();
+            if GetCursorPos(&mut point) != 0 {
+                let dx = if odd { 1 } else { -1 };
+                SetCursorPos(point.x + dx, point.y);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct WindowsSessionEncoder(MediaFoundationEncoder);
+
+#[cfg(target_os = "windows")]
+impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
+    type Output = VideoFrame;
+    type Error = String;
+
+    fn force_keyframe(&mut self) {
+        self.0.force_key_frame();
+    }
+
+    fn bitrate(&mut self, bitrate: u32) -> Result<Vec<VideoFrame>, String> {
+        self.0
+            .update_bitrate(bitrate)
+            .map_err(|error| format!("mf bitrate: {error}"))?;
+        Ok(Vec::new())
+    }
+
+    fn encode(&mut self, frame: WindowsRawFrame) -> Result<Vec<VideoFrame>, String> {
+        self.0
+            .encode_nv12(&frame.nv12, frame.captured_at)
+            .map(|frames| {
+                frames
+                    .into_iter()
+                    .map(|encoded| VideoFrame {
+                        data: encoded.data,
+                        is_key_frame: encoded.is_key_frame,
+                        capture_at: encoded.capture_at,
+                        encode_started_at: encoded.encode_started_at,
+                        encode_completed_at: encoded.encode_completed_at,
+                    })
+                    .collect()
+            })
+            .map_err(|error| format!("mf encode: {error}"))
+    }
+}
+
+#[cfg(target_os = "windows")]
 impl MediaSource for WindowsMediaSource {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
         use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::mpsc::channel;
 
-        enum PipelineFrame {
-            Video {
-                nv12: Vec<u8>,
-            },
-            /// Explicit stop frame; currently the channel closing plays this role.
-            #[allow(dead_code)]
-            Stop,
-        }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let (frame_tx, frame_rx) = channel::<PipelineFrame>();
-
-        // Capture thread: polls DXGI Desktop Duplication at the target cadence and
-        // converts BGRA frames to NV12 for the hardware encoder.
+        let mut workers = native_pipeline::Workers::<WindowsRawFrame>::new();
+        let first_packet_emitted = Arc::new(AtomicBool::new(false));
         {
             let sender = sender.clone();
-            let stop = Arc::clone(&stop);
+            let first_packet_emitted = Arc::clone(&first_packet_emitted);
             let display_index = self.display_index;
             let fps = self.fps.max(1);
-            std::thread::Builder::new()
-                .name("erd-win-capture".into())
-                .spawn(move || {
-                    let interval = Duration::from_micros(1_000_000 / fps as u64);
-                    let mut capture =
-                        match WindowsCapture::new(display_index, Duration::from_millis(1_000)) {
-                            Ok(capture) => capture,
-                            Err(error) => {
-                                let _ =
-                                    sender.send(MediaEvent::Error(format!("dxgi init: {error}")));
-                                return;
-                            }
-                        };
-                    while !stop.load(Ordering::Relaxed) {
-                        let started = Instant::now();
-                        match capture.acquire_next_frame(Duration::from_millis(250)) {
-                            Ok(frame) => {
-                                let nv12 = match bgra_to_nv12(
-                                    frame.width,
-                                    frame.height,
-                                    &frame.bgra,
-                                    frame.stride as usize,
-                                ) {
-                                    Ok(nv12) => nv12,
-                                    Err(error) => {
-                                        let _ = sender.send(MediaEvent::Error(format!(
-                                            "nv12 conversion: {error}"
-                                        )));
-                                        return;
-                                    }
-                                };
-                                if frame_tx.send(PipelineFrame::Video { nv12 }).is_err() {
-                                    return;
-                                }
-                            }
-                            Err(CaptureError::Timeout) => {}
-                            Err(CaptureError::AccessLost) => {
-                                capture = match WindowsCapture::new(
-                                    display_index,
-                                    Duration::from_millis(1_000),
-                                ) {
-                                    Ok(capture) => capture,
-                                    Err(error) => {
-                                        let _ = sender.send(MediaEvent::Error(format!(
-                                            "dxgi reacquire: {error}"
-                                        )));
-                                        return;
-                                    }
-                                };
-                            }
-                            Err(error) => {
-                                let _ = sender.send(MediaEvent::Error(format!("dxgi: {error}")));
-                                return;
-                            }
-                        }
-                        let elapsed = started.elapsed();
-                        if elapsed < interval {
-                            std::thread::sleep(interval - elapsed);
-                        }
+            workers.spawn("erd-win-capture", true, move |handoff| {
+                // SetThreadExecutionState is per-thread. Reset it on this same
+                // owning thread on every exit, including initialization failure.
+                struct KeepAwake;
+                impl Drop for KeepAwake {
+                    fn drop(&mut self) {
+                        display_power::set_keep_awake(false);
                     }
-                })
-                .map_err(|error| SessionError::Io(io::Error::other(error)))?;
-        }
-
-        // Encode thread: NV12 -> H264/HEVC via Media Foundation (or NVENC when present).
-        {
-            let stop = Arc::clone(&stop);
-            let config = EncoderConfig {
-                width: self.width,
-                height: self.height,
-                bitrate: self.bitrate,
-                fps: self.fps.max(1),
-                keyframe_interval: self.fps.max(1),
-                preferred_codec: self.codec,
-            };
-            std::thread::Builder::new()
-                .name("erd-win-encode".into())
-                .spawn(move || {
-                    let mut encoder = match MediaFoundationEncoder::new(config) {
-                        Ok(encoder) => encoder,
+                }
+                display_power::set_keep_awake(true);
+                let _awake = KeepAwake;
+                let interval = Duration::from_micros(1_000_000 / u64::from(fps));
+                let mut capture =
+                    match WindowsCapture::new(display_index, Duration::from_millis(33)) {
+                        Ok(capture) => capture,
                         Err(error) => {
-                            let _ = sender.send(MediaEvent::Error(format!("mf init: {error}")));
+                            native_media_error(&handoff, &sender, format!("dxgi init: {error}"));
                             return;
                         }
                     };
-                    for frame in frame_rx {
-                        match frame {
-                            PipelineFrame::Stop => break,
-                            PipelineFrame::Video { nv12 } => match encoder.encode_nv12(&nv12) {
-                                Ok(Some(encoded)) => {
-                                    let now = Instant::now();
-                                    let _ = sender.send(MediaEvent::Video(VideoFrame {
-                                        data: encoded.data,
-                                        is_key_frame: encoded.is_key_frame,
-                                        capture_at: now,
-                                        encode_started_at: now,
-                                        encode_completed_at: now,
+                // Share the immutable NV12 allocation with the keepalive cache.
+                // Repeats retain the real original capture instant.
+                let mut last_frame: Option<WindowsRawFrame> = None;
+                let mut last_emit = Instant::now();
+                let mut jiggle_flip = false;
+                let mut last_jiggle = Instant::now() - Duration::from_millis(700);
+                while !handoff.is_stopped() {
+                    let started = Instant::now();
+                    match capture.acquire_next_frame(Duration::from_millis(33)) {
+                        Ok(frame) => {
+                            if frame.pointer_visible {
+                                let (px, py) = if let Some(pos) = frame.pointer_position {
+                                    pos
+                                } else {
+                                    let mut pt = cursor_jiggle::POINT::default();
+                                    unsafe { cursor_jiggle::GetCursorPos(&mut pt) };
+                                    (pt.x, pt.y)
+                                };
+                                if frame.width > 0 && frame.height > 0 {
+                                    let cx = (px as f32) / (frame.width as f32);
+                                    let cy = (py as f32) / (frame.height as f32);
+                                    let _ = sender.send(MediaEvent::Cursor(CursorUpdate {
+                                        x: cx.clamp(0.0, 1.0),
+                                        y: cy.clamp(0.0, 1.0),
+                                        cursor_type: 1,
                                     }));
                                 }
-                                Ok(None) => {}
+                            } else {
+                                let _ = sender.send(MediaEvent::Cursor(CursorUpdate {
+                                    x: -1.0,
+                                    y: -1.0,
+                                    cursor_type: 0,
+                                }));
+                            }
+                            let captured_at = Instant::now();
+                            let nv12 = match bgra_to_nv12(
+                                frame.width,
+                                frame.height,
+                                &frame.bgra,
+                                frame.stride as usize,
+                            ) {
+                                Ok(nv12) => nv12,
                                 Err(error) => {
-                                    let _ = sender
-                                        .send(MediaEvent::Error(format!("mf encode: {error}")));
+                                    native_media_error(
+                                        &handoff,
+                                        &sender,
+                                        format!("nv12 conversion: {error}"),
+                                    );
                                     return;
                                 }
-                            },
+                            };
+                            let raw = WindowsRawFrame {
+                                nv12: Arc::new(nv12),
+                                captured_at,
+                            };
+                            last_frame = Some(raw.clone());
+                            last_emit = started;
+                            if !handoff.publish(raw) {
+                                break;
+                            }
+                        }
+                        Err(CaptureError::Timeout) => {
+                            let mut pt = cursor_jiggle::POINT::default();
+                            if unsafe { cursor_jiggle::GetCursorPos(&mut pt) } != 0 {
+                                let (w, h) = capture.geometry();
+                                if w > 0 && h > 0 {
+                                    let cx = (pt.x as f32) / (w as f32);
+                                    let cy = (pt.y as f32) / (h as f32);
+                                    let _ = sender.send(MediaEvent::Cursor(CursorUpdate {
+                                        x: cx.clamp(0.0, 1.0),
+                                        y: cy.clamp(0.0, 1.0),
+                                        cursor_type: 1,
+                                    }));
+                                }
+                            }
+                            if last_frame.is_none()
+                                && last_jiggle.elapsed() >= Duration::from_millis(700)
+                            {
+                                last_jiggle = started;
+                                jiggle_flip = !jiggle_flip;
+                                cursor_jiggle::nudge(jiggle_flip);
+                            }
+                            let keepalive_interval = if first_packet_emitted.load(Ordering::Relaxed)
+                            {
+                                Duration::from_millis(500)
+                            } else {
+                                Duration::from_millis(33)
+                            };
+                            if last_emit.elapsed() >= keepalive_interval {
+                                if let Some(frame) = &last_frame {
+                                    last_emit = started;
+                                    if !handoff.publish(frame.clone()) {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        Err(CaptureError::AccessLost) => {
+                            capture =
+                                match WindowsCapture::new(display_index, Duration::from_millis(33))
+                                {
+                                    Ok(capture) => capture,
+                                    Err(error) => {
+                                        native_media_error(
+                                            &handoff,
+                                            &sender,
+                                            format!("dxgi reacquire: {error}"),
+                                        );
+                                        return;
+                                    }
+                                };
+                        }
+                        Err(error) => {
+                            native_media_error(&handoff, &sender, format!("dxgi: {error}"));
+                            return;
                         }
                     }
-                    stop.store(true, Ordering::Relaxed);
-                })
-                .map_err(|error| SessionError::Io(io::Error::other(error)))?;
+                    handoff.pace_until(started + interval);
+                }
+            })?;
         }
-
-        Ok(Box::new(WindowsMediaHandle { stop }))
+        let config = EncoderConfig {
+            width: self.width,
+            height: self.height,
+            bitrate: self.bitrate,
+            fps: self.fps.max(1),
+            keyframe_interval: self.fps.max(1),
+            preferred_codec: self.codec,
+        };
+        workers.spawn("erd-win-encode", true, move |handoff| {
+            let result = native_pipeline::run_encoder(
+                &handoff,
+                || {
+                    MediaFoundationEncoder::new(config)
+                        .map(WindowsSessionEncoder)
+                        .map_err(|error| format!("mf init: {error}"))
+                },
+                |frame| {
+                    let sent = sender.send(MediaEvent::Video(frame)).is_ok();
+                    if sent {
+                        first_packet_emitted.store(true, Ordering::Relaxed);
+                    }
+                    sent
+                },
+            );
+            if let Err(error) = result {
+                native_media_error(&handoff, &sender, error);
+            }
+        })?;
+        workers.handoff.activate();
+        Ok(Box::new(WindowsMediaHandle { workers }))
     }
 }
 
 #[cfg(target_os = "windows")]
 struct WindowsMediaHandle {
-    stop: Arc<std::sync::atomic::AtomicBool>,
+    workers: native_pipeline::Workers<WindowsRawFrame>,
 }
 
 #[cfg(target_os = "windows")]
 impl MediaHandle for WindowsMediaHandle {
     fn force_key_frame(&self) -> Result<(), SessionError> {
-        // Media Foundation inserts key frames on its own cadence; the wire
-        // protocol tolerates waiting for the next natural one.
-        Ok(())
+        self.workers
+            .handoff
+            .control(true, None)
+            .then_some(())
+            .ok_or(SessionError::MediaStopped)
     }
 
-    fn update_bitrate(&self, _bitrate: u32) -> Result<(), SessionError> {
-        Ok(())
+    fn update_bitrate(&self, bitrate: u32) -> Result<(), SessionError> {
+        self.workers
+            .handoff
+            .control(false, Some(bitrate))
+            .then_some(())
+            .ok_or(SessionError::MediaStopped)
     }
 
     fn stop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.workers.stop();
     }
 }
 
@@ -928,156 +1393,238 @@ struct LinuxMediaSource {
     width: u32,
     height: u32,
     bitrate: u32,
+    capture_audio: bool,
     output_name: Option<String>,
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxRawFrame {
+    bgra: Vec<u8>,
+    stride: usize,
+    captured_at: Instant,
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxSessionEncoder {
+    encoder: LinuxVideoEncoder,
+    times: native_pipeline::FrameTimes,
+}
+
+#[cfg(target_os = "linux")]
+impl LinuxSessionEncoder {
+    fn output(
+        &mut self,
+        frames: Vec<crate::encode_linux::EncodedFrame>,
+    ) -> Result<Vec<VideoFrame>, String> {
+        let encode_completed_at = Instant::now();
+        frames
+            .into_iter()
+            .map(|encoded| {
+                let (capture_at, encode_started_at) =
+                    self.times.take(encoded.pts).ok_or_else(|| {
+                        format!("encoder output has unknown input PTS {}", encoded.pts)
+                    })?;
+                Ok(VideoFrame {
+                    data: encoded.data,
+                    is_key_frame: encoded.is_key_frame,
+                    capture_at,
+                    encode_started_at,
+                    encode_completed_at,
+                })
+            })
+            .collect()
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl native_pipeline::Encoder<LinuxRawFrame> for LinuxSessionEncoder {
+    type Output = VideoFrame;
+    type Error = String;
+
+    fn force_keyframe(&mut self) {
+        self.encoder.force_key_frame();
+    }
+
+    fn bitrate(&mut self, bitrate: u32) -> Result<Vec<VideoFrame>, String> {
+        let frames = self
+            .encoder
+            .update_bitrate(bitrate as usize)
+            .map_err(|error| format!("encoder bitrate: {error}"))?;
+        self.output(frames)
+    }
+
+    fn encode(&mut self, frame: LinuxRawFrame) -> Result<Vec<VideoFrame>, String> {
+        self.times.submitted(frame.captured_at, Instant::now());
+        let frames = self
+            .encoder
+            .encode_bgra(&frame.bgra, frame.stride)
+            .map_err(|error| format!("encode: {error}"))?;
+        self.output(frames)
+    }
 }
 
 #[cfg(target_os = "linux")]
 impl MediaSource for LinuxMediaSource {
     fn start(&self, sender: SyncSender<MediaEvent>) -> Result<Box<dyn MediaHandle>, SessionError> {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::mpsc::channel;
-
-        enum PipelineFrame {
-            Video {
-                bgra: Vec<u8>,
-                stride: usize,
-                captured_at: Instant,
-            },
-            Stop,
-        }
-
-        let stop = Arc::new(AtomicBool::new(false));
-        let (frame_tx, frame_rx) = channel::<PipelineFrame>();
-
-        // Capture thread: wlroots/Hyprland screencopy at the target cadence.
+        let mut workers = native_pipeline::Workers::<LinuxRawFrame>::new();
         {
             let sender = sender.clone();
-            let stop = Arc::clone(&stop);
             let fps = self.fps.max(1);
             let output_name = self.output_name.clone();
-            std::thread::Builder::new()
-                .name("erd-linux-capture".into())
-                .spawn(move || {
-                    let interval = Duration::from_micros(1_000_000 / fps as u64);
-                    let capture_config = LinuxCaptureConfig {
-                        output_name: output_name.clone(),
-                        ..LinuxCaptureConfig::default()
-                    };
-                    let mut capture = match LinuxCapture::connect(capture_config) {
-                        Ok(capture) => capture,
+            workers.spawn("erd-linux-capture", true, move |handoff| {
+                let interval = Duration::from_micros(1_000_000 / u64::from(fps));
+                let capture_config = LinuxCaptureConfig {
+                    output_name,
+                    ..LinuxCaptureConfig::default()
+                };
+                let mut capture = match LinuxCapture::connect_cancellable(
+                    capture_config,
+                    handoff.cancellation(),
+                    Instant::now() + Duration::from_secs(5),
+                ) {
+                    Ok(capture) => capture,
+                    Err(error) => {
+                        if !handoff.is_stopped() {
+                            native_media_error(&handoff, &sender, format!("capture init: {error}"));
+                        }
+                        return;
+                    }
+                };
+                while !handoff.is_stopped() {
+                    let started = Instant::now();
+                    match capture.capture_frame_cancellable(
+                        handoff.cancellation(),
+                        Duration::from_millis(50),
+                    ) {
+                        Ok(Some(frame)) => {
+                            if !handoff.publish(LinuxRawFrame {
+                                bgra: frame.bgra,
+                                stride: frame.stride as usize,
+                                captured_at: Instant::now(),
+                            }) {
+                                break;
+                            }
+                            handoff.pace_until(started + interval);
+                        }
+                        Ok(None) => {}
                         Err(error) => {
-                            let _ =
-                                sender.send(MediaEvent::Error(format!("capture init: {error}")));
+                            if !handoff.is_stopped() {
+                                native_media_error(&handoff, &sender, format!("capture: {error}"));
+                            }
                             return;
                         }
-                    };
-                    while !stop.load(Ordering::Relaxed) {
-                        let started = Instant::now();
-                        match capture.capture_frame() {
-                            Ok(frame) => {
-                                if frame_tx
-                                    .send(PipelineFrame::Video {
-                                        bgra: frame.bgra,
-                                        stride: frame.stride as usize,
-                                        captured_at: started,
-                                    })
-                                    .is_err()
-                                {
-                                    return;
-                                }
-                            }
-                            Err(error) => {
-                                let _ = sender.send(MediaEvent::Error(format!("capture: {error}")));
-                                return;
-                            }
-                        }
-                        let elapsed = started.elapsed();
-                        if elapsed < interval {
-                            std::thread::sleep(interval - elapsed);
-                        }
                     }
-                })
-                .map_err(|error| SessionError::Io(io::Error::other(error)))?;
+                }
+            })?;
         }
-
-        // Encode thread: VAAPI when the GPU offers it, x264 software otherwise.
         {
-            let stop = Arc::clone(&stop);
+            let sender = sender.clone();
             let config = LinuxEncoderConfig {
                 width: self.width,
                 height: self.height,
                 bitrate: self.bitrate as usize,
                 fps: self.fps.max(1),
                 keyframe_interval: self.fps.max(1),
-                preferred_codec: LinuxVideoCodec::H264,
+                preferred_codec: LinuxVideoCodec::Hevc,
             };
-            std::thread::Builder::new()
-                .name("erd-linux-encode".into())
-                .spawn(move || {
-                    let mut encoder = match LinuxVideoEncoder::new(config) {
-                        Ok(encoder) => encoder,
-                        Err(error) => {
-                            let _ =
-                                sender.send(MediaEvent::Error(format!("encoder init: {error}")));
-                            return;
-                        }
-                    };
-                    for frame in frame_rx {
-                        match frame {
-                            PipelineFrame::Stop => break,
-                            PipelineFrame::Video {
-                                bgra,
-                                stride,
-                                captured_at,
-                            } => match encoder.encode_bgra(&bgra, stride) {
-                                Ok(encoded_frames) => {
-                                    for encoded in encoded_frames {
-                                        let now = Instant::now();
-                                        let _ = sender.send(MediaEvent::Video(VideoFrame {
-                                            data: encoded.data,
-                                            is_key_frame: encoded.is_key_frame,
-                                            capture_at: captured_at,
-                                            encode_started_at: now,
-                                            encode_completed_at: now,
-                                        }));
+            workers.spawn("erd-linux-encode", true, move |handoff| {
+                let result = native_pipeline::run_encoder(
+                    &handoff,
+                    || {
+                        LinuxVideoEncoder::new(config)
+                            .map(|encoder| LinuxSessionEncoder {
+                                encoder,
+                                times: native_pipeline::FrameTimes::new(),
+                            })
+                            .map_err(|error| format!("encoder init: {error}"))
+                    },
+                    |frame| sender.send(MediaEvent::Video(frame)).is_ok(),
+                );
+                if let Err(error) = result {
+                    native_media_error(&handoff, &sender, error);
+                }
+            })?;
+        }
+        if self.capture_audio {
+            workers.spawn("erd-linux-audio", false, move |handoff| {
+                use crate::audio_linux::LinuxAudioCapture;
+                let mut capture = match LinuxAudioCapture::open_cancellable(handoff.cancellation())
+                {
+                    Ok(capture) => capture,
+                    Err(error) => {
+                        warn!(%error, "Audio capture unavailable");
+                        return;
+                    }
+                };
+                let slot = Arc::new(native_pipeline::LatestAudio::default());
+                let mut samples = [0.0_f32; 1920];
+                while !handoff.is_stopped() {
+                    match capture.read_interleaved_f32_cancellable(
+                        &mut samples,
+                        handoff.cancellation(),
+                        Duration::from_millis(50),
+                    ) {
+                        Ok(0) => {}
+                        Ok(count) => {
+                            let captured_at = Instant::now();
+                            let mut pcm = Vec::with_capacity(count * 4);
+                            for sample in &samples[..count] {
+                                pcm.extend_from_slice(&sample.to_le_bytes());
+                            }
+                            if slot.publish(native_pipeline::AudioBlock { pcm, captured_at }) {
+                                match sender.try_send(MediaEvent::NativeAudio(Arc::clone(&slot))) {
+                                    Ok(()) => {}
+                                    Err(mpsc::TrySendError::Full(_)) => {
+                                        slot.notification_rejected()
+                                    }
+                                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                                        handoff.stop();
+                                        break;
                                     }
                                 }
-                                Err(error) => {
-                                    let _ =
-                                        sender.send(MediaEvent::Error(format!("encode: {error}")));
-                                    return;
-                                }
-                            },
+                            }
+                        }
+                        Err(error) => {
+                            if !handoff.is_stopped() {
+                                warn!(%error, "Audio capture ended");
+                            }
+                            break;
                         }
                     }
-                    stop.store(true, Ordering::Relaxed);
-                })
-                .map_err(|error| SessionError::Io(io::Error::other(error)))?;
+                }
+                // Drop owns recorder shutdown/reap on this thread.
+            })?;
         }
-
-        Ok(Box::new(LinuxMediaHandle { stop }))
+        workers.handoff.activate();
+        Ok(Box::new(LinuxMediaHandle { workers }))
     }
 }
 
 #[cfg(target_os = "linux")]
 struct LinuxMediaHandle {
-    stop: Arc<std::sync::atomic::AtomicBool>,
+    workers: native_pipeline::Workers<LinuxRawFrame>,
 }
 
 #[cfg(target_os = "linux")]
 impl MediaHandle for LinuxMediaHandle {
     fn force_key_frame(&self) -> Result<(), SessionError> {
-        // x264 emits key frames on keyframe_interval; the wire protocol
-        // tolerates waiting for the next natural one.
-        Ok(())
+        self.workers
+            .handoff
+            .control(true, None)
+            .then_some(())
+            .ok_or(SessionError::MediaStopped)
     }
 
-    fn update_bitrate(&self, _bitrate: u32) -> Result<(), SessionError> {
-        Ok(())
+    fn update_bitrate(&self, bitrate: u32) -> Result<(), SessionError> {
+        self.workers
+            .handoff
+            .control(false, Some(bitrate))
+            .then_some(())
+            .ok_or(SessionError::MediaStopped)
     }
 
     fn stop(&mut self) {
-        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.workers.stop();
     }
 }
 
@@ -1133,6 +1680,19 @@ pub struct HostServer {
     media_source: Arc<dyn MediaSource>,
     lockout: Arc<Mutex<BootstrapLockout>>,
     pairing_deadline: Option<Instant>,
+    bootstrap_identity: Option<PskIdentity>,
+    preauth_timeout: Duration,
+}
+
+#[cfg(test)]
+thread_local! {
+    static BOOTSTRAP_DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn derive_bootstrap_identity(pin: &str) -> Result<PskIdentity, TlsPskError> {
+    #[cfg(test)]
+    BOOTSTRAP_DERIVATIONS.with(|count| count.set(count.get() + 1));
+    PskIdentity::bootstrap(pin)
 }
 
 impl HostServer {
@@ -1178,6 +1738,7 @@ impl HostServer {
             width: config.display.pixel_width,
             height: config.display.pixel_height,
             bitrate: config.bitrate,
+            capture_audio: config.capture_audio,
             output_name: config.output_name.clone(),
         }))
     }
@@ -1219,13 +1780,7 @@ impl HostServer {
 
     #[cfg(test)]
     fn bind_synthetic(config: HostConfig, frame_count: u32) -> Result<Self, SessionError> {
-        Self::bind_with_media(
-            config,
-            Arc::new(SyntheticMediaSource {
-                frame_count,
-                interval: Duration::ZERO,
-            }),
-        )
+        Self::bind_with_media(config, Arc::new(SyntheticMediaSource { frame_count }))
     }
 
     fn bind_with_media(
@@ -1245,6 +1800,11 @@ impl HostServer {
         let _ = rustix::net::sockopt::set_socket_send_buffer_size(&udp_socket, 4 * 1024 * 1024);
         udp_socket.set_nonblocking(true)?;
         let lockout = Arc::new(Mutex::new(BootstrapLockout::default()));
+        let bootstrap_identity = config
+            .bootstrap_pin
+            .as_deref()
+            .map(derive_bootstrap_identity)
+            .transpose()?;
         let pairing_deadline = config
             .bootstrap_pin
             .as_ref()
@@ -1259,6 +1819,8 @@ impl HostServer {
             media_source,
             lockout,
             pairing_deadline,
+            bootstrap_identity,
+            preauth_timeout: Duration::from_secs(10),
         })
     }
 
@@ -1287,10 +1849,11 @@ impl HostServer {
 
     fn serve_next(&self) -> Result<(), SessionError> {
         let (tcp, peer) = self.tcp_listener.accept()?;
+        let admission_deadline = Instant::now() + self.preauth_timeout;
         tcp.set_nodelay(true)?;
         let tls_server = TlsPskServer::new(self.current_psks()?)?;
-        match tls_server.accept_stream(tcp) {
-            Ok(stream) => self.handle_connection(stream, peer),
+        match tls_server.accept_stream_until(tcp, admission_deadline) {
+            Ok(stream) => self.handle_connection(stream, peer, admission_deadline),
             Err(error) => {
                 let locked = self
                     .lockout
@@ -1322,8 +1885,8 @@ impl HostServer {
                 .expect("lockout poisoned")
                 .is_allowed(Instant::now());
         if pairing_active {
-            if let Some(pin) = &self.config.bootstrap_pin {
-                psks.push(PskIdentity::bootstrap(pin)?);
+            if let Some(identity) = &self.bootstrap_identity {
+                psks.push(identity.clone());
             }
         }
         if psks.is_empty() {
@@ -1348,6 +1911,7 @@ impl HostServer {
         &self,
         mut stream: erd_net::TlsPskStream<TcpStream>,
         tcp_peer: SocketAddr,
+        admission_deadline: Instant,
     ) -> Result<(), SessionError> {
         stream
             .ssl_stream_mut()
@@ -1385,254 +1949,316 @@ impl HostServer {
         let mut stop_sender_tx = None;
         let mut sender_thread = None;
 
-        // If authenticated and media_receiver is set, we run UDP sending in a dedicated thread to avoid TCP blocking it.
-        loop {
-            self.discover_udp_peer(tcp_peer, &mut udp_peer, c2h_cipher.as_mut())?;
-            if state == SessionState::Authenticated {
-                if sender_thread.is_none() {
-                    if let (Some(_), Some(peer)) = (&media_receiver, udp_peer) {
-                        let receiver = media_receiver.take().unwrap();
-                        let udp_socket = self.udp_socket.try_clone()?;
-                        let mut cipher = h2c_cipher.take().ok_or(SessionError::PreAuth)?;
-                        let pixel_width = self.config.display.pixel_width;
-                        let pixel_height = self.config.display.pixel_height;
-                        let (stx, srx) = mpsc::channel();
-                        stop_sender_tx = Some(stx);
-                        let handle = thread::spawn(move || {
-                            let mut sender = UdpSender::default();
-                            info!(%peer, "Starting UDP sender thread");
-                            loop {
-                                if srx.try_recv().is_ok() {
-                                    info!("UDP sender received stop signal");
-                                    break;
-                                }
-                                match receiver.recv_timeout(Duration::from_millis(5)) {
-                                    Ok(MediaEvent::Video(frame)) => {
-                                        let size = frame.data.len();
-                                        let is_key = frame.is_key_frame;
-                                        if let Err(err) = sender.send_frame(
-                                            &udp_socket,
-                                            peer,
-                                            &mut cipher,
-                                            pixel_width,
-                                            pixel_height,
-                                            frame,
-                                            session_origin,
-                                        ) {
-                                            warn!(%err, "Failed to send video frame over UDP");
-                                        } else {
-                                            debug!(size, is_key, %peer, "Successfully sent video frame over UDP");
+        let result = (|| -> Result<(), SessionError> {
+            // If authenticated and media_receiver is set, we run UDP sending in a dedicated thread to avoid TCP blocking it.
+            loop {
+                if state != SessionState::Authenticated {
+                    let remaining = admission_deadline
+                        .checked_duration_since(Instant::now())
+                        .filter(|remaining| !remaining.is_zero())
+                        .ok_or_else(|| io::Error::from(io::ErrorKind::TimedOut))?;
+                    stream
+                        .ssl_stream()
+                        .get_ref()
+                        .set_write_timeout(Some(remaining))?;
+                }
+                if state == SessionState::Authenticated {
+                    self.discover_udp_peer(tcp_peer, &mut udp_peer, c2h_cipher.as_mut())?;
+                    if sender_thread.is_none() {
+                        if let (Some(_), Some(peer)) = (&media_receiver, udp_peer) {
+                            let receiver = media_receiver.take().unwrap();
+                            let udp_socket = self.udp_socket.try_clone()?;
+                            let mut cipher = h2c_cipher.take().ok_or(SessionError::PreAuth)?;
+                            let pixel_width = self.config.display.pixel_width;
+                            let pixel_height = self.config.display.pixel_height;
+                            let (stx, srx) = mpsc::channel();
+                            stop_sender_tx = Some(stx);
+                            #[cfg(test)]
+                            let media_source = self.media_source.clone();
+                            let handle = thread::spawn(move || {
+                                let mut sender = UdpSender::default();
+                                info!(%peer, "Starting UDP sender thread");
+                                loop {
+                                    if !matches!(srx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                                        info!("UDP sender received stop signal");
+                                        break;
+                                    }
+                                    match receiver.recv_timeout(Duration::from_millis(5)) {
+                                        Ok(MediaEvent::Video(frame)) => {
+                                            let size = frame.data.len();
+                                            let is_key = frame.is_key_frame;
+                                            if let Err(err) = sender.send_frame(
+                                                &udp_socket,
+                                                peer,
+                                                &mut cipher,
+                                                pixel_width,
+                                                pixel_height,
+                                                frame,
+                                                session_origin,
+                                            ) {
+                                                warn!(%err, "Failed to send video frame over UDP");
+                                            } else {
+                                                debug!(size, is_key, %peer, "Successfully sent video frame over UDP");
+                                            }
+                                        }
+                                        Ok(MediaEvent::Audio(bytes)) => {
+                                            let _ = sender.send_audio(
+                                                &udp_socket,
+                                                peer,
+                                                &mut cipher,
+                                                &bytes,
+                                            );
+                                        }
+                                        #[cfg(target_os = "linux")]
+                                        Ok(MediaEvent::NativeAudio(slot)) => {
+                                            if let Some(block) = slot.take_fresh(Instant::now()) {
+                                                if let Err(error) = sender.send_audio(
+                                                    &udp_socket,
+                                                    peer,
+                                                    &mut cipher,
+                                                    &block.pcm,
+                                                ) {
+                                                    warn!(%error, "Failed to send native audio over UDP");
+                                                }
+                                            }
+                                        }
+                                        Ok(MediaEvent::Cursor(cursor)) => {
+                                            let _ = sender.send_cursor(
+                                                &udp_socket,
+                                                peer,
+                                                &mut cipher,
+                                                &cursor,
+                                            );
+                                        }
+                                        Ok(MediaEvent::Error(err)) => {
+                                            warn!(%err, "Media event error in sender thread");
+                                            break;
+                                        }
+                                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                            warn!("Media receiver disconnected, exiting sender thread");
+                                            break;
                                         }
                                     }
-                                    Ok(MediaEvent::Audio(bytes)) => {
-                                        let _ = sender.send_audio(
-                                            &udp_socket,
-                                            peer,
-                                            &mut cipher,
-                                            &bytes,
-                                        );
-                                    }
-                                    Ok(MediaEvent::Error(err)) => {
-                                        warn!(%err, "Media event error in sender thread");
-                                        break;
-                                    }
-                                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                                    Err(mpsc::RecvTimeoutError::Disconnected) => {
-                                        warn!("Media receiver disconnected, exiting sender thread");
-                                        break;
-                                    }
                                 }
-                            }
-                        });
-                        sender_thread = Some(handle);
+                                drop(receiver);
+                                #[cfg(test)]
+                                media_source.sender_exited();
+                            });
+                            sender_thread = Some(handle);
+                        }
                     }
-                }
-                let now = Instant::now();
-                if now >= next_ping {
-                    send_tcp_control(&mut stream, ControlMessage::Ping)?;
-                    next_ping = now + HEARTBEAT_INTERVAL;
-                }
-                if now.duration_since(last_pong) >= HEARTBEAT_TIMEOUT {
-                    warn!(peer = %tcp_peer, "heartbeat timeout");
-                    break;
-                }
-            }
-
-            let packet = match stream.read_frame() {
-                Ok(packet) => packet,
-                Err(TlsPskError::Io(error))
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    continue
-                }
-                Err(TlsPskError::Io(error))
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::UnexpectedEof
-                            | io::ErrorKind::ConnectionReset
-                            | io::ErrorKind::BrokenPipe
-                    ) =>
-                {
-                    warn!(%error, "read_frame saw EOF/reset/broken pipe, closing connection");
-                    break;
-                }
-                Err(error) => {
-                    warn!(%error, "read_frame failed with error, terminating connection");
-                    return Err(SessionError::Tls(error));
-                }
-            };
-            let (header, payload) = split_packet(&packet)?;
-            if !state.allows(header.packet_type) {
-                debug!(?state, ?header.packet_type, "refusing pre-auth packet");
-                continue;
-            }
-
-            match header.packet_type {
-                PacketType::PairingRequest => {
-                    if negotiated_identity != BOOTSTRAP_IDENTITY || !self.is_pairing_active() {
-                        send_pairing_reject(&mut stream, PairingRejectReason::PairingDisabled)?;
-                        continue;
+                    let now = Instant::now();
+                    if now >= next_ping {
+                        send_tcp_control(&mut stream, ControlMessage::Ping)?;
+                        next_ping = now + HEARTBEAT_INTERVAL;
                     }
-                    let request = PairingRequest::decode(payload)?;
-                    let Some(consent_sender) = &self.config.consent_sender else {
-                        send_pairing_reject(&mut stream, PairingRejectReason::PairingDisabled)?;
-                        continue;
-                    };
-                    let (response_tx, response_rx) = mpsc::sync_channel(1);
-                    consent_sender
-                        .send(ConsentPrompt {
-                            client_name: request.name.clone(),
-                            response: response_tx,
-                        })
-                        .map_err(|_| SessionError::ConsentUnavailable)?;
-                    let approved = response_rx
-                        .recv_timeout(self.config.pairing_window)
-                        .map_err(|_| SessionError::ConsentTimeout)?;
-                    if !approved {
-                        send_pairing_reject(&mut stream, PairingRejectReason::DeniedByHost)?;
+                    if now.duration_since(last_pong) >= HEARTBEAT_TIMEOUT {
+                        warn!(peer = %tcp_peer, "heartbeat timeout");
                         break;
                     }
-                    let record = PairingRecord {
-                        id: Uuid::new_v4().to_string().to_uppercase(),
-                        name: request.name,
-                        key: random_key(),
-                        added_at_unix_ms: unix_ms_u64(),
-                    };
-                    self.config.pairing_store.save(record.clone())?;
-                    let grant = PairingGrant {
-                        pairing_id: record.id,
-                        host_name: self.config.host_name.clone(),
-                        key: record.key,
-                    };
-                    send_tcp_packet(&mut stream, PacketType::PairingGrant, &grant.encode()?)?;
-                    state = SessionState::PairingGranted;
                 }
-                PacketType::Handshake => {
-                    let handshake = Handshake::decode(payload)?;
-                    let record = self
-                        .config
-                        .pairing_store
-                        .load(&handshake.pairing_id)?
-                        .ok_or(SessionError::UnknownPairing)?;
-                    if let Some(identity_pairing_id) =
-                        negotiated_identity.strip_prefix(PAIRING_IDENTITY_PREFIX)
+
+                let read = if state == SessionState::Authenticated {
+                    stream.read_frame_step()
+                } else {
+                    stream.read_frame_until(admission_deadline)
+                };
+                let packet = match read {
+                    Ok(Some(packet)) => packet,
+                    Ok(None) => continue,
+                    Err(TlsPskError::Io(error))
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
                     {
-                        if identity_pairing_id != handshake.pairing_id {
+                        continue
+                    }
+                    Err(TlsPskError::Io(error))
+                        if matches!(
+                            error.kind(),
+                            io::ErrorKind::UnexpectedEof
+                                | io::ErrorKind::ConnectionReset
+                                | io::ErrorKind::BrokenPipe
+                        ) =>
+                    {
+                        warn!(%error, "read_frame saw EOF/reset/broken pipe, closing connection");
+                        break;
+                    }
+                    Err(error) => {
+                        warn!(%error, "read_frame failed with error, terminating connection");
+                        return Err(SessionError::Tls(error));
+                    }
+                };
+                let (header, payload) = split_packet(&packet)?;
+                if !state.allows(header.packet_type) {
+                    debug!(?state, ?header.packet_type, "refusing pre-auth packet");
+                    continue;
+                }
+
+                match header.packet_type {
+                    PacketType::PairingRequest => {
+                        if negotiated_identity != BOOTSTRAP_IDENTITY || !self.is_pairing_active() {
+                            send_pairing_reject(&mut stream, PairingRejectReason::PairingDisabled)?;
+                            continue;
+                        }
+                        let request = PairingRequest::decode(payload)?;
+                        let Some(consent_sender) = &self.config.consent_sender else {
+                            send_pairing_reject(&mut stream, PairingRejectReason::PairingDisabled)?;
+                            continue;
+                        };
+                        let (response_tx, response_rx) = mpsc::sync_channel(1);
+                        consent_sender
+                            .send(ConsentPrompt {
+                                client_name: request.name.clone(),
+                                response: response_tx,
+                            })
+                            .map_err(|_| SessionError::ConsentUnavailable)?;
+                        let approved = response_rx
+                            .recv_timeout(
+                                admission_deadline
+                                    .min(
+                                        self.pairing_deadline
+                                            .ok_or(SessionError::ConsentTimeout)?,
+                                    )
+                                    .saturating_duration_since(Instant::now()),
+                            )
+                            .map_err(|_| SessionError::ConsentTimeout)?;
+                        if Instant::now() >= admission_deadline || !self.is_pairing_active() {
+                            return Err(SessionError::ConsentTimeout);
+                        }
+                        if !approved {
+                            send_pairing_reject(&mut stream, PairingRejectReason::DeniedByHost)?;
+                            break;
+                        }
+                        let record = PairingRecord {
+                            id: Uuid::new_v4().to_string().to_uppercase(),
+                            name: request.name,
+                            key: random_key(),
+                            added_at_unix_ms: unix_ms_u64(),
+                        };
+                        self.config.pairing_store.save(record.clone())?;
+                        let grant = PairingGrant {
+                            pairing_id: record.id,
+                            host_name: self.config.host_name.clone(),
+                            key: record.key,
+                        };
+                        send_tcp_packet(&mut stream, PacketType::PairingGrant, &grant.encode()?)?;
+                        state = SessionState::PairingGranted;
+                    }
+                    PacketType::Handshake => {
+                        let handshake = Handshake::decode(payload)?;
+                        let record = self
+                            .config
+                            .pairing_store
+                            .load(&handshake.pairing_id)?
+                            .ok_or(SessionError::UnknownPairing)?;
+                        if let Some(identity_pairing_id) =
+                            negotiated_identity.strip_prefix(PAIRING_IDENTITY_PREFIX)
+                        {
+                            if identity_pairing_id != handshake.pairing_id {
+                                return Err(SessionError::IdentityMismatch);
+                            }
+                        } else if negotiated_identity != BOOTSTRAP_IDENTITY {
                             return Err(SessionError::IdentityMismatch);
                         }
-                    } else if negotiated_identity != BOOTSTRAP_IDENTITY {
-                        return Err(SessionError::IdentityMismatch);
+                        if handshake.version != PROTOCOL_VERSION {
+                            return Err(SessionError::Codec(
+                                erd_proto::CodecError::UnsupportedVersion(handshake.version),
+                            ));
+                        }
+                        c2h_cipher = Some(DatagramCipher::derive(
+                            &record.key,
+                            &handshake.session_salt,
+                            Direction::ClientToHost,
+                        )?);
+                        h2c_cipher = Some(DatagramCipher::derive(
+                            &record.key,
+                            &handshake.session_salt,
+                            Direction::HostToClient,
+                        )?);
+                        state = SessionState::Authenticated;
+                        stream
+                            .ssl_stream()
+                            .get_ref()
+                            .set_write_timeout(Some(Duration::from_secs(5)))?;
+                        let ack = Handshake {
+                            name: self.config.host_name.clone(),
+                            width: self.config.display.logical_width.min(u16::MAX as u32) as u16,
+                            height: self.config.display.logical_height.min(u16::MAX as u32) as u16,
+                            scale: self.config.display.scale_factor(),
+                            version: PROTOCOL_VERSION,
+                            capabilities: Capabilities::STREAM_CONFIGURATION,
+                            pairing_id: String::new(),
+                            session_salt: [0_u8; 16],
+                        };
+                        send_tcp_packet(&mut stream, PacketType::HandshakeAck, &ack.encode()?)?;
+                        let (media_tx, media_rx) = mpsc::sync_channel(16);
+                        media_handle = Some(self.media_source.start(media_tx)?);
+                        media_receiver = Some(media_rx);
+                        last_pong = Instant::now();
+                        next_ping = Instant::now() + HEARTBEAT_INTERVAL;
+                        info!(
+                            client = handshake.name,
+                            "v3 handshake authenticated; UDP ciphers armed"
+                        );
                     }
-                    if handshake.version != PROTOCOL_VERSION {
-                        return Err(SessionError::Codec(
-                            erd_proto::CodecError::UnsupportedVersion(handshake.version),
-                        ));
+                    PacketType::InputEvent => {
+                        if state != SessionState::Authenticated {
+                            continue;
+                        }
+                        let event = InputEvent::decode(payload)?;
+                        inject_input(&event, |event| input.inject(event));
                     }
-                    c2h_cipher = Some(DatagramCipher::derive(
-                        &record.key,
-                        &handshake.session_salt,
-                        Direction::ClientToHost,
-                    )?);
-                    h2c_cipher = Some(DatagramCipher::derive(
-                        &record.key,
-                        &handshake.session_salt,
-                        Direction::HostToClient,
-                    )?);
-                    state = SessionState::Authenticated;
-                    let ack = Handshake {
-                        name: self.config.host_name.clone(),
-                        width: self.config.display.logical_width.min(u16::MAX as u32) as u16,
-                        height: self.config.display.logical_height.min(u16::MAX as u32) as u16,
-                        scale: self.config.display.scale_factor(),
-                        version: PROTOCOL_VERSION,
-                        capabilities: Capabilities::STREAM_CONFIGURATION,
-                        pairing_id: String::new(),
-                        session_salt: [0_u8; 16],
-                    };
-                    send_tcp_packet(&mut stream, PacketType::HandshakeAck, &ack.encode()?)?;
-                    let (media_tx, media_rx) = mpsc::sync_channel(16);
-                    media_handle = Some(self.media_source.start(media_tx)?);
-                    media_receiver = Some(media_rx);
-                    last_pong = Instant::now();
-                    next_ping = Instant::now() + HEARTBEAT_INTERVAL;
-                    info!(
-                        client = handshake.name,
-                        "v3 handshake authenticated; UDP ciphers armed"
-                    );
-                }
-                PacketType::InputEvent => {
-                    if state != SessionState::Authenticated {
-                        continue;
-                    }
-                    let event = InputEvent::decode(payload)?;
-                    if let Err(error) = input.inject(&event) {
-                        debug!(%error, "input event was not injected");
-                    }
-                }
-                PacketType::Control => {
-                    if state != SessionState::Authenticated {
-                        continue;
-                    }
-                    match ControlMessage::decode(payload)? {
-                        ControlMessage::RequestKeyFrame => {
-                            if let Some(media) = &media_handle {
-                                media.force_key_frame()?;
+                    PacketType::Control => {
+                        if state != SessionState::Authenticated {
+                            continue;
+                        }
+                        match ControlMessage::decode(payload)? {
+                            ControlMessage::RequestKeyFrame => {
+                                if let Some(media) = &media_handle {
+                                    media.force_key_frame()?;
+                                }
                             }
-                        }
-                        ControlMessage::BitrateAdjust(BitrateAdjust { target_bitrate })
-                            if target_bitrate > 0 =>
-                        {
-                            if let Some(media) = &media_handle {
-                                media.update_bitrate(target_bitrate as u32)?;
+                            ControlMessage::BitrateAdjust(BitrateAdjust { target_bitrate })
+                                if target_bitrate > 0 =>
+                            {
+                                if let Some(media) = &media_handle {
+                                    media.update_bitrate(target_bitrate as u32)?;
+                                }
                             }
+                            ControlMessage::Ping => {
+                                send_tcp_control(&mut stream, ControlMessage::Pong)?;
+                            }
+                            ControlMessage::Pong => last_pong = Instant::now(),
+                            ControlMessage::Disconnect | ControlMessage::StopStream => break,
+                            _ => {}
                         }
-                        ControlMessage::Ping => {
-                            send_tcp_control(&mut stream, ControlMessage::Pong)?;
-                        }
-                        ControlMessage::Pong => last_pong = Instant::now(),
-                        ControlMessage::Disconnect | ControlMessage::StopStream => break,
-                        _ => {}
                     }
+                    _ => {}
                 }
-                _ => {}
             }
-        }
 
-        if let Some(mut media) = media_handle {
-            media.stop();
-        }
+            Ok(())
+        })();
+
+        // Release blocked output sends before stopping or joining their producers.
+        drop(media_receiver);
         if let Some(tx) = stop_sender_tx {
             let _ = tx.send(());
         }
         if let Some(handle) = sender_thread {
-            let _ = handle.join();
+            if handle.join().is_err() {
+                warn!("UDP sender thread panicked");
+            }
+        }
+        if let Some(mut media) = media_handle {
+            media.stop();
         }
         state = SessionState::Closed;
         debug!(?state, "session closed");
-        Ok(())
+        result
     }
 
     fn discover_udp_peer(
@@ -1741,6 +2367,17 @@ impl UdpSender {
         Ok(())
     }
 
+    fn send_cursor(
+        &mut self,
+        socket: &UdpSocket,
+        peer: SocketAddr,
+        cipher: &mut DatagramCipher,
+        cursor: &CursorUpdate,
+    ) -> Result<(), SessionError> {
+        let payload = cursor.encode()?;
+        self.send_packet(socket, peer, cipher, PacketType::CursorUpdate, &payload)
+    }
+
     fn send_audio(
         &mut self,
         socket: &UdpSocket,
@@ -1773,6 +2410,16 @@ impl UdpSender {
             )?;
         }
         Ok(())
+    }
+}
+
+fn inject_input<E: std::fmt::Display>(
+    event: &InputEvent,
+    inject: impl FnOnce(&InputEvent) -> Result<(), E>,
+) {
+    tracing::trace!(?event, "Host received input event");
+    if let Err(error) = inject(event) {
+        tracing::warn!(%error, "input event was not injected");
     }
 }
 
@@ -1844,8 +2491,511 @@ fn monotonic_us(origin: Instant, value: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_kdf_runs_once_per_unchanged_pairing_window() {
+        let directory = tempdir().unwrap();
+        let (consent, _) = mpsc::channel();
+        let config = test_config(
+            PairingStore::new(directory.path().join("keys.json")),
+            consent,
+        );
+        BOOTSTRAP_DERIVATIONS.with(|count| count.set(0));
+        let started = Instant::now();
+        let server = HostServer::bind_synthetic(config, 0).unwrap();
+        let first = server.current_psks().unwrap();
+        for _ in 1..8 {
+            assert_eq!(server.current_psks().unwrap(), first);
+        }
+        let derivations = BOOTSTRAP_DERIVATIONS.with(|count| count.get());
+        eprintln!("unchanged pairing window: {derivations} PBKDF2 derivations for 8 accepts, elapsed {:?}", started.elapsed());
+        assert_eq!(
+            derivations, 1,
+            "unchanged PIN repeats 600000-round PBKDF2 per accept"
+        );
+    }
+
+    #[test]
+    fn cached_bootstrap_obeys_lockout_expiry_and_pairing_revocation() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("keys.json"));
+        store
+            .save(PairingRecord {
+                id: "stored".into(),
+                name: "stored".into(),
+                key: [3; 32],
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent, _) = mpsc::channel();
+        let mut server =
+            HostServer::bind_synthetic(test_config(store.clone(), consent), 0).unwrap();
+        assert_eq!(server.current_psks().unwrap().len(), 2);
+        for _ in 0..5 {
+            server
+                .lockout
+                .lock()
+                .unwrap()
+                .record_failure(Instant::now());
+        }
+        let paired = server.current_psks().unwrap();
+        assert_eq!(paired.len(), 1);
+        assert_eq!(paired[0].identity(), "erd-p1.stored");
+        server.lockout.lock().unwrap().begin_pairing();
+        server.pairing_deadline = Some(Instant::now());
+        assert_eq!(server.current_psks().unwrap(), paired);
+        store.revoke("stored").unwrap();
+        let disabled = server.current_psks().unwrap();
+        assert_eq!(disabled.len(), 1);
+        assert_eq!(disabled[0].identity(), "erd-disabled");
+    }
+
+    fn pairing_deadline_scenario(approve: bool) {
+        let directory = tempdir().unwrap();
+        let (consent, prompts) = mpsc::channel();
+        let config = test_config(
+            PairingStore::new(directory.path().join("keys.json")),
+            consent,
+        );
+        let server = HostServer::bind_synthetic(config, 0).unwrap();
+        let addr = server.tcp_addr().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let (socket, peer) = server.tcp_listener.accept().unwrap();
+            let tls = TlsPskServer::new(server.current_psks().unwrap()).unwrap();
+            let stream = tls.accept_stream(socket).unwrap();
+            done_tx
+                .send(server.handle_connection(
+                    stream,
+                    peer,
+                    Instant::now() + Duration::from_millis(200),
+                ))
+                .unwrap();
+        });
+        let client = TlsPskClient::new(PskIdentity::bootstrap("12345678").unwrap()).unwrap();
+        let mut tcp = client.connect(addr).unwrap();
+        tcp.ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        send_tcp_packet(
+            &mut tcp,
+            PacketType::PairingRequest,
+            &PairingRequest {
+                name: "deadline".into(),
+            }
+            .encode()
+            .unwrap(),
+        )
+        .unwrap();
+        let prompt = prompts
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|error| {
+                panic!(
+                    "consent channel failed: {error:?}; host result: {:?}",
+                    done_rx.try_recv()
+                )
+            });
+        let retained_prompt = if approve {
+            prompt.approve();
+            let packet = tcp.read_frame().unwrap();
+            assert_eq!(
+                split_packet(&packet).unwrap().0.packet_type,
+                PacketType::PairingGrant
+            );
+            None
+        } else {
+            Some(prompt)
+        };
+        let completion = done_rx.recv_timeout(Duration::from_secs(2));
+        let _ = tcp
+            .ssl_stream()
+            .get_ref()
+            .shutdown(std::net::Shutdown::Both);
+        drop(tcp);
+        drop(retained_prompt);
+        worker.join().unwrap();
+        assert!(
+            matches!(
+                completion.unwrap(),
+                Err(SessionError::ConsentTimeout) | Err(SessionError::Io(_))
+            ),
+            "consent or post-grant state must not extend the preauth deadline"
+        );
+    }
+
+    #[test]
+    fn preauth_deadline_bounds_pending_consent() {
+        pairing_deadline_scenario(false);
+    }
+
+    #[test]
+    fn preauth_deadline_bounds_granted_client_without_handshake() {
+        pairing_deadline_scenario(true);
+    }
+
+    #[test]
+    fn preauth_deadline_releases_idle_client_before_peer_disconnect() {
+        // Given: a paired TLS client that sends no application handshake.
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("keys.json"));
+        store
+            .save(PairingRecord {
+                id: "deadline-client".into(),
+                name: "deadline".into(),
+                key: [7; 32],
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent, _) = mpsc::channel();
+        let mut config = test_config(store, consent);
+        config.bootstrap_pin = None;
+        let mut server = HostServer::bind_synthetic(config, 0).unwrap();
+        server.preauth_timeout = Duration::from_millis(50);
+        let addr = server.tcp_addr().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            done_tx.send(server.serve_next()).unwrap();
+        });
+        let client =
+            TlsPskClient::new(PskIdentity::pairing("deadline-client", &[7; 32]).unwrap()).unwrap();
+        let tcp = client.connect(addr).unwrap();
+        // When: the total application-handshake budget expires with the peer open.
+        let completion = done_rx.recv_timeout(Duration::from_millis(500));
+        let ended_before_peer = completion.is_ok();
+        let shutdown = tcp
+            .ssl_stream()
+            .get_ref()
+            .shutdown(std::net::Shutdown::Both);
+        drop(tcp);
+        worker.join().unwrap();
+        assert!(shutdown.is_ok() || shutdown.unwrap_err().kind() == io::ErrorKind::NotConnected);
+        // Then: the host, not peer disconnect, ends admission with an error.
+        assert!(
+            ended_before_peer,
+            "idle preauth client monopolized host admission"
+        );
+        assert!(completion.unwrap().is_err());
+    }
+
+    #[test]
+    fn admission_deadline_releases_silent_tls_then_accepts_paired_client() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("keys.json"));
+        store
+            .save(PairingRecord {
+                id: "deadline-client".into(),
+                name: "deadline".into(),
+                key: [7; 32],
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent, _) = mpsc::channel();
+        let mut config = test_config(store, consent);
+        config.bootstrap_pin = None;
+        let mut server = HostServer::bind_synthetic(config, 0).unwrap();
+        server.preauth_timeout = Duration::from_millis(100);
+        let addr = server.tcp_addr().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            done_tx.send(server.serve_next()).unwrap();
+            done_tx.send(server.serve_next()).unwrap();
+        });
+        let silent = TcpStream::connect(addr).unwrap();
+        let first = done_rx.recv_timeout(Duration::from_secs(1));
+        let ended_before_peer = first.is_ok();
+        let _ = silent.shutdown(std::net::Shutdown::Both);
+        drop(silent);
+        let first = match first {
+            Ok(result) => result,
+            Err(_) => done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+        };
+        let client =
+            TlsPskClient::new(PskIdentity::pairing("deadline-client", &[7; 32]).unwrap()).unwrap();
+        let socket = TcpStream::connect(addr).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut tcp = client.connect_stream(socket).unwrap();
+        let handshake = Handshake {
+            name: "deadline".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::empty(),
+            pairing_id: "deadline-client".into(),
+            session_salt: [9; 16],
+        };
+        send_tcp_packet(
+            &mut tcp,
+            PacketType::Handshake,
+            &handshake.encode().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            split_packet(&tcp.read_frame().unwrap())
+                .unwrap()
+                .0
+                .packet_type,
+            PacketType::HandshakeAck
+        );
+        send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+        let second = done_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        worker.join().unwrap();
+        assert!(
+            ended_before_peer,
+            "silent TLS peer monopolized serial accept"
+        );
+        assert!(
+            matches!(first, Err(SessionError::Tls(TlsPskError::Io(error))) if error.kind() == io::ErrorKind::TimedOut)
+        );
+        assert!(second.is_ok());
+    }
     use erd_net::{PskIdentity, TlsPskClient};
     use tempfile::tempdir;
+
+    #[test]
+    fn input_injection_preserves_behavior_with_trace_only_metadata() {
+        use tracing_subscriber::prelude::*;
+        struct Levels(Arc<Mutex<Vec<tracing::Level>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Levels {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                self.0.lock().unwrap().push(*event.metadata().level());
+            }
+        }
+        let levels = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(Levels(levels.clone()));
+        let event = InputEvent::decode(&[0; InputEvent::SIZE]).unwrap();
+        let mut injected = Vec::new();
+        tracing::subscriber::with_default(subscriber, || {
+            inject_input(&event, |actual| {
+                injected.push(actual.encode().unwrap());
+                Ok::<(), io::Error>(())
+            });
+        });
+        assert_eq!(injected, vec![event.encode().unwrap()]);
+        assert_eq!(*levels.lock().unwrap(), vec![tracing::Level::TRACE]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn capture_overload_drops_frame_but_disconnection_stops_bridge() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        tx.send(crate::encode_vt::Command::ForceKeyFrame).unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let frame = || CaptureFrame {
+            width: 2,
+            height: 2,
+            bytes_per_row: 8,
+            bgra: vec![0; 16],
+            captured_at: Instant::now(),
+        };
+        let worker = thread::spawn(move || {
+            let keep_running = submit_capture_frame(&tx, frame());
+            done_tx.send(keep_running).unwrap();
+            tx
+        });
+        let completed = done_rx.recv_timeout(Duration::from_secs(2));
+        // Release the stalled baseline before asserting, so RED leaves no worker behind.
+        drop(rx);
+        let tx = worker.join().unwrap();
+        assert_eq!(completed, Ok(true));
+        assert!(!submit_capture_frame(&tx, frame()));
+    }
+
+    struct LifecycleSource {
+        full: mpsc::Sender<()>,
+        stopped: mpsc::Sender<()>,
+        sender_exit: mpsc::Sender<()>,
+    }
+
+    struct LifecycleHandle {
+        producer: Option<thread::JoinHandle<()>>,
+        exited: Receiver<()>,
+        stopped: mpsc::Sender<()>,
+    }
+
+    impl MediaSource for LifecycleSource {
+        fn sender_exited(&self) {
+            self.sender_exit.send(()).unwrap();
+        }
+        fn start(
+            &self,
+            sender: SyncSender<MediaEvent>,
+        ) -> Result<Box<dyn MediaHandle>, SessionError> {
+            let full = self.full.clone();
+            let (exit_tx, exited) = mpsc::channel();
+            let producer = thread::spawn(move || {
+                let now = Instant::now();
+                let frame = VideoFrame {
+                    data: vec![0, 0, 0, 1, 0x26],
+                    is_key_frame: true,
+                    capture_at: now,
+                    encode_started_at: now,
+                    encode_completed_at: now,
+                };
+                for _ in 0..16 {
+                    sender.send(MediaEvent::Video(frame.clone())).unwrap();
+                }
+                assert!(matches!(
+                    sender.try_send(MediaEvent::Video(frame.clone())),
+                    Err(mpsc::TrySendError::Full(_))
+                ));
+                full.send(()).unwrap();
+                while sender.send(MediaEvent::Video(frame.clone())).is_ok() {}
+                exit_tx.send(()).unwrap();
+            });
+            Ok(Box::new(LifecycleHandle {
+                producer: Some(producer),
+                exited,
+                stopped: self.stopped.clone(),
+            }))
+        }
+    }
+
+    impl MediaHandle for LifecycleHandle {
+        fn force_key_frame(&self) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn update_bitrate(&self, _: u32) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn stop(&mut self) {
+            self.exited
+                .recv_timeout(Duration::from_secs(2))
+                .expect("producer exit before join");
+            self.producer.take().unwrap().join().unwrap();
+            self.stopped.send(()).unwrap();
+        }
+    }
+
+    fn lifecycle_scenario(malformed: bool) {
+        // Given: real paired TLS and an owned producer filling the actual media queue.
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [3; 32];
+        store
+            .save(PairingRecord {
+                id: "lifecycle".into(),
+                name: "fixture".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent, _) = mpsc::channel();
+        let (full_tx, full_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let (sender_exit, sender_exited) = mpsc::channel();
+        let server = HostServer::bind_with_media(
+            test_config(store, consent),
+            Arc::new(LifecycleSource {
+                full: full_tx,
+                stopped: stop_tx,
+                sender_exit,
+            }),
+        )
+        .unwrap();
+        let tcp_addr = server.tcp_addr().unwrap();
+        let udp_addr = server.udp_addr().unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let (tcp, peer) = server.tcp_listener.accept().unwrap();
+            let tls = TlsPskServer::new(server.current_psks().unwrap()).unwrap();
+            let result = server.handle_connection(
+                tls.accept_stream(tcp).unwrap(),
+                peer,
+                Instant::now() + server.preauth_timeout,
+            );
+            done_tx.send(result).unwrap();
+        });
+        let client = TlsPskClient::new(PskIdentity::pairing("lifecycle", &key).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        tcp.ssl_stream_mut()
+            .get_mut()
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let handshake = Handshake {
+            name: "fixture".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::empty(),
+            pairing_id: "lifecycle".into(),
+            session_salt: [5; 16],
+        };
+        send_tcp_packet(
+            &mut tcp,
+            PacketType::Handshake,
+            &handshake.encode().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            split_packet(&tcp.read_frame().unwrap())
+                .unwrap()
+                .0
+                .packet_type,
+            PacketType::HandshakeAck
+        );
+        full_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+        // When: disconnect before discovery, or corrupt control after real UDP output.
+        if malformed {
+            udp.send_to(&[0xff], udp_addr).unwrap();
+            let mut buffer = [0; 2048];
+            let (length, _) = udp.recv_from(&mut buffer).unwrap();
+            let mut cipher =
+                DatagramCipher::derive(&key, &[5; 16], Direction::HostToClient).unwrap();
+            assert_eq!(
+                cipher
+                    .open_datagram(&buffer[..length])
+                    .unwrap()
+                    .0
+                    .packet_type,
+                PacketType::FrameHeader
+            );
+            send_tcp_packet(&mut tcp, PacketType::Control, &[]).unwrap();
+        } else {
+            send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+        }
+        // Then: producer is disconnected and joined before the session completes.
+        let stopped = stop_rx.recv_timeout(Duration::from_secs(3));
+        let done = done_rx.recv_timeout(Duration::from_secs(3));
+        let joined = worker.join();
+        assert!(
+            stopped.is_ok(),
+            "owned producer must be stopped and joined: {stopped:?}"
+        );
+        assert!(joined.is_ok());
+        if malformed {
+            sender_exited.recv_timeout(Duration::from_secs(3)).unwrap();
+        }
+        let result = done.unwrap();
+        if malformed {
+            assert!(matches!(result, Err(SessionError::Codec(_))));
+        } else {
+            assert!(result.is_ok());
+        }
+    }
+
+    #[test]
+    fn disconnect_before_udp_unblocks_full_media_queue() {
+        lifecycle_scenario(false);
+    }
+
+    #[test]
+    fn protocol_error_stops_all_media_workers() {
+        lifecycle_scenario(true);
+    }
 
     fn test_config(store: PairingStore, consent_sender: mpsc::Sender<ConsentPrompt>) -> HostConfig {
         HostConfig {
@@ -1863,7 +3013,7 @@ mod tests {
                 scale_factor_milli: 1_000,
             },
             frames_per_second: 60,
-            bitrate: DEFAULT_BITRATE,
+            bitrate: 12_000_000,
             capture_audio: false,
             output_name: None,
             consent_sender: Some(consent_sender),
@@ -1872,6 +3022,103 @@ mod tests {
 
     fn decode_tcp_packet(packet: &[u8]) -> (PacketHeader, &[u8]) {
         split_packet(packet).unwrap()
+    }
+
+    #[test]
+    fn resolve_output_target_precedence_and_strict_explicit_matching() {
+        let monitors_focused: serde_json::Value = serde_json::json!([
+            {"name": "DP-1", "focused": false},
+            {"name": "HDMI-A-1", "focused": true}
+        ]);
+        let monitors_none_focused: serde_json::Value = serde_json::json!([
+            {"name": "DP-1", "focused": false},
+            {"name": "HDMI-A-1", "focused": false}
+        ]);
+        let empty_monitors: serde_json::Value = serde_json::json!([]);
+
+        // 1. Explicit CLI argument takes highest precedence over env and compositor
+        assert_eq!(
+            resolve_output_target(
+                Some("DP-2".to_string()),
+                Some("HDMI-A-1".to_string()),
+                Some(&monitors_focused),
+            ),
+            Some("DP-2".to_string())
+        );
+
+        // 2. Whitespace-only CLI argument falls through to env
+        assert_eq!(
+            resolve_output_target(
+                Some("   ".to_string()),
+                Some("HDMI-A-1".to_string()),
+                Some(&monitors_focused),
+            ),
+            Some("HDMI-A-1".to_string())
+        );
+
+        // 3. Explicit env variable takes precedence over compositor when CLI is absent
+        assert_eq!(
+            resolve_output_target(None, Some("HDMI-A-1".to_string()), Some(&monitors_focused),),
+            Some("HDMI-A-1".to_string())
+        );
+
+        // 4. Explicit non-existent target in env is strictly preserved (never silently redirected)
+        assert_eq!(
+            resolve_output_target(
+                None,
+                Some("NON_EXISTENT_MONITOR".to_string()),
+                Some(&monitors_focused),
+            ),
+            Some("NON_EXISTENT_MONITOR".to_string())
+        );
+
+        // 5. Auto-detect with focused monitor selects the focused monitor
+        assert_eq!(
+            resolve_output_target(None, None, Some(&monitors_focused)),
+            Some("HDMI-A-1".to_string())
+        );
+
+        // 6. Auto-detect with no focused monitor falls back to first named monitor
+        assert_eq!(
+            resolve_output_target(None, None, Some(&monitors_none_focused)),
+            Some("DP-1".to_string())
+        );
+
+        // 7. Auto-detect with empty monitors array returns None
+        assert_eq!(
+            resolve_output_target(None, None, Some(&empty_monitors)),
+            None
+        );
+
+        // 8. Auto-detect with no compositor data returns None
+        assert_eq!(resolve_output_target(None, None, None), None);
+    }
+
+    #[test]
+    fn select_focused_output_finds_focused_or_falls_back_to_first() {
+        let json_with_focused: serde_json::Value = serde_json::json!([
+            {"name": "DP-1", "focused": false},
+            {"name": "HDMI-A-1", "focused": true}
+        ]);
+        assert_eq!(
+            select_focused_output(&json_with_focused),
+            Some("HDMI-A-1".to_string())
+        );
+
+        let json_no_focused: serde_json::Value = serde_json::json!([
+            {"name": "HDMI-A-1", "focused": false},
+            {"name": "DP-1", "focused": false}
+        ]);
+        assert_eq!(
+            select_focused_output(&json_no_focused),
+            Some("HDMI-A-1".to_string())
+        );
+
+        let empty_array: serde_json::Value = serde_json::json!([]);
+        assert_eq!(select_focused_output(&empty_array), None);
+
+        let not_an_array: serde_json::Value = serde_json::json!({"name": "HDMI-A-1"});
+        assert_eq!(select_focused_output(&not_an_array), None);
     }
 
     #[test]
@@ -1920,6 +3167,7 @@ mod tests {
         };
         store.save(record.clone()).unwrap();
         assert_eq!(store.load("id").unwrap(), Some(record));
+        #[cfg(unix)]
         assert_eq!(
             fs::metadata(store.path()).unwrap().permissions().mode() & 0o777,
             0o600

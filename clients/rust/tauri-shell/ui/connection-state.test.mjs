@@ -144,6 +144,48 @@ test('pending connect settles before input release: teardown still waits for rel
   await canceled;
 });
 
+test('synchronous connecting subscription can cancel without losing native cleanup ownership', async () => {
+  const f = fixture();
+  const arrival = f.next('connect'), teardown = f.next('disconnect');
+  let canceled, duplicate;
+  const off = f.connection.subscribe(state => {
+    if (state.phase === 'connecting') canceled = f.connection.cancel();
+    if (state.phase === 'disconnecting') duplicate = f.connection.disconnect();
+  });
+  const connecting = f.connection.connect({ host: 'host' });
+  assert.equal(f.connection.snapshot().phase, 'disconnecting');
+  assert.equal(canceled, duplicate);
+  assert.equal(await f.connection.connect({ host: 'blocked' }), false);
+  (await arrival).resolve();
+  (await teardown).resolve();
+  await canceled;
+  await connecting;
+  off();
+  assert.equal(f.connection.snapshot().phase, 'idle');
+  assert.deepEqual(f.calls.map(c => c.command), ['connect', 'disconnect']);
+});
+
+test('completed input release cannot disconnect an unpublished pending connect', async () => {
+  const release = deferred(), entered = deferred();
+  const f = fixture({ releaseInputs: () => { entered.resolve(); return release.promise; } });
+  const arrival = f.next('connect');
+  const connecting = f.connection.connect({ host: 'host' });
+  const native = await arrival;
+  const teardown = f.next('disconnect');
+  const canceled = f.connection.cancel();
+  await entered.promise;
+  release.resolve();
+  // Await the exact release settlement, after cleanup's already-registered await.
+  await release.promise;
+  assert.deepEqual(f.calls.map(c => c.command), ['connect']);
+  assert.equal(f.connection.snapshot().busy, true);
+  native.resolve();
+  (await teardown).resolve();
+  await canceled;
+  await connecting;
+  assert.equal(f.connection.snapshot().busy, false);
+});
+
 test('connect rejection cleans up, retaining original error and retryable cleanup failure', async () => {
   const f = fixture();
   const arrival = f.next('connect'), teardown = f.next('disconnect');

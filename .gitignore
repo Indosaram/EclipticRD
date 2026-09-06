@@ -16,5 +16,21 @@ Packages/
 
 # auto-added: build artifacts & tooling state
 target/
+**/target/
+clients/rust/target/
 .serena/
 clients/rust/target-tauri/
+
+# Agent & scratch artifacts
+.omo/all-fixes-*
+.omo/evidence/
+.omo/drafts/
+.omo/senpi-task/
+# Senpi and task logs
+.omo/senpi-task/
+.omo/all-fixes-20260905/
+.omo/perf-review-20260905/
+.omo/ulw-loop/
+.omo/evidence/
+.omo/drafts/
+*.tar.gz

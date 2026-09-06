@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "session-overlay",
+  "description": "Allows the session launcher overlay to toggle window fullscreen when the webview element-fullscreen API is unavailable.",
+  "windows": ["main"],
+  "permissions": [
+    "core:window:allow-set-fullscreen",
+    "core:window:allow-is-fullscreen"
+  ]
+}

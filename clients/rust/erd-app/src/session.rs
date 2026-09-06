@@ -2,7 +2,7 @@ use std::{
     io,
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
     path::PathBuf,
-    sync::{mpsc, Arc, Mutex},
+    sync::{mpsc, Arc, Condvar, Mutex},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -29,7 +29,6 @@ pub const DEFAULT_UDP_PORT: u16 = 19_731;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 pub const HANDSHAKE_ACK_TIMEOUT: Duration = Duration::from_secs(10);
-const TCP_RUNTIME_READ_SLICE: Duration = Duration::from_millis(5);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -103,6 +102,8 @@ pub enum SessionError {
     Poisoned,
     #[error("address resolution returned no endpoints")]
     NoAddress,
+    #[error("TCP runtime worker panicked: {0}")]
+    TcpRuntimePanicked(String),
     #[error("TCP runtime stopped")]
     TcpRuntimeStopped,
     #[error("protocol error: {0}")]
@@ -152,9 +153,11 @@ pub struct ClientSession {
     store: PairingStore,
     state: Arc<Mutex<SessionStateInner>>,
     tcp: Arc<Mutex<Option<TlsPskStream<std::net::TcpStream>>>>,
-    udp: Arc<Mutex<Option<Arc<UdpSocket>>>>,
+    udp: Arc<Mutex<Option<Arc<UdpTransport>>>>,
     udp_send: Arc<Mutex<Option<DatagramCipher>>>,
     udp_receive: Arc<Mutex<Option<DatagramCipher>>>,
+    #[cfg(test)]
+    tcp_wait: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 }
 
 impl ClientSession {
@@ -171,6 +174,8 @@ impl ClientSession {
             udp: Arc::new(Mutex::new(None)),
             udp_send: Arc::new(Mutex::new(None)),
             udp_receive: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            tcp_wait: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -196,7 +201,7 @@ impl ClientSession {
                     id: grant.pairing_id,
                     name: grant.host_name,
                     key: grant.key.to_vec(),
-                    added_at_unix_ms: current_unix_ms() as u64,
+                    added_at_unix_ms: current_unix_ms(),
                 };
                 self.store.save(record.clone())?;
                 record
@@ -225,7 +230,10 @@ impl ClientSession {
     }
 
     /// Connects directly using an explicit pairing record without consulting the pairing store.
-    pub fn connect_with_pairing(&self, pairing: PairingRecord) -> Result<ReadySession, SessionError> {
+    pub fn connect_with_pairing(
+        &self,
+        pairing: PairingRecord,
+    ) -> Result<ReadySession, SessionError> {
         let psk = PskIdentity::pairing(&pairing.id, &pairing.key)?;
         self.connect_with_psk(psk, SessionState::AwaitingHandshakeAck)?;
         self.begin_handshake(pairing)
@@ -234,7 +242,7 @@ impl ClientSession {
     pub fn set_udp_read_timeout(&self, timeout: Option<Duration>) -> Result<(), SessionError> {
         let udp = self.udp.lock().map_err(|_| SessionError::Poisoned)?;
         if let Some(udp) = udp.as_ref() {
-            udp.set_read_timeout(timeout)?;
+            *udp.timeout.lock().map_err(|_| SessionError::Poisoned)? = timeout;
         }
         Ok(())
     }
@@ -258,14 +266,14 @@ impl ClientSession {
             let udp = udp_guard.as_ref().cloned().ok_or(SessionError::NotReady)?;
             (state.next_udp_sequence, udp)
         };
-        let header = PacketHeader::new(packet_type, sequence, current_unix_ms(), 0);
+        let header = PacketHeader::new(packet_type, sequence, current_unix_ms() as u32, 0);
         let mut cipher_guard = self.udp_send.lock().map_err(|_| SessionError::Poisoned)?;
         let datagram = cipher_guard
             .as_mut()
             .ok_or(SessionError::NotReady)?
             .seal_datagram(&header, payload)?;
         drop(cipher_guard);
-        udp.send(&datagram)?;
+        udp.socket.send(&datagram)?;
         Ok(())
     }
 
@@ -322,27 +330,81 @@ impl ClientSession {
         if self.state()? != SessionState::Ready {
             return Err(SessionError::NotReady);
         }
-        {
+        let readiness_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()?;
+        let readiness = {
             let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
-            tcp.as_mut()
+            let socket = tcp
+                .as_mut()
                 .ok_or(SessionError::NotReady)?
-                .ssl_stream_mut()
-                .get_ref()
-                .set_read_timeout(Some(TCP_RUNTIME_READ_SLICE))?;
-        }
+                .ssl_stream()
+                .get_ref();
+            let observer = socket.try_clone()?;
+            socket.set_nonblocking(true)?;
+            let registered = {
+                let _entered = readiness_runtime.enter();
+                tokio::net::TcpStream::from_std(observer)
+            };
+            socket.set_nonblocking(false)?;
+            registered?
+        };
         let session = self.clone();
-        let (stop_tx, stop_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
-        let worker = thread::spawn(move || loop {
-            if stop_rx.try_recv().is_ok() {
-                break;
-            }
-            match session.receive_tcp_event() {
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
+        let event_rx = RuntimeEvents::default();
+        let event_tx = event_rx.clone();
+        let worker = thread::spawn(move || {
+            readiness_runtime.block_on(async { loop {
+            if stop_rx.try_recv().is_ok() { break; }
+            let mut interest = tokio::io::Interest::READABLE;
+            let result = {
+                let mut tcp = session.tcp.lock().map_err(|_| SessionError::Poisoned);
+                match tcp.as_mut() {
+                    Ok(tcp) => match tcp.as_mut() {
+                        Some(stream) => {
+                            let result = stream.ssl_stream().get_ref().set_nonblocking(true)
+                                .map_err(SessionError::from).and_then(|()| stream.read_frame_step().map_err(SessionError::from));
+                            if stream.read_needs_write() { interest = tokio::io::Interest::WRITABLE; }
+                            match stream.ssl_stream().get_ref().set_nonblocking(false) {
+                                Ok(()) => result,
+                                Err(error) => Err(SessionError::Io(error)),
+                            }
+                        }
+                        None => Err(SessionError::NotReady),
+                    },
+                    Err(_) => Err(SessionError::Poisoned),
+                }
+            };
+            let event = match result {
+                Ok(Some(frame)) => {
+                    if frame.len() < PacketHeader::SIZE {
+                        Err(SessionError::Io(io::Error::from(io::ErrorKind::InvalidData)))
+                    } else {
+                        PacketHeader::decode(&frame[..PacketHeader::SIZE]).map_err(SessionError::from)
+                            .and_then(|header| session.handle_packet(header, frame[PacketHeader::SIZE..].to_vec(), false))
+                    }
+                }
+                Ok(None) => continue,
+                Err(SessionError::Tls(TlsPskError::Io(error))) if error.kind() == io::ErrorKind::WouldBlock => {
+                    #[cfg(test)]
+                    if let Some(wait) = session.tcp_wait.lock().unwrap().take() { wait.send(()).unwrap(); }
+                    tokio::select! {
+                        biased;
+                        _ = &mut stop_rx => break,
+                        ready = readiness.ready(interest) => {
+                            if let Err(error) = ready { event_tx.push(Err(SessionError::Io(error))); break; }
+                            let _: io::Result<()> = readiness.try_io(interest, || Err(io::ErrorKind::WouldBlock.into()));
+                        }
+                    }
+                    continue;
+                }
+                Err(error) => Err(error),
+            };
+            if stop_rx.try_recv().is_ok() { break; }
+            match event {
                 Ok(SessionEvent::Ignored) => {}
                 Ok(event) => {
-                    if event_tx.send(Ok(event)).is_err() {
-                        break;
-                    }
+                    event_tx.push(Ok(event));
                 }
                 Err(SessionError::Tls(TlsPskError::Io(error)))
                     if matches!(
@@ -350,10 +412,12 @@ impl ClientSession {
                         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
                     ) => {}
                 Err(error) => {
-                    let _ = event_tx.send(Err(error));
+                    event_tx.push(Err(error));
                     break;
                 }
             }
+        }});
+            event_tx.close();
         });
         Ok(SessionRuntime {
             events: event_rx,
@@ -365,16 +429,22 @@ impl ClientSession {
     pub fn receive_udp_event(&self) -> Result<SessionEvent, SessionError> {
         let udp = {
             let socket_guard = self.udp.lock().map_err(|_| SessionError::Poisoned)?;
-            socket_guard.as_ref().cloned().ok_or(SessionError::NotReady)?
+            socket_guard
+                .as_ref()
+                .cloned()
+                .ok_or(SessionError::NotReady)?
         };
-        let mut datagram = [0_u8; 65_536];
-        let received = udp.recv(&mut datagram)?;
-        let mut cipher_guard = self.udp_receive.lock().map_err(|_| SessionError::Poisoned)?;
+        let (datagram, count) = udp.receive()?;
+        let mut cipher_guard = self
+            .udp_receive
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?;
         let (header, payload) = cipher_guard
             .as_mut()
             .ok_or(SessionError::NotReady)?
-            .open_datagram(&datagram[..received])?;
+            .open_datagram(&datagram[..count])?;
         drop(cipher_guard);
+        drop(datagram);
         self.handle_packet(header, payload, true)
     }
 
@@ -385,11 +455,71 @@ impl ClientSession {
             state.frames.clear();
             state.audio.clear();
         }
-        *self.tcp.lock().map_err(|_| SessionError::Poisoned)? = None;
-        *self.udp.lock().map_err(|_| SessionError::Poisoned)? = None;
+        if let Some(udp) = self.udp.lock().map_err(|_| SessionError::Poisoned)?.take() {
+            udp.cancel.send_replace(true);
+        }
+        if let Some(tcp) = self.tcp.lock().map_err(|_| SessionError::Poisoned)?.take() {
+            match tcp
+                .ssl_stream()
+                .get_ref()
+                .shutdown(std::net::Shutdown::Both)
+            {
+                Ok(()) => {}
+                // The peer may have already closed; cancellation is already satisfied.
+                Err(error) if error.kind() == io::ErrorKind::NotConnected => {}
+                Err(error) => return Err(SessionError::Io(error)),
+            }
+        }
         *self.udp_send.lock().map_err(|_| SessionError::Poisoned)? = None;
-        *self.udp_receive.lock().map_err(|_| SessionError::Poisoned)? = None;
+        *self
+            .udp_receive
+            .lock()
+            .map_err(|_| SessionError::Poisoned)? = None;
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn udp_recv_buffer_ptr(&self) -> Option<usize> {
+        let udp_guard = self.udp.lock().ok()?;
+        let ptr = *udp_guard.as_ref()?.last_buffer_ptr.lock().ok()?;
+        ptr
+    }
+
+    #[cfg(test)]
+    fn udp_recv_alloc_count(&self) -> Option<usize> {
+        let udp_guard = self.udp.lock().ok()?;
+        let count = udp_guard
+            .as_ref()?
+            .alloc_count
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Some(count)
+    }
+
+    #[cfg(test)]
+    fn cancel_udp_receive_for_test(&self) {
+        if let Ok(guard) = self.udp.lock() {
+            if let Some(udp) = guard.as_ref() {
+                udp.cancel.send_replace(true);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn reset_udp_cancel_for_test(&self) {
+        if let Ok(guard) = self.udp.lock() {
+            if let Some(udp) = guard.as_ref() {
+                udp.cancel.send_replace(false);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn register_udp_entered_hook_for_test(&self, sender: mpsc::Sender<()>) {
+        if let Ok(guard) = self.udp.lock() {
+            if let Some(udp) = guard.as_ref() {
+                *udp.entered.lock().unwrap() = Some(sender);
+            }
+        }
     }
 
     fn connect_with_psk(
@@ -483,9 +613,13 @@ impl ClientSession {
             server: server.clone(),
             session_salt: salt,
         };
-        *self.udp.lock().map_err(|_| SessionError::Poisoned)? = Some(Arc::new(udp));
+        *self.udp.lock().map_err(|_| SessionError::Poisoned)? =
+            Some(Arc::new(UdpTransport::new(udp)?));
         *self.udp_send.lock().map_err(|_| SessionError::Poisoned)? = Some(udp_send);
-        *self.udp_receive.lock().map_err(|_| SessionError::Poisoned)? = Some(udp_receive);
+        *self
+            .udp_receive
+            .lock()
+            .map_err(|_| SessionError::Poisoned)? = Some(udp_receive);
         let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
         state.server = Some(server);
         state.state = SessionState::Ready;
@@ -509,7 +643,7 @@ impl ClientSession {
             state.next_tcp_sequence = state.next_tcp_sequence.wrapping_add(1);
             state.next_tcp_sequence
         };
-        let header = PacketHeader::new(packet_type, sequence, current_unix_ms(), 0);
+        let header = PacketHeader::new(packet_type, sequence, current_unix_ms() as u32, 0);
         let mut packet = header.encode()?;
         packet.extend_from_slice(payload);
         let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
@@ -521,10 +655,7 @@ impl ClientSession {
 
     fn read_tcp_packet(&self) -> Result<(PacketHeader, Vec<u8>), SessionError> {
         let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
-        let frame = tcp
-            .as_mut()
-            .ok_or(SessionError::NotReady)?
-            .read_frame()?;
+        let frame = tcp.as_mut().ok_or(SessionError::NotReady)?.read_frame()?;
         drop(tcp);
         if frame.len() < PacketHeader::SIZE {
             return Err(SessionError::Io(io::Error::new(
@@ -591,30 +722,249 @@ impl ClientSession {
     }
 }
 
+struct UdpTransport {
+    socket: UdpSocket,
+    runtime: tokio::runtime::Runtime,
+    reader: tokio::net::UdpSocket,
+    cancel: tokio::sync::watch::Sender<bool>,
+    timeout: Mutex<Option<Duration>>,
+    buffer: Mutex<Vec<u8>>,
+    #[cfg(test)]
+    alloc_count: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    last_buffer_ptr: Mutex<Option<usize>>,
+    #[cfg(test)]
+    entered: Mutex<Option<mpsc::Sender<()>>>,
+}
+
+impl UdpTransport {
+    fn new(socket: UdpSocket) -> Result<Self, SessionError> {
+        let timeout = socket.read_timeout()?;
+        socket.set_nonblocking(true)?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let reader = {
+            let _entered = runtime.enter();
+            tokio::net::UdpSocket::from_std(socket.try_clone()?)?
+        };
+        let (cancel, _) = tokio::sync::watch::channel(false);
+        Ok(Self {
+            socket,
+            runtime,
+            reader,
+            cancel,
+            timeout: Mutex::new(timeout),
+            buffer: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            alloc_count: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            last_buffer_ptr: Mutex::new(None),
+            #[cfg(test)]
+            entered: Mutex::new(None),
+        })
+    }
+
+    fn receive(&self) -> Result<(std::sync::MutexGuard<'_, Vec<u8>>, usize), SessionError> {
+        let mut datagram = self.buffer.lock().map_err(|_| SessionError::Poisoned)?;
+        if datagram.is_empty() {
+            datagram.resize(65_536, 0);
+            #[cfg(test)]
+            self.alloc_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+        let mut cancelled = self.cancel.subscribe();
+        let timeout = *self.timeout.lock().map_err(|_| SessionError::Poisoned)?;
+        self.runtime
+            .block_on(async {
+                if *cancelled.borrow() {
+                    return Err(SessionError::NotReady);
+                }
+                let receive = async {
+                    #[cfg(test)]
+                    {
+                        *self.last_buffer_ptr.lock().unwrap() = Some(datagram.as_ptr() as usize);
+                    }
+                    let count = self.reader.recv(&mut datagram).await?;
+                    Ok::<_, SessionError>(count)
+                };
+                tokio::pin!(receive);
+                #[cfg(test)]
+                let entered_opt = self.entered.lock().unwrap().take();
+                #[cfg(test)]
+                if let Some(entered) = entered_opt {
+                    std::future::poll_fn(|cx| {
+                        use std::future::Future;
+                        assert!(receive.as_mut().poll(cx).is_pending());
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
+                    entered
+                        .send(())
+                        .map_err(|_| SessionError::TcpRuntimeStopped)?;
+                }
+                let deadline = async {
+                    match timeout {
+                        Some(timeout) => tokio::time::sleep(timeout).await,
+                        None => std::future::pending().await,
+                    }
+                };
+                tokio::select! {
+                    biased;
+                    _ = cancelled.changed() => Err(SessionError::NotReady),
+                    result = &mut receive => result,
+                    _ = deadline => Err(SessionError::Io(io::Error::from(io::ErrorKind::TimedOut))),
+                }
+            })
+            .map(|count| (datagram, count))
+    }
+}
+
+#[derive(Default)]
+struct EventSlots {
+    clipboard: Option<String>,
+    ping: bool,
+    error: Option<SessionError>,
+    closed: bool,
+}
+
+#[derive(Clone, Default)]
+pub struct RuntimeEvents {
+    shared: Arc<(Mutex<EventSlots>, Condvar)>,
+}
+
+impl RuntimeEvents {
+    fn close(&self) {
+        let (lock, ready) = &*self.shared;
+        let mut slots = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        slots.closed = true;
+        ready.notify_all();
+    }
+    fn push(&self, event: Result<SessionEvent, SessionError>) {
+        let (lock, ready) = &*self.shared;
+        let mut slots = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match event {
+            Ok(SessionEvent::Clipboard(text)) => slots.clipboard = Some(text),
+            Ok(SessionEvent::Ping) => slots.ping = true,
+            Err(error) => slots.error = Some(error),
+            Ok(
+                SessionEvent::Ignored
+                | SessionEvent::Frame(_)
+                | SessionEvent::Audio(_)
+                | SessionEvent::Cursor(_),
+            ) => {}
+        }
+        ready.notify_one();
+    }
+
+    fn take(slots: &mut EventSlots) -> Option<Result<SessionEvent, SessionError>> {
+        if let Some(text) = slots.clipboard.take() {
+            return Some(Ok(SessionEvent::Clipboard(text)));
+        }
+        if std::mem::take(&mut slots.ping) {
+            return Some(Ok(SessionEvent::Ping));
+        }
+        slots.error.take().map(Err)
+    }
+
+    pub fn try_recv(&self) -> Result<Result<SessionEvent, SessionError>, mpsc::TryRecvError> {
+        let mut slots = self
+            .shared
+            .0
+            .lock()
+            .map_err(|_| mpsc::TryRecvError::Disconnected)?;
+        Self::take(&mut slots).ok_or(if slots.closed {
+            mpsc::TryRecvError::Disconnected
+        } else {
+            mpsc::TryRecvError::Empty
+        })
+    }
+
+    pub fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<Result<SessionEvent, SessionError>, mpsc::RecvTimeoutError> {
+        let (lock, ready) = &*self.shared;
+        let slots = lock
+            .lock()
+            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)?;
+        let (mut slots, _) = ready
+            .wait_timeout_while(slots, timeout, |slots| {
+                slots.clipboard.is_none() && !slots.ping && slots.error.is_none() && !slots.closed
+            })
+            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)?;
+        Self::take(&mut slots).ok_or(if slots.closed {
+            mpsc::RecvTimeoutError::Disconnected
+        } else {
+            mpsc::RecvTimeoutError::Timeout
+        })
+    }
+
+    pub fn recv(&self) -> Result<Result<SessionEvent, SessionError>, mpsc::RecvError> {
+        let (lock, ready) = &*self.shared;
+        let slots = lock.lock().map_err(|_| mpsc::RecvError)?;
+        let mut slots = ready
+            .wait_while(slots, |slots| {
+                slots.clipboard.is_none() && !slots.ping && slots.error.is_none() && !slots.closed
+            })
+            .map_err(|_| mpsc::RecvError)?;
+        Self::take(&mut slots).ok_or(mpsc::RecvError)
+    }
+}
+
 pub struct SessionRuntime {
-    events: mpsc::Receiver<Result<SessionEvent, SessionError>>,
-    stop: Option<mpsc::Sender<()>>,
+    events: RuntimeEvents,
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl SessionRuntime {
-    pub fn events(&self) -> &mpsc::Receiver<Result<SessionEvent, SessionError>> {
+    pub fn events(&self) -> &RuntimeEvents {
         &self.events
     }
 
-    pub fn stop(&mut self) {
+    #[cfg(test)]
+    fn from_worker_for_test(
+        worker: thread::JoinHandle<()>,
+        stop: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Self {
+        Self {
+            events: RuntimeEvents::default(),
+            stop,
+            worker: Some(worker),
+        }
+    }
+
+    pub fn stop(&mut self) -> Result<(), SessionError> {
         if let Some(stop) = self.stop.take() {
             let _ = stop.send(());
         }
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            if let Err(payload) = worker.join() {
+                self.events.close();
+                let message = payload
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| {
+                        payload
+                            .downcast_ref::<&str>()
+                            .map(|message| (*message).to_owned())
+                    })
+                    .unwrap_or_else(|| "non-string panic payload".to_owned());
+                return Err(SessionError::TcpRuntimePanicked(message));
+            }
         }
+        Ok(())
     }
 }
 
 impl Drop for SessionRuntime {
     fn drop(&mut self) {
-        self.stop();
+        let _ = self.stop();
     }
 }
 
@@ -625,11 +975,11 @@ fn resolve_one(address: impl ToSocketAddrs) -> Result<SocketAddr, SessionError> 
         .ok_or(SessionError::NoAddress)
 }
 
-fn current_unix_ms() -> u32 {
+fn current_unix_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis() as u32
+        .as_millis() as u64
 }
 
 impl From<crate::MediaAssemblyError> for SessionError {
@@ -638,5 +988,330 @@ impl From<crate::MediaAssemblyError> for SessionError {
             io::ErrorKind::InvalidData,
             error.to_string(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+
+    use erd_net::TlsPskServer;
+    fn packet(packet_type: PacketType, payload: &[u8]) -> Vec<u8> {
+        let mut packet = PacketHeader::new(packet_type, 0, 0, 0).encode().unwrap();
+        packet.extend_from_slice(payload);
+        packet
+    }
+    fn split_packet(packet: &[u8]) -> (PacketHeader, &[u8]) {
+        (
+            PacketHeader::decode(&packet[..PacketHeader::SIZE]).unwrap(),
+            &packet[PacketHeader::SIZE..],
+        )
+    }
+    #[test]
+    fn session_runtime_stop_propagates_worker_panic() {
+        let (started_tx, started_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            panic!("simulated worker panic in session runtime");
+        });
+        started_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut runtime = crate::SessionRuntime::from_worker_for_test(worker, None);
+        let error = runtime.stop().expect_err("worker panic must be returned");
+        assert!(matches!(error, SessionError::TcpRuntimePanicked(message)
+        if message == "simulated worker panic in session runtime"));
+        runtime.stop().unwrap();
+        assert!(matches!(
+            runtime.events().try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn client_session_udp_receive_reuses_buffer_across_cancellations() {
+        let pairing_id = "udp-reuse-pairing-id";
+        let key = [0x55; 32];
+        let psk = PskIdentity::pairing(pairing_id, &key).unwrap();
+        let listener = TlsPskServer::new([psk])
+            .unwrap()
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let tcp_address = listener.local_addr().unwrap();
+        let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp_port = udp.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap();
+            let handshake_packet = stream.read_frame().unwrap();
+            let (header, payload) = split_packet(&handshake_packet);
+            assert_eq!(header.packet_type, PacketType::Handshake);
+            let handshake = Handshake::decode(payload).unwrap();
+            let salt = handshake.session_salt;
+
+            let acknowledgement = Handshake {
+                name: "mock-host".to_owned(),
+                width: 1920,
+                height: 1080,
+                scale: 1.0,
+                version: PROTOCOL_VERSION,
+                capabilities: Capabilities::empty(),
+                pairing_id: String::new(),
+                session_salt: [0; 16],
+            };
+            stream
+                .write_frame(&packet(
+                    PacketType::HandshakeAck,
+                    &acknowledgement.encode().unwrap(),
+                ))
+                .unwrap();
+
+            let mut ping = [0_u8; 1];
+            let (_, client_udp_addr) = udp.recv_from(&mut ping).unwrap();
+            assert_eq!(ping, [0xff]);
+
+            (udp, client_udp_addr, key, salt, stream)
+        });
+
+        let config = SessionConfig {
+            host: "127.0.0.1".to_owned(),
+            tcp_port: tcp_address.port(),
+            udp_port,
+            client_name: "rust-client".to_owned(),
+            capabilities: Capabilities::empty(),
+            pairing_store_path: None,
+            connect_timeout: Duration::from_secs(2),
+            handshake_ack_timeout: Duration::from_secs(2),
+        };
+        let session = ClientSession::new(config).unwrap();
+        let record = crate::PairingRecord {
+            id: pairing_id.to_string(),
+            name: "mock-host".to_string(),
+            key: key.to_vec(),
+            added_at_unix_ms: 0,
+        };
+        let ready = session.connect_with_pairing(record).unwrap();
+        assert_eq!(ready.server.name, "mock-host");
+
+        // Attempt 1: Cancelled receive
+        let (entered_tx1, entered_rx1) = mpsc::channel();
+        session.register_udp_entered_hook_for_test(entered_tx1);
+        let s1 = session.clone();
+        let (res_tx1, res_rx1) = mpsc::channel();
+        let t1 = thread::spawn(move || {
+            let res = s1.receive_udp_event();
+            res_tx1.send(res).unwrap();
+        });
+        entered_rx1.recv_timeout(Duration::from_secs(5)).unwrap();
+        let ptr1 = session
+            .udp_recv_buffer_ptr()
+            .expect("buffer pointer must exist");
+        session.cancel_udp_receive_for_test();
+        let res1 = res_rx1.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(res1, Err(SessionError::NotReady)));
+        t1.join().unwrap();
+        session.reset_udp_cancel_for_test();
+
+        // Attempt 2: Cancelled receive
+        let (entered_tx2, entered_rx2) = mpsc::channel();
+        session.register_udp_entered_hook_for_test(entered_tx2);
+        let s2 = session.clone();
+        let (res_tx2, res_rx2) = mpsc::channel();
+        let t2 = thread::spawn(move || {
+            let res = s2.receive_udp_event();
+            res_tx2.send(res).unwrap();
+        });
+        entered_rx2.recv_timeout(Duration::from_secs(5)).unwrap();
+        let ptr2 = session
+            .udp_recv_buffer_ptr()
+            .expect("buffer pointer must exist");
+        session.cancel_udp_receive_for_test();
+        let res2 = res_rx2.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(matches!(res2, Err(SessionError::NotReady)));
+        t2.join().unwrap();
+        session.reset_udp_cancel_for_test();
+
+        // Attempt 3: Successful datagram receive
+        let (server_udp, client_udp_addr, server_key, session_salt, _tcp_stream) =
+            server.join().unwrap();
+        let mut server_cipher = erd_net::DatagramCipher::derive(
+            &server_key,
+            &session_salt,
+            erd_net::Direction::HostToClient,
+        )
+        .unwrap();
+        let ping_header = PacketHeader::new(PacketType::Ping, 1, 0, 0);
+        let ping_datagram = server_cipher.seal_datagram(&ping_header, &[]).unwrap();
+
+        let (entered_tx3, entered_rx3) = mpsc::channel();
+        session.register_udp_entered_hook_for_test(entered_tx3);
+        let s3 = session.clone();
+        let (res_tx3, res_rx3) = mpsc::channel();
+        let t3 = thread::spawn(move || {
+            let res = s3.receive_udp_event();
+            res_tx3.send(res).unwrap();
+        });
+        entered_rx3.recv_timeout(Duration::from_secs(5)).unwrap();
+        let ptr3 = session
+            .udp_recv_buffer_ptr()
+            .expect("buffer pointer must exist");
+        server_udp.send_to(&ping_datagram, client_udp_addr).unwrap();
+        let res3 = res_rx3.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert_eq!(res3.unwrap(), crate::SessionEvent::Ping);
+        t3.join().unwrap();
+
+        // A longer packet after a short packet must still have the full receive capacity.
+        let header = PacketHeader::new(PacketType::Ping, 2, 0, 0);
+        let datagram = server_cipher.seal_datagram(&header, &[7; 4096]).unwrap();
+        server_udp.send_to(&datagram, client_udp_addr).unwrap();
+        assert_eq!(
+            session.receive_udp_event().unwrap(),
+            crate::SessionEvent::Ping
+        );
+
+        // Deterministic assertions:
+        let alloc_count = session.udp_recv_alloc_count().unwrap();
+        assert_eq!(
+            alloc_count, 1,
+            "expected single 65536-byte receive allocation across attempts, but got {}",
+            alloc_count
+        );
+        assert_eq!(
+            ptr1, ptr2,
+            "buffer pointer must be identical across cancellation attempts"
+        );
+        assert_eq!(
+            ptr2, ptr3,
+            "buffer pointer must be identical between cancellation and success"
+        );
+
+        session.disconnect().unwrap();
+    }
+
+    #[test]
+    fn udp_cancel_wakes_registered_receive() {
+        let peer = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        socket.connect(peer.local_addr().unwrap()).unwrap();
+        let transport = Arc::new(UdpTransport::new(socket).unwrap());
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = SessionConfig::direct("127.0.0.1", "udp");
+        config.pairing_store_path = Some(temporary.path().join("pairings.json"));
+        let session = ClientSession::new(config).unwrap();
+        *session.udp.lock().unwrap() = Some(transport.clone());
+        session.state.lock().unwrap().state = SessionState::Ready;
+        let receiver = session.clone();
+        let (entered_tx, entered_rx) = mpsc::channel();
+        *transport.entered.lock().unwrap() = Some(entered_tx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = receiver.receive_udp_event();
+            done_tx
+                .send(matches!(result, Err(SessionError::NotReady)))
+                .unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        session.disconnect().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_secs(5)).unwrap());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn tls_read_step_returns_with_partial_frame() {
+        use std::io::Write;
+        let psk = PskIdentity::pairing("step", &[9; 32]).unwrap();
+        let listener = erd_net::TlsPskServer::new([psk.clone()])
+            .unwrap()
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (partial_tx, partial_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let host = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap();
+            stream.ssl_stream_mut().write_all(&[20, 0]).unwrap();
+            partial_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        let mut stream = TlsPskClient::new(psk).unwrap().connect(address).unwrap();
+        partial_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        stream
+            .ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(1)))
+            .unwrap();
+        let result = stream.read_frame_step();
+        release_tx.send(()).unwrap();
+        host.join().unwrap();
+        assert!(matches!(result, Ok(None)));
+    }
+
+    #[test]
+    fn runtime_input_and_stop_progress_with_partial_frame() {
+        use std::io::Write;
+        let psk = PskIdentity::pairing("runtime", &[9; 32]).unwrap();
+        let listener = erd_net::TlsPskServer::new([psk.clone()])
+            .unwrap()
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let (partial_tx, partial_rx) = mpsc::channel();
+        let (input_tx, input_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let host = thread::spawn(move || {
+            let mut stream = listener.accept().unwrap();
+            stream
+                .ssl_stream()
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            stream.ssl_stream_mut().write_all(&[20, 0]).unwrap();
+            partial_tx.send(()).unwrap();
+            let input = stream.read_frame().unwrap();
+            assert_eq!(
+                PacketHeader::decode(&input[..PacketHeader::SIZE])
+                    .unwrap()
+                    .packet_type,
+                PacketType::InputEvent
+            );
+            input_tx
+                .send(InputEvent::decode(&input[PacketHeader::SIZE..]).unwrap())
+                .unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        });
+        let stream = TlsPskClient::new(psk).unwrap().connect(address).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let mut config = SessionConfig::direct("127.0.0.1", "runtime");
+        config.pairing_store_path = Some(temporary.path().join("pairings.json"));
+        let session = ClientSession::new(config).unwrap();
+        *session.tcp.lock().unwrap() = Some(stream);
+        session.state.lock().unwrap().state = SessionState::Ready;
+        let (wait_tx, wait_rx) = mpsc::channel();
+        *session.tcp_wait.lock().unwrap() = Some(wait_tx);
+        partial_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let mut runtime = session.spawn_tcp_runtime().unwrap();
+        wait_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let input = InputEvent {
+            event_type: erd_proto::InputEventType::MouseMove,
+            x: 0.25,
+            y: 0.75,
+            key_code: 0,
+            modifiers: erd_proto::Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+        session.send_input(input).unwrap();
+        assert_eq!(
+            input_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+            input
+        );
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let stop = thread::spawn(move || {
+            runtime.stop().unwrap();
+            stop_tx.send(()).unwrap();
+        });
+        stop_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        release_tx.send(()).unwrap();
+        stop.join().unwrap();
+        host.join().unwrap();
+        session.disconnect().unwrap();
     }
 }

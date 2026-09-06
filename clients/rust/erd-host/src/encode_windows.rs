@@ -1,9 +1,9 @@
 //! Media Foundation video encoding for the Windows host.
 //!
 //! The primary backend is a synchronous Media Foundation Transform (MFT). It
-//! prefers a hardware transform, negotiates HEVC first with H.264 fallback,
+//! selects synchronous software transforms, negotiates HEVC first with H.264 fallback,
 //! accepts NV12 frames, disables B-frames where the codec exposes `ICodecAPI`,
-//! and applies ABR bitrate changes through both the output media type and
+//! and applies supported dynamic ABR bitrate changes through
 //! `CODECAPI_AVEncCommonMeanBitRate`.
 //!
 //! [`NvencAvailability`] is the alternative NVIDIA path: the `nvenc` crate
@@ -19,29 +19,31 @@
 //! AMD, and NVIDIA systems to exercise driver selection, format negotiation,
 //! bitrate reconfiguration, keyframe requests, and sustained encode load.
 
-use std::{mem::ManuallyDrop, ptr, slice};
+use std::{marker::PhantomData, mem::ManuallyDrop, ptr, rc::Rc, slice, time::Instant};
+
+use synchronous::{InputMetadata, PendingInputs, SynchronousTransform};
 
 use thiserror::Error;
 use windows::{
     core::{Interface, GUID},
     Win32::{
         Media::MediaFoundation::{
-            eAVEncCommonRateControlMode_LowDelayVBR, CODECAPI_AVEncCommonLowLatency,
+            eAVEncCommonRateControlMode_CBR, CODECAPI_AVEncCommonLowLatency,
             CODECAPI_AVEncCommonMeanBitRate, CODECAPI_AVEncCommonRateControlMode,
             CODECAPI_AVEncMPVDefaultBPictureCount, CODECAPI_AVEncMPVGOPSize,
-            CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI, IMFActivate, IMFMediaBuffer, IMFMediaType,
-            IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-            MFMediaType_Video, MFSampleExtension_CleanPoint, MFShutdown, MFStartup, MFTEnumEx,
-            MFVideoFormat_H264, MFVideoFormat_HEVC, MFVideoFormat_NV12,
-            MFVideoInterlace_Progressive, MFSTARTUP_FULL, MFT_CATEGORY_VIDEO_ENCODER,
-            MFT_ENUM_FLAG, MFT_ENUM_FLAG_ALL, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
+            CODECAPI_AVEncNumWorkerThreads, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI,
+            IMFActivate, IMFMediaBuffer, IMFMediaType, IMFSample, IMFTransform, MFCreateMediaType,
+            MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSampleExtension_CleanPoint,
+            MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
+            MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_FULL,
+            MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_SORTANDFILTER,
             MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
             MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
             MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_OUTPUT_DATA_BUFFER,
             MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
             MFT_REGISTER_TYPE_INFO, MF_E_NOTACCEPTING, MF_E_TRANSFORM_NEED_MORE_INPUT,
-            MF_E_TRANSFORM_STREAM_CHANGE, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-            MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG_SEQUENCE_HEADER,
+            MF_E_TRANSFORM_STREAM_CHANGE, MF_LOW_LATENCY, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE,
+            MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG_SEQUENCE_HEADER,
             MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_VERSION,
         },
         System::{
@@ -97,6 +99,7 @@ impl EncoderConfig {
             || self.height % 2 != 0
             || self.bitrate == 0
             || self.fps == 0
+            || self.fps > 10_000_000
         {
             return Err(EncodeError::InvalidConfiguration);
         }
@@ -114,12 +117,15 @@ pub struct EncodedFrame {
     pub is_key_frame: bool,
     pub timestamp_hns: i64,
     pub codec: VideoCodec,
+    pub capture_at: Instant,
+    pub encode_started_at: Instant,
+    pub encode_completed_at: Instant,
 }
 
 #[derive(Debug, Error)]
 pub enum EncodeError {
     #[error(
-        "encoder dimensions must be non-zero, even NV12 sizes and bitrate/fps must be positive"
+        "encoder dimensions must be non-zero, even NV12 sizes, bitrate positive, and fps in 1..=10000000"
     )]
     InvalidConfiguration,
     #[error("input NV12 frame has the wrong length: expected {expected}, got {actual}")]
@@ -132,10 +138,20 @@ pub enum EncodeError {
     MissingOutput,
     #[error("encoded access unit is malformed: {0}")]
     MalformedBitstream(&'static str),
+    #[error("output timestamp {0} does not identify an accepted input")]
+    UnknownOutputTimestamp(i64),
+    #[error("encoder input timestamp overflow")]
+    TimestampOverflow,
+    #[error("encoder does not expose dynamic bitrate control")]
+    BitrateControlUnavailable,
+    #[error("encoder drain ended with {0} inputs still pending")]
+    IncompleteDrain(usize),
 }
 
 struct MediaFoundationRuntime {
     com_initialized: bool,
+    // COM initialization/uninitialization must remain on the creating thread.
+    _thread_affinity: PhantomData<Rc<()>>,
 }
 
 impl MediaFoundationRuntime {
@@ -147,8 +163,17 @@ impl MediaFoundationRuntime {
         if status.is_err() && status.0 != 0x8001_0106_u32 as i32 {
             return Err(windows::core::Error::from(status).into());
         }
-        unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL)? };
-        Ok(Self { com_initialized })
+        if let Err(error) = unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) } {
+            if com_initialized {
+                // SAFETY: this thread successfully initialized COM above.
+                unsafe { CoUninitialize() };
+            }
+            return Err(error.into());
+        }
+        Ok(Self {
+            com_initialized,
+            _thread_affinity: PhantomData,
+        })
     }
 }
 
@@ -176,7 +201,6 @@ impl NvencAvailability {
 }
 
 pub struct MediaFoundationEncoder {
-    _runtime: MediaFoundationRuntime,
     transform: IMFTransform,
     output_type: IMFMediaType,
     codec_api: Option<ICodecAPI>,
@@ -186,7 +210,21 @@ pub struct MediaFoundationEncoder {
     frame_index: u64,
     force_keyframe: bool,
     parameter_sets: Vec<Vec<u8>>,
+    pending_inputs: PendingInputs,
+    // Rust drops fields in declaration order: all COM objects precede runtime.
+    _runtime: MediaFoundationRuntime,
 }
+
+struct PreparedInput {
+    sample: IMFSample,
+    timestamp_hns: i64,
+    metadata: InputMetadata,
+    force_keyframe: bool,
+}
+
+#[allow(non_upper_case_globals)]
+const MF_MT_MPEG2_PROFILE: GUID = GUID::from_u128(0xad76a269_13b5_4286_932b_3652f7165780);
+const H264_PROFILE_BASELINE: u32 = 66;
 
 impl MediaFoundationEncoder {
     pub fn new(config: EncoderConfig) -> Result<Self, EncodeError> {
@@ -216,6 +254,33 @@ impl MediaFoundationEncoder {
         codec: VideoCodec,
         config: EncoderConfig,
     ) -> Result<Self, EncodeError> {
+        // Per Microsoft Media Foundation specification ("H.264 Video Encoder", MSDN):
+        // "Before setting the media types on the encoder, configure the encoder properties
+        // by using the ICodecAPI interface."
+        let codec_api = transform.cast::<ICodecAPI>().ok();
+        if let Some(api) = &codec_api {
+            set_codec_bool(api, &CODECAPI_AVEncCommonLowLatency, true);
+            set_codec_u32(
+                api,
+                &CODECAPI_AVEncCommonRateControlMode,
+                eAVEncCommonRateControlMode_CBR.0 as u32,
+            );
+            set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, config.bitrate);
+            set_codec_u32(api, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+            set_codec_u32(
+                api,
+                &CODECAPI_AVEncMPVGOPSize,
+                config.keyframe_interval.max(1),
+            );
+            set_codec_u32(api, &CODECAPI_AVEncNumWorkerThreads, 1);
+        }
+
+        if let Ok(attributes) = unsafe { transform.GetAttributes() } {
+            unsafe {
+                let _ = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
+            }
+        }
+
         let output_type = video_type(codec.media_subtype(), config)?;
         let input_type = video_type(MFVideoFormat_NV12, config)?;
         unsafe {
@@ -223,23 +288,6 @@ impl MediaFoundationEncoder {
             // known while enumerating supported input formats.
             transform.SetOutputType(0, &output_type, 0)?;
             transform.SetInputType(0, &input_type, 0)?;
-        }
-
-        let codec_api = transform.cast::<ICodecAPI>().ok();
-        if let Some(api) = &codec_api {
-            set_codec_u32(
-                api,
-                &CODECAPI_AVEncCommonRateControlMode,
-                eAVEncCommonRateControlMode_LowDelayVBR.0 as u32,
-            );
-            set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, config.bitrate);
-            set_codec_bool(api, &CODECAPI_AVEncCommonLowLatency, true);
-            set_codec_u32(api, &CODECAPI_AVEncMPVDefaultBPictureCount, 0);
-            set_codec_u32(
-                api,
-                &CODECAPI_AVEncMPVGOPSize,
-                config.keyframe_interval.max(1),
-            );
         }
 
         unsafe {
@@ -256,8 +304,9 @@ impl MediaFoundationEncoder {
             backend,
             codec,
             frame_index: 0,
-            force_keyframe: false,
+            force_keyframe: true,
             parameter_sets,
+            pending_inputs: PendingInputs::default(),
         })
     }
 
@@ -270,7 +319,12 @@ impl MediaFoundationEncoder {
     }
 
     /// Input is tightly packed NV12: Y plane followed by interleaved UV.
-    pub fn encode_nv12(&mut self, nv12: &[u8]) -> Result<Option<EncodedFrame>, EncodeError> {
+    pub fn encode_nv12(
+        &mut self,
+        nv12: &[u8],
+        captured_at: Instant,
+    ) -> Result<Vec<EncodedFrame>, EncodeError> {
+        let encode_started_at = Instant::now();
         let expected = nv12_len(self.config.width, self.config.height)?;
         if nv12.len() != expected {
             return Err(EncodeError::InvalidFrameLength {
@@ -278,29 +332,21 @@ impl MediaFoundationEncoder {
                 actual: nv12.len(),
             });
         }
-        if self.force_keyframe {
-            if let Some(api) = &self.codec_api {
-                set_codec_bool(api, &CODECAPI_AVEncVideoForceKeyFrame, true);
-            }
-            self.force_keyframe = false;
-        }
-
         let timestamp = i64::try_from(self.frame_index)
-            .unwrap_or(i64::MAX)
-            .saturating_mul(self.config.frame_duration_hns());
+            .ok()
+            .and_then(|index| index.checked_mul(self.config.frame_duration_hns()))
+            .ok_or(EncodeError::TimestampOverflow)?;
         let sample = sample_from_bytes(nv12, timestamp, self.config.frame_duration_hns())?;
-        match unsafe { self.transform.ProcessInput(0, &sample, 0) } {
-            Ok(()) => {}
-            Err(error) if error.code() == MF_E_NOTACCEPTING => {
-                if let Some(output) = self.take_output()? {
-                    return Ok(Some(output));
-                }
-                unsafe { self.transform.ProcessInput(0, &sample, 0)? };
-            }
-            Err(error) => return Err(error.into()),
-        }
-        self.frame_index = self.frame_index.saturating_add(1);
-        self.take_output()
+        let input = PreparedInput {
+            sample,
+            timestamp_hns: timestamp,
+            metadata: InputMetadata {
+                capture_at: captured_at,
+                encode_started_at,
+            },
+            force_keyframe: self.force_keyframe,
+        };
+        synchronous::submit_and_drain(self, &input)
     }
 
     pub fn force_key_frame(&mut self) {
@@ -308,16 +354,20 @@ impl MediaFoundationEncoder {
     }
 
     /// Applies protocol ABR messages immediately when the selected MFT exposes
-    /// dynamic bitrate control. The output media type is updated as a fallback.
+    /// dynamic bitrate control. Mutating a detached media type is not a fallback:
+    /// it does not reconfigure the running transform.
     pub fn update_bitrate(&mut self, bitrate: u32) -> Result<(), EncodeError> {
         if bitrate == 0 {
             return Err(EncodeError::InvalidConfiguration);
         }
+        let api = self
+            .codec_api
+            .as_ref()
+            .ok_or(EncodeError::BitrateControlUnavailable)?;
+        let value = VARIANT::from(bitrate);
+        // SAFETY: the API and UI4 variant live through the synchronous call.
+        unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value)? };
         self.config.bitrate = bitrate;
-        unsafe { self.output_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)? };
-        if let Some(api) = &self.codec_api {
-            set_codec_u32(api, &CODECAPI_AVEncCommonMeanBitRate, bitrate);
-        }
         Ok(())
     }
 
@@ -331,6 +381,9 @@ impl MediaFoundationEncoder {
         let mut frames = Vec::new();
         while let Some(frame) = self.take_output()? {
             frames.push(frame);
+        }
+        if !self.pending_inputs.is_empty() {
+            return Err(EncodeError::IncompleteDrain(self.pending_inputs.len()));
         }
         unsafe {
             self.transform
@@ -378,7 +431,12 @@ impl MediaFoundationEncoder {
         }
 
         let sample = output_sample.ok_or(EncodeError::MissingOutput)?;
-        let timestamp_hns = unsafe { sample.GetSampleTime().unwrap_or_default() };
+        // SAFETY: sample is an owned, successful ProcessOutput result.
+        let timestamp_hns = unsafe { sample.GetSampleTime()? };
+        let metadata = self
+            .pending_inputs
+            .take(timestamp_hns)
+            .ok_or(EncodeError::UnknownOutputTimestamp(timestamp_hns))?;
         let is_key_frame = unsafe {
             sample
                 .GetUINT32(&MFSampleExtension_CleanPoint)
@@ -403,7 +461,7 @@ impl MediaFoundationEncoder {
                         continue;
                     };
                     if !present_types.contains(&kind) {
-                        prefixed.push(parameter_set.clone());
+                        prefixed.push(parameter_set.as_slice());
                     }
                 }
                 prefixed.append(&mut nalus);
@@ -416,7 +474,41 @@ impl MediaFoundationEncoder {
             is_key_frame,
             timestamp_hns,
             codec: self.codec,
+            capture_at: metadata.capture_at,
+            encode_started_at: metadata.encode_started_at,
+            encode_completed_at: Instant::now(),
         }))
+    }
+}
+
+impl SynchronousTransform for MediaFoundationEncoder {
+    type Input = PreparedInput;
+    type Output = EncodedFrame;
+    type Error = EncodeError;
+
+    fn process_input(&mut self, input: &PreparedInput) -> Result<(), EncodeError> {
+        if input.force_keyframe {
+            if let Some(api) = &self.codec_api {
+                let value = VARIANT::from(1_u32);
+                // SAFETY: keyframe is VT_UI4; reapply on the SAME rejected input.
+                unsafe { api.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &value)? };
+            }
+        }
+        // SAFETY: input owns a timestamped NV12 sample matching the negotiated type.
+        unsafe { self.transform.ProcessInput(0, &input.sample, 0)? };
+        self.pending_inputs
+            .accept(input.timestamp_hns, input.metadata);
+        self.frame_index += 1;
+        self.force_keyframe = false;
+        Ok(())
+    }
+
+    fn is_not_accepting(error: &EncodeError) -> bool {
+        matches!(error, EncodeError::MediaFoundation(error) if error.code() == MF_E_NOTACCEPTING)
+    }
+
+    fn process_output(&mut self) -> Result<Option<EncodedFrame>, EncodeError> {
+        self.take_output()
     }
 }
 
@@ -441,9 +533,9 @@ fn create_transform(codec: VideoCodec) -> Result<(IMFTransform, EncoderBackend),
     if let Some(transform) = enumerate_transform(codec, sync_flags)? {
         return Ok((transform, EncoderBackend::MediaFoundationSoftware));
     }
-    if let Some(transform) = enumerate_transform(codec, MFT_ENUM_FLAG_ALL)? {
-        return Ok((transform, EncoderBackend::MediaFoundationSoftware));
-    }
+    // Do NOT fall back to MFT_ENUM_FLAG_ALL: it surfaces asynchronous hardware
+    // MFTs (NVIDIA etc.), which hang the synchronous ProcessInput/ProcessOutput
+    // pipeline below and stall the whole media pipeline silently.
     Err(EncodeError::TransformUnavailable(codec))
 }
 
@@ -504,6 +596,9 @@ fn video_type(subtype: GUID, config: EncoderConfig) -> Result<IMFMediaType, Enco
         media_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, (1_u64 << 32) | 1)?;
         media_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
         media_type.SetUINT32(&MF_MT_AVG_BITRATE, config.bitrate)?;
+        if subtype == MFVideoFormat_H264 {
+            let _ = media_type.SetUINT32(&MF_MT_MPEG2_PROFILE, H264_PROFILE_BASELINE);
+        }
     }
     Ok(media_type)
 }
@@ -592,7 +687,7 @@ fn media_type_parameter_sets(media_type: &IMFMediaType, codec: VideoCodec) -> Ve
 }
 
 /// Accept either Annex B or four-byte length-prefixed MFT/NVENC output.
-pub fn parse_access_unit(bytes: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
+pub fn parse_access_unit(bytes: &[u8]) -> Result<Vec<&[u8]>, EncodeError> {
     if bytes.is_empty() {
         return Err(EncodeError::MalformedBitstream("empty access unit"));
     }
@@ -603,7 +698,7 @@ pub fn parse_access_unit(bytes: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
     }
 }
 
-fn parse_avcc(bytes: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
+fn parse_avcc(bytes: &[u8]) -> Result<Vec<&[u8]>, EncodeError> {
     let mut offset = 0;
     let mut nalus = Vec::new();
     while offset < bytes.len() {
@@ -615,20 +710,20 @@ fn parse_avcc(bytes: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
         if length == 0 || length > bytes.len() - offset {
             return Err(EncodeError::MalformedBitstream("invalid AVCC NAL length"));
         }
-        nalus.push(bytes[offset..offset + length].to_vec());
+        nalus.push(&bytes[offset..offset + length]);
         offset += length;
     }
     Ok(nalus)
 }
 
-fn parse_annex_b(bytes: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
+fn parse_annex_b(bytes: &[u8]) -> Result<Vec<&[u8]>, EncodeError> {
     let mut nalus = Vec::new();
     let mut cursor = 0;
     while let Some((start, prefix)) = find_start_code(bytes, cursor) {
         let nalu_start = start + prefix;
         let next = find_start_code(bytes, nalu_start).map_or(bytes.len(), |(index, _)| index);
         if next > nalu_start {
-            nalus.push(bytes[nalu_start..next].to_vec());
+            nalus.push(&bytes[nalu_start..next]);
         }
         cursor = next;
         if cursor >= bytes.len() {
@@ -656,17 +751,18 @@ fn is_start_code_at(bytes: &[u8], index: usize) -> Option<usize> {
     }
 }
 
-fn write_avcc(nalus: &[Vec<u8>]) -> Result<Vec<u8>, EncodeError> {
+fn write_avcc(nalus: &[impl AsRef<[u8]>]) -> Result<Vec<u8>, EncodeError> {
     let capacity = nalus
         .iter()
         .try_fold(0_usize, |size, nalu| {
-            size.checked_add(4)?.checked_add(nalu.len())
+            size.checked_add(4)?.checked_add(nalu.as_ref().len())
         })
         .ok_or(EncodeError::MalformedBitstream(
             "AVCC output length overflow",
         ))?;
     let mut output = Vec::with_capacity(capacity);
     for nalu in nalus {
+        let nalu = nalu.as_ref();
         let length = u32::try_from(nalu.len())
             .map_err(|_| EncodeError::MalformedBitstream("NAL unit exceeds u32"))?;
         output.extend_from_slice(&length.to_be_bytes());
@@ -675,13 +771,15 @@ fn write_avcc(nalus: &[Vec<u8>]) -> Result<Vec<u8>, EncodeError> {
     Ok(output)
 }
 
-fn parameter_sets(nalus: &[Vec<u8>], codec: VideoCodec) -> Vec<Vec<u8>> {
+fn parameter_sets(nalus: &[impl AsRef<[u8]>], codec: VideoCodec) -> Vec<Vec<u8>> {
     nalus
         .iter()
         .filter(|nalu| {
-            nalu_type(nalu, codec).is_some_and(|kind| codec.parameter_set_types().contains(&kind))
+            nalu_type(nalu.as_ref(), codec)
+                .is_some_and(|kind| codec.parameter_set_types().contains(&kind))
         })
-        .cloned()
+        // Only long-lived parameter sets need ownership; access-unit payloads borrow.
+        .map(|nalu| nalu.as_ref().to_vec())
         .collect()
 }
 
@@ -693,9 +791,310 @@ fn nalu_type(nalu: &[u8], codec: VideoCodec) -> Option<u8> {
     })
 }
 
+// Kept platform-independent so the exact production control flow can be tested
+// without COM. The adapter above owns sample allocation and HRESULT translation.
+mod synchronous {
+    use std::{collections::BTreeMap, time::Instant};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) struct InputMetadata {
+        pub capture_at: Instant,
+        pub encode_started_at: Instant,
+    }
+
+    #[derive(Default)]
+    pub(super) struct PendingInputs(BTreeMap<i64, InputMetadata>);
+
+    impl PendingInputs {
+        pub fn accept(&mut self, timestamp: i64, metadata: InputMetadata) {
+            self.0.insert(timestamp, metadata);
+        }
+
+        pub fn take(&mut self, timestamp: i64) -> Option<InputMetadata> {
+            self.0.remove(&timestamp)
+        }
+
+        pub fn is_empty(&self) -> bool {
+            self.0.is_empty()
+        }
+
+        pub fn len(&self) -> usize {
+            self.0.len()
+        }
+    }
+
+    pub(super) trait SynchronousTransform {
+        type Input;
+        type Output;
+        type Error;
+
+        fn process_input(&mut self, input: &Self::Input) -> Result<(), Self::Error>;
+        fn is_not_accepting(error: &Self::Error) -> bool;
+        fn process_output(&mut self) -> Result<Option<Self::Output>, Self::Error>;
+    }
+
+    pub(super) fn submit_and_drain<T: SynchronousTransform>(
+        transform: &mut T,
+        input: &T::Input,
+    ) -> Result<Vec<T::Output>, T::Error> {
+        let mut output = Vec::new();
+        match transform.process_input(input) {
+            Ok(()) => {}
+            Err(error) if T::is_not_accepting(&error) => {
+                while let Some(frame) = transform.process_output()? {
+                    output.push(frame);
+                }
+                // A synchronous MFT must accept input after draining to
+                // NEED_MORE_INPUT. A repeated rejection is an error, not a spin.
+                transform.process_input(input)?;
+            }
+            Err(error) => return Err(error),
+        }
+        while let Some(frame) = transform.process_output()? {
+            output.push(frame);
+        }
+        Ok(output)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::{collections::VecDeque, time::Duration};
+
+        #[derive(Debug, PartialEq, Eq)]
+        enum Fault {
+            NotAccepting,
+            Input,
+            Output,
+        }
+
+        struct Input {
+            timestamp: i64,
+            keyframe: bool,
+            metadata: InputMetadata,
+        }
+
+        struct Script {
+            inputs: VecDeque<Result<(), Fault>>,
+            outputs: VecDeque<Result<Option<i64>, Fault>>,
+            attempts: Vec<(usize, i64, bool)>,
+            pending: PendingInputs,
+        }
+
+        impl SynchronousTransform for Script {
+            type Input = Input;
+            type Output = (i64, InputMetadata);
+            type Error = Fault;
+
+            fn process_input(&mut self, input: &Input) -> Result<(), Fault> {
+                self.attempts.push((
+                    std::ptr::from_ref(input).addr(),
+                    input.timestamp,
+                    input.keyframe,
+                ));
+                self.inputs.pop_front().expect("unexpected ProcessInput")?;
+                self.pending.accept(input.timestamp, input.metadata);
+                Ok(())
+            }
+
+            fn is_not_accepting(error: &Fault) -> bool {
+                *error == Fault::NotAccepting
+            }
+
+            fn process_output(&mut self) -> Result<Option<Self::Output>, Fault> {
+                self.outputs
+                    .pop_front()
+                    .expect("unexpected ProcessOutput")?
+                    .map(|timestamp| {
+                        self.pending
+                            .take(timestamp)
+                            .map(|metadata| (timestamp, metadata))
+                            .ok_or(Fault::Output)
+                    })
+                    .transpose()
+            }
+        }
+
+        fn input(timestamp: i64, origin: Instant) -> Input {
+            Input {
+                timestamp,
+                keyframe: true,
+                metadata: InputMetadata {
+                    capture_at: origin + Duration::from_secs(timestamp as u64),
+                    encode_started_at: origin
+                        + Duration::from_secs(timestamp as u64)
+                        + Duration::from_millis(1),
+                },
+            }
+        }
+
+        #[test]
+        fn rejected_b_drains_a_retries_same_b_with_keyframe_and_drains_b() {
+            // Given A is accepted but buffered; B will be rejected once.
+            let origin = Instant::now();
+            let a = input(0, origin);
+            let b = input(1, origin);
+            let mut script = Script {
+                inputs: VecDeque::from([Ok(()), Err(Fault::NotAccepting), Ok(())]),
+                outputs: VecDeque::from([Ok(None), Ok(Some(0)), Ok(None), Ok(Some(1)), Ok(None)]),
+                attempts: Vec::new(),
+                pending: PendingInputs::default(),
+            };
+            assert!(submit_and_drain(&mut script, &a).unwrap().is_empty());
+            // When B is submitted.
+            let output = submit_and_drain(&mut script, &b).unwrap();
+            // Then neither sample nor its identity/keyframe intent is lost.
+            assert_eq!(output, [(0, a.metadata), (1, b.metadata)]);
+            assert_eq!(script.attempts.len(), 3);
+            assert_eq!(script.attempts[1], script.attempts[2]);
+            assert!(script.attempts[2].2);
+            assert!(script.pending.is_empty());
+            assert!(script.outputs.is_empty());
+            assert!(script.inputs.is_empty());
+        }
+
+        #[test]
+        fn output_matches_timestamp_not_fifo_and_unknown_identity_is_absent() {
+            // Given distinct metadata for inputs A and B.
+            let origin = Instant::now();
+            let a = input(0, origin);
+            let b = input(1, origin);
+            let mut pending = PendingInputs::default();
+            pending.accept(0, a.metadata);
+            pending.accept(1, b.metadata);
+            // When B is returned first, then only its actual identity is removed.
+            assert_eq!(pending.take(1), Some(b.metadata));
+            assert_eq!(pending.len(), 1);
+            assert_eq!(pending.take(99), None);
+            assert_eq!(pending.take(0), Some(a.metadata));
+            assert_eq!(pending.take(1), None);
+        }
+
+        #[test]
+        fn permanent_input_error_does_not_drain_or_accept() {
+            // Given an input fault rather than backpressure.
+            let mut script = Script {
+                inputs: VecDeque::from([Err(Fault::Input)]),
+                outputs: VecDeque::new(),
+                attempts: Vec::new(),
+                pending: PendingInputs::default(),
+            };
+            // When submitted, then propagate without attempting output.
+            assert_eq!(
+                submit_and_drain(&mut script, &input(0, Instant::now())),
+                Err(Fault::Input)
+            );
+            assert!(script.pending.is_empty());
+        }
+
+        #[test]
+        fn repeated_rejection_after_drain_errors_instead_of_spinning() {
+            // Given an MFT violating the synchronous progress contract.
+            let mut script = Script {
+                inputs: VecDeque::from([Err(Fault::NotAccepting), Err(Fault::NotAccepting)]),
+                outputs: VecDeque::from([Ok(None)]),
+                attempts: Vec::new(),
+                pending: PendingInputs::default(),
+            };
+            // When retried once, then report the HRESULT without an unbounded loop.
+            assert_eq!(
+                submit_and_drain(&mut script, &input(0, Instant::now())),
+                Err(Fault::NotAccepting)
+            );
+            assert_eq!(script.attempts.len(), 2);
+            assert!(script.pending.is_empty());
+        }
+
+        #[test]
+        fn drain_error_propagates_without_retrying_input() {
+            // Given a failure draining after rejection.
+            let mut script = Script {
+                inputs: VecDeque::from([Err(Fault::NotAccepting)]),
+                outputs: VecDeque::from([Err(Fault::Output)]),
+                attempts: Vec::new(),
+                pending: PendingInputs::default(),
+            };
+            // When submitted, then the output error remains visible.
+            assert_eq!(
+                submit_and_drain(&mut script, &input(0, Instant::now())),
+                Err(Fault::Output)
+            );
+            assert_eq!(script.attempts.len(), 1);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn native_software_encode_and_flush_preserve_capture_identity() {
+        // Given the real synchronous software H.264 MFT (no GPU or desktop needed).
+        let config = EncoderConfig {
+            width: 64,
+            height: 64,
+            bitrate: 500_000,
+            fps: 30,
+            keyframe_interval: 30,
+            preferred_codec: VideoCodec::H264,
+        };
+        let mut encoder = MediaFoundationEncoder::new(config).unwrap();
+        assert_eq!(encoder.backend(), EncoderBackend::MediaFoundationSoftware);
+        let origin = Instant::now();
+        let pixels = vec![128; 64 * 64 * 3 / 2];
+        let mut frames = Vec::new();
+        // When three samples are submitted and the real MFT is drained.
+        for index in 0..3 {
+            let captured_at = origin - std::time::Duration::from_secs(3 - index);
+            frames.extend(encoder.encode_nv12(&pixels, captured_at).unwrap());
+        }
+        frames.extend(encoder.flush().unwrap());
+        // Then all accepted samples carry their own capture identity.
+        assert_eq!(frames.len(), 3);
+        for frame in frames {
+            let index = frame.timestamp_hns / config.frame_duration_hns();
+            assert!((0..3).contains(&index));
+            assert_eq!(
+                frame.capture_at,
+                origin - std::time::Duration::from_secs(3 - index as u64)
+            );
+            assert!(frame.encode_started_at >= origin);
+            assert!(frame.encode_completed_at >= frame.encode_started_at);
+            assert!(!frame.data.is_empty());
+        }
+    }
+
+    #[test]
+    fn parsed_payloads_borrow_the_access_unit() {
+        // Given three realistic-size AVCC slices (192 KiB total payload).
+        let payloads = vec![vec![0x65; 65536], vec![0x61; 65536], vec![0x61; 65536]];
+        let bytes = write_avcc(&payloads).unwrap();
+        // When normalizing the encoded access unit.
+        let nalus = parse_access_unit(&bytes).unwrap();
+        let start = bytes.as_ptr().addr();
+        let end = start + bytes.len();
+        let copied_payloads: usize = nalus
+            .iter()
+            .filter(|nalu| {
+                let ptr = nalu.as_ptr().addr();
+                ptr < start || ptr + nalu.len() > end
+            })
+            .count();
+        let copied_bytes: usize = nalus
+            .iter()
+            .filter(|nalu| {
+                let ptr = nalu.as_ptr().addr();
+                ptr < start || ptr + nalu.len() > end
+            })
+            .map(|nalu| nalu.len())
+            .sum();
+        println!("NAL_PAYLOAD_ALLOCATIONS={copied_payloads}; NAL_PAYLOAD_COPY_BYTES={copied_bytes}; OUTPUT_BYTES={}", bytes.len());
+        // Then parsing allocates only spans, never another copy of each payload.
+        assert_eq!(copied_payloads, 0);
+        assert_eq!(write_avcc(&nalus).unwrap(), bytes);
+    }
 
     #[test]
     fn annex_b_is_normalized_to_four_byte_avcc() {

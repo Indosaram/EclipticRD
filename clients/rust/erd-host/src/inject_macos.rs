@@ -30,6 +30,11 @@ pub struct InputInjector {
     host_width: f32,
     host_height: f32,
     rate_limit: Mutex<RateLimit>,
+    // CGEventSource is !Send/!Sync: create, use, and drop on the session thread.
+    #[cfg(target_os = "macos")]
+    event_source: std::cell::RefCell<Option<core_graphics::event_source::CGEventSource>>,
+    #[cfg(all(test, target_os = "macos"))]
+    source_creations: std::cell::Cell<usize>,
 }
 
 impl InputInjector {
@@ -41,6 +46,10 @@ impl InputInjector {
                 tokens: BURST_CAPACITY,
                 last_refill: Instant::now(),
             }),
+            #[cfg(target_os = "macos")]
+            event_source: std::cell::RefCell::new(None),
+            #[cfg(all(test, target_os = "macos"))]
+            source_creations: std::cell::Cell::new(0),
         }
     }
 
@@ -72,24 +81,45 @@ impl InputInjector {
 
     #[cfg(target_os = "macos")]
     pub fn inject(&self, event: &InputEvent) -> Result<(), InputError> {
-        use core_graphics::event::{
-            CGEvent, CGEventTapLocation, CGEventType, CGMouseButton, ScrollEventUnit,
-        };
-        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
-        use core_graphics::geometry::CGPoint;
-
         if !accessibility_is_trusted() {
             return Err(InputError::PermissionDenied);
         }
         if !self.allow_event() {
             return Err(InputError::RateLimited);
         }
+        if let Some(cg_event) = self.create_event(event)? {
+            cg_event.post(core_graphics::event::CGEventTapLocation::HID);
+        }
+        Ok(())
+    }
+
+    // Separate construction from posting so native tests never inject input.
+    #[cfg(target_os = "macos")]
+    fn create_event(
+        &self,
+        event: &InputEvent,
+    ) -> Result<Option<core_graphics::event::CGEvent>, InputError> {
+        use core_graphics::event::{CGEvent, CGEventType, CGMouseButton, ScrollEventUnit};
+        use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+        use core_graphics::geometry::CGPoint;
+
         let (x, y) = self.map_coordinates(event)?;
         let point = CGPoint::new(x as f64, y as f64);
         let flags = cg_flags(event.modifiers);
         let source = || {
-            CGEventSource::new(CGEventSourceStateID::HIDSystemState)
-                .map_err(|_| InputError::EventCreation)
+            let mut source = self.event_source.borrow_mut();
+            if let Some(source) = source.as_ref() {
+                // Clone is CFRetain, not CGEventSourceCreate. The event constructor
+                // consumes this reference; the injector retains its own until drop.
+                return Ok(source.clone());
+            }
+            #[cfg(test)]
+            self.source_creations.set(self.source_creations.get() + 1);
+            let created = CGEventSource::new(CGEventSourceStateID::HIDSystemState)
+                .map_err(|_| InputError::EventCreation)?;
+            // Do not cache failures: a later input can retry creation.
+            *source = Some(created.clone());
+            Ok(created)
         };
 
         let cg_event = match event.event_type {
@@ -148,11 +178,23 @@ impl InputInjector {
             InputEventType::FlagsChanged => {
                 CGEvent::new_keyboard_event(source()?, event.key_code, true)
             }
+            InputEventType::MiddleMouseDown => CGEvent::new_mouse_event(
+                source()?,
+                CGEventType::OtherMouseDown,
+                point,
+                CGMouseButton::Center,
+            ),
+            InputEventType::MiddleMouseUp => CGEvent::new_mouse_event(
+                source()?,
+                CGEventType::OtherMouseUp,
+                point,
+                CGMouseButton::Center,
+            ),
+            InputEventType::Reset | InputEventType::RelativeMove => return Ok(None),
         }
         .map_err(|_| InputError::EventCreation)?;
         cg_event.set_flags(flags);
-        cg_event.post(CGEventTapLocation::HID);
-        Ok(())
+        Ok(Some(cg_event))
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -227,6 +269,272 @@ pub fn request_accessibility() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn source_is_created_once_for_equal_mixed_input_workload() {
+        use core_graphics::event::{CGEventFlags, CGEventType, EventField};
+
+        // Given every wire event and every supported modifier combination.
+        let cases = [
+            (
+                InputEventType::MouseMove,
+                0,
+                Some(CGEventType::MouseMoved),
+                Some(0),
+            ),
+            (
+                InputEventType::LeftMouseDown,
+                0,
+                Some(CGEventType::LeftMouseDown),
+                Some(0),
+            ),
+            (
+                InputEventType::LeftMouseUp,
+                0,
+                Some(CGEventType::LeftMouseUp),
+                Some(0),
+            ),
+            (
+                InputEventType::RightMouseDown,
+                0,
+                Some(CGEventType::RightMouseDown),
+                Some(1),
+            ),
+            (
+                InputEventType::RightMouseUp,
+                0,
+                Some(CGEventType::RightMouseUp),
+                Some(1),
+            ),
+            (
+                InputEventType::ScrollWheel,
+                0,
+                Some(CGEventType::ScrollWheel),
+                None,
+            ),
+            (InputEventType::KeyDown, 6, Some(CGEventType::KeyDown), None),
+            (InputEventType::KeyUp, 6, Some(CGEventType::KeyUp), None),
+            (
+                InputEventType::FlagsChanged,
+                56,
+                Some(CGEventType::FlagsChanged),
+                None,
+            ),
+            (
+                InputEventType::LeftMouseDragged,
+                0,
+                Some(CGEventType::LeftMouseDragged),
+                Some(0),
+            ),
+            (
+                InputEventType::RightMouseDragged,
+                0,
+                Some(CGEventType::RightMouseDragged),
+                Some(1),
+            ),
+            (
+                InputEventType::MiddleMouseDown,
+                0,
+                Some(CGEventType::OtherMouseDown),
+                Some(2),
+            ),
+            (
+                InputEventType::MiddleMouseUp,
+                0,
+                Some(CGEventType::OtherMouseUp),
+                Some(2),
+            ),
+            (InputEventType::Reset, 0, None, None),
+            (InputEventType::RelativeMove, 0, None, None),
+        ];
+        let injector = InputInjector::new(1920.0, 1080.0);
+        let mut events = 0;
+        let started = Instant::now();
+
+        // When constructing (never posting) the identical workload on one thread.
+        for _ in 0..16 {
+            for mask in (0..32).rev() {
+                let expected_flags = [
+                    CGEventFlags::CGEventFlagShift,
+                    CGEventFlags::CGEventFlagControl,
+                    CGEventFlags::CGEventFlagAlternate,
+                    CGEventFlags::CGEventFlagCommand,
+                    CGEventFlags::CGEventFlagAlphaShift,
+                ]
+                .into_iter()
+                .enumerate()
+                .fold(CGEventFlags::empty(), |flags, (bit, flag)| {
+                    if mask & (1 << bit) != 0 {
+                        flags | flag
+                    } else {
+                        flags
+                    }
+                });
+                for (event_type, key_code, expected_type, button) in cases {
+                    let input = InputEvent {
+                        event_type,
+                        key_code,
+                        x: 0.25,
+                        y: 0.75,
+                        // Unknown wire bits must not leak into Quartz flags either.
+                        modifiers: Modifiers::from_bits_retain(mask | 0x8000),
+                        scroll_dx: -2.6,
+                        scroll_dy: 3.6,
+                    };
+                    let output = injector.create_event(&input).unwrap();
+                    // Then the source state, flags, types, and payload stay identical.
+                    match (output, expected_type) {
+                        (None, None) => {}
+                        (Some(output), Some(expected_type)) => {
+                            events += 1;
+                            assert_eq!(output.get_type() as u32, expected_type as u32);
+                            assert_eq!(output.get_flags(), expected_flags);
+                            assert_eq!(
+                                output.get_integer_value_field(EventField::EVENT_SOURCE_STATE_ID),
+                                1
+                            );
+                            if let Some(button) = button {
+                                let location = output.location();
+                                assert_eq!((location.x, location.y), (480.0, 810.0));
+                                assert_eq!(
+                                    output.get_integer_value_field(
+                                        EventField::MOUSE_EVENT_BUTTON_NUMBER
+                                    ),
+                                    button
+                                );
+                            }
+                            match event_type {
+                                InputEventType::KeyDown
+                                | InputEventType::KeyUp
+                                | InputEventType::FlagsChanged => {
+                                    assert_eq!(
+                                        output.get_integer_value_field(
+                                            EventField::KEYBOARD_EVENT_KEYCODE
+                                        ),
+                                        i64::from(key_code)
+                                    );
+                                }
+                                InputEventType::ScrollWheel => {
+                                    assert_eq!(
+                                        output.get_integer_value_field(
+                                            EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_1
+                                        ),
+                                        4
+                                    );
+                                    assert_eq!(
+                                        output.get_integer_value_field(
+                                            EventField::SCROLL_WHEEL_EVENT_POINT_DELTA_AXIS_2
+                                        ),
+                                        -3
+                                    );
+                                }
+                                InputEventType::MouseMove
+                                | InputEventType::LeftMouseDown
+                                | InputEventType::LeftMouseUp
+                                | InputEventType::RightMouseDown
+                                | InputEventType::RightMouseUp
+                                | InputEventType::LeftMouseDragged
+                                | InputEventType::RightMouseDragged
+                                | InputEventType::MiddleMouseDown
+                                | InputEventType::MiddleMouseUp
+                                | InputEventType::Reset
+                                | InputEventType::RelativeMove => {}
+                            }
+                        }
+                        _ => panic!("unexpected event/no-op for {event_type:?}"),
+                    }
+                }
+            }
+        }
+        println!(
+            "inputs=7680 events={events} source_creations={} elapsed_us={}",
+            injector.source_creations.get(),
+            started.elapsed().as_micros()
+        );
+        assert_eq!(events, 6656);
+        assert_eq!(injector.source_creations.get(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn noops_and_invalid_coordinates_do_not_create_sources() {
+        // Given a fresh injector with no native resources yet.
+        let injector = InputInjector::new(100.0, 50.0);
+        // When Reset, RelativeMove, and invalid input arrive before real events.
+        for event_type in [InputEventType::Reset, InputEventType::RelativeMove] {
+            let event = InputEvent {
+                event_type,
+                x: 0.0,
+                y: 0.0,
+                key_code: 0,
+                modifiers: Modifiers::COMMAND,
+                scroll_dx: 0.0,
+                scroll_dy: 0.0,
+            };
+            assert!(injector.create_event(&event).unwrap().is_none());
+            assert!(matches!(
+                injector.create_event(&InputEvent {
+                    x: f32::NAN,
+                    ..event
+                }),
+                Err(InputError::InvalidCoordinates)
+            ));
+        }
+        // Then they neither allocate a source nor manufacture an OS event.
+        assert_eq!(injector.source_creations.get(), 0);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn event_flags_are_isolated_across_reset_and_injector_lifetimes() {
+        use core_graphics::event::{CGEventFlags, EventField};
+
+        // Given a modifier-bearing event that remains alive across Reset and drop.
+        let first = InputInjector::new(100.0, 50.0);
+        let second = InputInjector::new(100.0, 50.0);
+        let input = InputEvent {
+            event_type: InputEventType::KeyDown,
+            x: 0.0,
+            y: 0.0,
+            key_code: 6,
+            modifiers: Modifiers::COMMAND,
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+        let held = first.create_event(&input).unwrap().unwrap();
+        // When a different injector and the reset injector construct unmodified keys.
+        assert!(first
+            .create_event(&InputEvent {
+                event_type: InputEventType::Reset,
+                ..input
+            })
+            .unwrap()
+            .is_none());
+        let clear_input = InputEvent {
+            modifiers: Modifiers::empty(),
+            ..input
+        };
+        let clear_first = first.create_event(&clear_input).unwrap().unwrap();
+        let clear_second = second.create_event(&clear_input).unwrap().unwrap();
+        let creations = (first.source_creations.get(), second.source_creations.get());
+        drop(first);
+        drop(second);
+        // Then retained events stay valid, with no inherited/sticky modifiers.
+        assert_eq!(held.get_flags(), CGEventFlags::CGEventFlagCommand);
+        for event in [clear_first, clear_second] {
+            assert_eq!(event.get_flags(), CGEventFlags::empty());
+            assert_eq!(
+                event.get_integer_value_field(EventField::EVENT_SOURCE_STATE_ID),
+                1
+            );
+            assert_eq!(
+                event.get_integer_value_field(EventField::KEYBOARD_EVENT_KEYCODE),
+                6
+            );
+        }
+        assert_eq!(creations, (1, 1));
+    }
 
     #[test]
     fn normalized_coordinates_map_to_absolute_host_pixels() {

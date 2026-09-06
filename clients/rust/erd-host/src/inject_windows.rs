@@ -16,9 +16,10 @@ use windows::Win32::UI::{
     Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
         KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
-        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN,
-        MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK, MOUSEEVENTF_WHEEL, MOUSEINPUT,
-        MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+        MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+        MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
+        MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_LCONTROL, VK_LMENU,
+        VK_LSHIFT, VK_LWIN,
     },
     WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
@@ -84,7 +85,9 @@ impl WindowsInputInjector {
             | InputEventType::LeftMouseDown
             | InputEventType::LeftMouseUp
             | InputEventType::RightMouseDown
-            | InputEventType::RightMouseUp => {
+            | InputEventType::RightMouseUp
+            | InputEventType::MiddleMouseDown
+            | InputEventType::MiddleMouseUp => {
                 let (x, y) =
                     normalize_absolute_pointer(event.x, event.y, self.target, self.desktop);
                 let mut flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
@@ -93,9 +96,30 @@ impl WindowsInputInjector {
                     InputEventType::LeftMouseUp => MOUSEEVENTF_LEFTUP,
                     InputEventType::RightMouseDown => MOUSEEVENTF_RIGHTDOWN,
                     InputEventType::RightMouseUp => MOUSEEVENTF_RIGHTUP,
+                    InputEventType::MiddleMouseDown => MOUSEEVENTF_MIDDLEDOWN,
+                    InputEventType::MiddleMouseUp => MOUSEEVENTF_MIDDLEUP,
                     _ => MOUSE_EVENT_FLAGS(0),
                 };
                 send_inputs(&[mouse_input(x, y, 0, flags)])
+            }
+            InputEventType::RelativeMove => {
+                let dx = event.scroll_dx.round() as i32;
+                let dy = event.scroll_dy.round() as i32;
+                self.move_relative(dx, dy)
+            }
+            InputEventType::Reset => {
+                let mut inputs = Vec::new();
+                inputs.push(mouse_input(
+                    0,
+                    0,
+                    0,
+                    MOUSEEVENTF_LEFTUP | MOUSEEVENTF_RIGHTUP | MOUSEEVENTF_MIDDLEUP,
+                ));
+                for vk in [VK_LSHIFT, VK_LCONTROL, VK_LMENU, VK_LWIN] {
+                    inputs.push(key_input(vk.0, true));
+                }
+                self.modifiers = Modifiers::empty();
+                send_inputs(&inputs)
             }
             InputEventType::ScrollWheel => {
                 let mut inputs = Vec::with_capacity(2);
@@ -110,10 +134,18 @@ impl WindowsInputInjector {
                 send_inputs(&inputs)
             }
             InputEventType::KeyDown | InputEventType::KeyUp => {
-                let mut inputs = modifier_inputs(self.modifiers, event.modifiers);
-                self.modifiers = event.modifiers;
+                let is_up = event.event_type == InputEventType::KeyUp;
+                let mut inputs = Vec::with_capacity(6);
                 if let Some(vk) = macos_keycode_to_vk(event.key_code) {
-                    inputs.push(key_input(vk, event.event_type == InputEventType::KeyUp));
+                    let is_mod_key = matches!(
+                        VIRTUAL_KEY(vk),
+                        VK_LSHIFT | VK_LCONTROL | VK_LMENU | VK_LWIN
+                    );
+                    if !is_mod_key {
+                        inputs.extend(modifier_inputs(self.modifiers, event.modifiers));
+                        self.modifiers = event.modifiers;
+                    }
+                    inputs.push(key_input(vk, is_up));
                 }
                 send_inputs(&inputs)
             }

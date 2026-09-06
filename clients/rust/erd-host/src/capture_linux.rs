@@ -22,12 +22,14 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     os::fd::AsFd,
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
 use wayland_client::{
     delegate_noop,
-    protocol::{wl_buffer, wl_output, wl_registry, wl_shm, wl_shm_pool},
+    protocol::{wl_buffer, wl_callback, wl_output, wl_registry, wl_shm, wl_shm_pool},
     Connection, Dispatch, Proxy, QueueHandle, WEnum,
 };
 use wayland_protocols_wlr::screencopy::v1::client::{
@@ -107,6 +109,10 @@ pub struct CapturedFrame {
 
 #[derive(Debug, Error)]
 pub enum CaptureError {
+    #[error("capture cancelled")]
+    Cancelled,
+    #[error("capture initialization deadline expired")]
+    Timeout,
     #[error("failed to connect to the Wayland compositor: {0}")]
     Connect(#[from] wayland_client::ConnectError),
     #[error("Wayland dispatch failed: {0}")]
@@ -138,22 +144,29 @@ struct BufferDescription {
     stride: u32,
 }
 
-struct ActiveCapture {
+struct CachedBuffer {
     file: File,
     _pool: wl_shm_pool::WlShmPool,
-    _buffer: wl_buffer::WlBuffer,
+    buffer: wl_buffer::WlBuffer,
+    description: BufferDescription,
+}
+
+struct ActiveCapture {
     description: BufferDescription,
     damage: Vec<DamageRect>,
     y_inverted: bool,
 }
 
 struct CaptureState {
+    sync_done: bool,
     manager: Option<zwlr_screencopy_manager_v1::ZwlrScreencopyManagerV1>,
     shm: Option<wl_shm::WlShm>,
     outputs: Vec<(wl_output::WlOutput, OutputInfo)>,
     offered_buffer: Option<BufferDescription>,
     active: Option<ActiveCapture>,
     result: Option<Result<CapturedFrame, CaptureError>>,
+    raw_shm_buf: Vec<u8>,
+    cached_buffer: Option<CachedBuffer>,
 }
 
 impl CaptureState {
@@ -190,34 +203,48 @@ impl CaptureState {
             ));
         }
 
-        let mut file = tempfile::tempfile()?;
-        file.set_len(size)?;
-        file.seek(SeekFrom::Start(0))?;
+        let is_cached_valid = match &self.cached_buffer {
+            Some(cached) => {
+                cached.description.width == description.width
+                    && cached.description.height == description.height
+                    && cached.description.stride == description.stride
+                    && cached.description.format == description.format
+            }
+            None => false,
+        };
 
-        let shm = self
-            .shm
-            .as_ref()
-            .ok_or(CaptureError::PortalRequired("wl_shm"))?;
-        let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
-        let buffer = pool.create_buffer(
-            0,
-            description.width as i32,
-            description.height as i32,
-            description.stride as i32,
-            description.format,
-            qh,
-            (),
-        );
+        if !is_cached_valid {
+            let mut file = tempfile::tempfile()?;
+            file.set_len(size)?;
+            file.seek(SeekFrom::Start(0))?;
 
-        if frame.version() >= 2 {
-            frame.copy_with_damage(&buffer);
-        } else {
-            frame.copy(&buffer);
+            let shm = self
+                .shm
+                .as_ref()
+                .ok_or(CaptureError::PortalRequired("wl_shm"))?;
+            let pool = shm.create_pool(file.as_fd(), size as i32, qh, ());
+            let buffer = pool.create_buffer(
+                0,
+                description.width as i32,
+                description.height as i32,
+                description.stride as i32,
+                description.format,
+                qh,
+                (),
+            );
+            self.cached_buffer = Some(CachedBuffer {
+                file,
+                _pool: pool,
+                buffer,
+                description,
+            });
         }
+
+        let cached = self.cached_buffer.as_ref().unwrap();
+        // Use `copy` to guarantee immediate frame presentation at target cadence
+        // without blocking indefinitely on compositor damage events.
+        frame.copy(&cached.buffer);
         self.active = Some(ActiveCapture {
-            file,
-            _pool: pool,
-            _buffer: buffer,
             description,
             damage: Vec::new(),
             y_inverted: false,
@@ -235,30 +262,45 @@ impl CaptureState {
             .active
             .take()
             .ok_or(CaptureError::InvalidBuffer("ready arrived before copy"))?;
+        let cached = self
+            .cached_buffer
+            .as_mut()
+            .ok_or(CaptureError::InvalidBuffer("missing cached buffer"))?;
         let description = active.description;
-        let source_len = description.stride as usize * description.height as usize;
-        let mut source = vec![0_u8; source_len];
-        active.file.seek(SeekFrom::Start(0))?;
-        active.file.read_exact(&mut source)?;
-
         let row_bytes = description.width as usize * 4;
-        let mut bgra = vec![0_u8; row_bytes * description.height as usize];
-        for destination_y in 0..description.height as usize {
-            let source_y = if active.y_inverted {
-                description.height as usize - 1 - destination_y
-            } else {
-                destination_y
-            };
-            let source_start = source_y * description.stride as usize;
-            let destination_start = destination_y * row_bytes;
-            bgra[destination_start..destination_start + row_bytes]
-                .copy_from_slice(&source[source_start..source_start + row_bytes]);
+        let total_bytes = row_bytes * description.height as usize;
+        let mut bgra = vec![0_u8; total_bytes];
+        cached.file.seek(SeekFrom::Start(0))?;
+
+        if !active.y_inverted && description.stride as usize == row_bytes {
+            cached.file.read_exact(&mut bgra)?;
+        } else {
+            let source_len = description.stride as usize * description.height as usize;
+            if self.raw_shm_buf.len() < source_len {
+                self.raw_shm_buf.resize(source_len, 0);
+            }
+            cached
+                .file
+                .read_exact(&mut self.raw_shm_buf[..source_len])?;
+
+            for destination_y in 0..description.height as usize {
+                let source_y = if active.y_inverted {
+                    description.height as usize - 1 - destination_y
+                } else {
+                    destination_y
+                };
+                let source_start = source_y * description.stride as usize;
+                let destination_start = destination_y * row_bytes;
+                bgra[destination_start..destination_start + row_bytes]
+                    .copy_from_slice(&self.raw_shm_buf[source_start..source_start + row_bytes]);
+            }
         }
 
         // XRGB8888 has an unused high byte. Making it opaque also gives callers
         // one stable BGRA contract for both ARGB8888 and XRGB8888.
-        for alpha in bgra[3..].iter_mut().step_by(4) {
-            *alpha = u8::MAX;
+        let (_, u32_slice, _) = unsafe { bgra.align_to_mut::<u32>() };
+        for pixel in u32_slice {
+            *pixel |= 0xFF00_0000;
         }
 
         if active.y_inverted {
@@ -288,27 +330,66 @@ pub struct LinuxCapture {
     state: CaptureState,
     config: CaptureConfig,
     selected_output: OutputInfo,
+    request_pending: bool,
 }
 
 impl LinuxCapture {
     pub fn connect(config: CaptureConfig) -> Result<Self, CaptureError> {
         let connection = Connection::connect_to_env()?;
+        Self::from_connection(
+            config,
+            connection,
+            &AtomicBool::new(false),
+            Instant::now() + Duration::from_secs(5),
+        )
+    }
+
+    pub fn connect_cancellable(
+        config: CaptureConfig,
+        stop: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<Self, CaptureError> {
+        check_startup(stop, deadline)?;
+        Self::from_connection(config, Connection::connect_to_env()?, stop, deadline)
+    }
+
+    fn from_connection(
+        config: CaptureConfig,
+        connection: Connection,
+        stop: &AtomicBool,
+        deadline: Instant,
+    ) -> Result<Self, CaptureError> {
+        check_startup(stop, deadline)?;
         let mut event_queue = connection.new_event_queue();
         let qh = event_queue.handle();
         connection.display().get_registry(&qh, ());
 
         let mut state = CaptureState {
+            sync_done: false,
             manager: None,
             shm: None,
             outputs: Vec::new(),
             offered_buffer: None,
             active: None,
             result: None,
+            raw_shm_buf: Vec::new(),
+            cached_buffer: None,
         };
         // First roundtrip discovers globals; the second receives wl_output
         // metadata, including the connector name on wl_output v4.
-        event_queue.roundtrip(&mut state)?;
-        event_queue.roundtrip(&mut state)?;
+        for _ in 0..2 {
+            state.sync_done = false;
+            connection.display().sync(&qh, ());
+            while !state.sync_done {
+                check_startup(stop, deadline)?;
+                dispatch_slice(
+                    &mut event_queue,
+                    &mut state,
+                    stop,
+                    deadline.saturating_duration_since(Instant::now()),
+                )?;
+            }
+        }
 
         if state.manager.is_none() {
             return Err(CaptureError::PortalRequired("zwlr_screencopy_manager_v1"));
@@ -326,6 +407,7 @@ impl LinuxCapture {
             state,
             config,
             selected_output,
+            request_pending: false,
         })
     }
 
@@ -334,46 +416,140 @@ impl LinuxCapture {
     }
 
     pub fn capture_frame(&mut self) -> Result<CapturedFrame, CaptureError> {
-        self.state.offered_buffer = None;
-        self.state.active = None;
-        self.state.result = None;
-
-        let manager = self
-            .state
-            .manager
-            .as_ref()
-            .ok_or(CaptureError::PortalRequired("zwlr_screencopy_manager_v1"))?
-            .clone();
-        let (output, _) = self
-            .state
-            .output(self.config.output_name.as_deref())
-            .ok_or_else(|| CaptureError::OutputNotFound(self.config.output_name.clone()))?;
-        let qh = self.event_queue.handle();
-        let overlay_cursor = i32::from(self.config.overlay_cursor);
-        if let Some(region) = self.config.region {
-            if region.width <= 0 || region.height <= 0 {
-                return Err(CaptureError::InvalidBuffer("capture region is empty"));
-            }
-            manager.capture_output_region(
-                overlay_cursor,
-                &output,
-                region.x,
-                region.y,
-                region.width,
-                region.height,
-                &qh,
-                (),
-            );
-        } else {
-            manager.capture_output(overlay_cursor, &output, &qh, ());
-        }
-
+        let stop = AtomicBool::new(false);
         loop {
-            self.event_queue.blocking_dispatch(&mut self.state)?;
-            if let Some(result) = self.state.result.take() {
-                return result;
+            if let Some(frame) = self.capture_frame_cancellable(&stop, Duration::from_millis(50))? {
+                return Ok(frame);
             }
         }
+    }
+
+    pub fn capture_frame_cancellable(
+        &mut self,
+        stop: &AtomicBool,
+        poll_timeout: Duration,
+    ) -> Result<Option<CapturedFrame>, CaptureError> {
+        if stop.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if !self.request_pending {
+            self.state.offered_buffer = None;
+            self.state.active = None;
+            self.state.result = None;
+
+            let manager = self
+                .state
+                .manager
+                .as_ref()
+                .ok_or(CaptureError::PortalRequired("zwlr_screencopy_manager_v1"))?
+                .clone();
+            let (output, _) = self
+                .state
+                .output(self.config.output_name.as_deref())
+                .ok_or_else(|| CaptureError::OutputNotFound(self.config.output_name.clone()))?;
+            let qh = self.event_queue.handle();
+            let overlay_cursor = i32::from(self.config.overlay_cursor);
+            if let Some(region) = self.config.region {
+                if region.width <= 0 || region.height <= 0 {
+                    return Err(CaptureError::InvalidBuffer("capture region is empty"));
+                }
+                manager.capture_output_region(
+                    overlay_cursor,
+                    &output,
+                    region.x,
+                    region.y,
+                    region.width,
+                    region.height,
+                    &qh,
+                    (),
+                );
+            } else {
+                manager.capture_output(overlay_cursor, &output, &qh, ());
+            }
+
+            self.request_pending = true;
+        }
+        dispatch_slice(&mut self.event_queue, &mut self.state, stop, poll_timeout)?;
+        if stop.load(Ordering::Acquire) {
+            return Ok(None);
+        }
+        if let Some(result) = self.state.result.take() {
+            self.request_pending = false;
+            return result.map(Some);
+        }
+        Ok(None)
+    }
+}
+
+fn check_startup(stop: &AtomicBool, deadline: Instant) -> Result<(), CaptureError> {
+    if stop.load(Ordering::Acquire) {
+        return Err(CaptureError::Cancelled);
+    }
+    if Instant::now() >= deadline {
+        return Err(CaptureError::Timeout);
+    }
+    Ok(())
+}
+
+fn dispatch_slice(
+    queue: &mut wayland_client::EventQueue<CaptureState>,
+    state: &mut CaptureState,
+    stop: &AtomicBool,
+    timeout: Duration,
+) -> Result<(), CaptureError> {
+    use rustix::event::{poll, PollFd, PollFlags, Timespec};
+    use wayland_client::backend::WaylandError;
+    if stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    if queue.dispatch_pending(state)? > 0 {
+        return Ok(());
+    }
+    let mut events = PollFlags::IN;
+    match queue.flush() {
+        Ok(()) => {}
+        Err(WaylandError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            events |= PollFlags::OUT
+        }
+        Err(error) => return Err(wayland_client::DispatchError::from(error).into()),
+    }
+    if let Some(guard) = queue.prepare_read() {
+        let duration =
+            Timespec::try_from(timeout.min(Duration::from_millis(50))).expect("bounded duration");
+        let fd = guard.connection_fd();
+        let mut fds = [PollFd::new(&fd, events)];
+        match poll(&mut fds, Some(&duration)) {
+            Ok(_) => {}
+            Err(rustix::io::Errno::INTR) => return Ok(()),
+            Err(error) => return Err(std::io::Error::from(error).into()),
+        }
+        let ready = fds[0].revents();
+        if !stop.load(Ordering::Acquire)
+            && ready.intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR)
+        {
+            match guard.read() {
+                Ok(_) => {}
+                Err(WaylandError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(wayland_client::DispatchError::from(error).into()),
+            }
+        }
+    }
+    if !stop.load(Ordering::Acquire) {
+        queue.dispatch_pending(state)?;
+    }
+    Ok(())
+}
+
+impl Dispatch<wl_callback::WlCallback, ()> for CaptureState {
+    fn event(
+        state: &mut Self,
+        _: &wl_callback::WlCallback,
+        _: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        state.sync_done = true;
     }
 }
 
@@ -546,6 +722,111 @@ impl Dispatch<zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1, ()> for CaptureSt
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{os::unix::net::UnixStream, sync::mpsc, thread};
+
+    #[test]
+    fn cancelled_initialization_does_not_wait_for_compositor() {
+        let (client, server) = UnixStream::pair().unwrap();
+        let connection = Connection::from_socket(client).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = LinuxCapture::from_connection(
+                CaptureConfig::default(),
+                connection,
+                &AtomicBool::new(true),
+                Instant::now() + Duration::from_secs(5),
+            );
+            tx.send(result.is_err()).unwrap();
+        });
+        let result = rx.recv_timeout(Duration::from_secs(1));
+        drop(server);
+        worker.join().unwrap();
+        assert_eq!(
+            result,
+            Ok(true),
+            "cancelled startup must not await a Wayland roundtrip"
+        );
+    }
+
+    #[test]
+    fn pending_initialization_cancels_after_request_flush() {
+        use std::sync::Arc;
+        let (client, mut server) = UnixStream::pair().unwrap();
+        server
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let connection = Connection::from_socket(client).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = LinuxCapture::from_connection(
+                CaptureConfig::default(),
+                connection,
+                &worker_stop,
+                Instant::now() + Duration::from_secs(10),
+            );
+            tx.send(matches!(result, Err(CaptureError::Cancelled)))
+                .unwrap();
+        });
+        // Actual flushed Wayland request is the readiness signal, not a sleep.
+        server.read_exact(&mut [0; 8]).unwrap();
+        stop.store(true, Ordering::Release);
+        let result = rx.recv_timeout(Duration::from_secs(2));
+        drop(server);
+        worker.join().unwrap();
+        assert_eq!(result, Ok(true));
+    }
+
+    #[test]
+    fn pending_frame_slice_keeps_request_and_observes_stop() {
+        let (client, _server) = UnixStream::pair().unwrap();
+        let connection = Connection::from_socket(client).unwrap();
+        let queue = connection.new_event_queue();
+        let mut capture = LinuxCapture {
+            _connection: connection,
+            event_queue: queue,
+            state: CaptureState {
+                sync_done: false,
+                manager: None,
+                shm: None,
+                outputs: Vec::new(),
+                offered_buffer: None,
+                active: None,
+                result: None,
+                raw_shm_buf: Vec::new(),
+                cached_buffer: None,
+            },
+            config: CaptureConfig::default(),
+            selected_output: OutputInfo {
+                global_name: 1,
+                name: None,
+                pixel_width: 1,
+                pixel_height: 1,
+                scale: 1,
+            },
+            request_pending: true,
+        };
+        let stop = AtomicBool::new(false);
+        assert!(capture
+            .capture_frame_cancellable(&stop, Duration::ZERO)
+            .unwrap()
+            .is_none());
+        assert!(
+            capture.request_pending,
+            "timeout must not submit another request"
+        );
+        stop.store(true, Ordering::Release);
+        assert!(capture
+            .capture_frame_cancellable(&stop, Duration::from_secs(60))
+            .unwrap()
+            .is_none());
     }
 }
 

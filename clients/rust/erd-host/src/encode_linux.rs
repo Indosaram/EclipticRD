@@ -37,6 +37,7 @@ pub enum VideoCodec {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EncoderBackend {
+    Nvenc,
     Vaapi,
     X264,
 }
@@ -80,6 +81,8 @@ pub enum EncodeError {
     Ffmpeg(#[from] ffmpeg::Error),
     #[error("encoded packet is neither valid Annex-B nor AVCC")]
     InvalidBitstream,
+    #[error("encoded packet is missing its input presentation timestamp")]
+    MissingOutputTimestamp,
 }
 
 struct VaapiResources {
@@ -122,6 +125,23 @@ impl LinuxVideoEncoder {
             VideoCodec::H264 => [VideoCodec::H264, VideoCodec::Hevc],
         };
         let mut last_error = None;
+        // Priority 1: Hardware NVENC on NVIDIA
+        for codec in attempts {
+            match open_nvenc(config, codec) {
+                Ok(open) => {
+                    tracing::info!(backend = ?open.backend, codec = ?open.codec, "Initialized Linux NVENC encoder");
+                    return Ok(Self {
+                        config,
+                        open,
+                        next_pts: 0,
+                        force_keyframe: true,
+                        parameter_sets: Vec::new(),
+                    });
+                }
+                Err(error) => last_error = Some(error),
+            }
+        }
+        // Priority 2: VAAPI
         for codec in attempts {
             match open_vaapi(config, codec) {
                 Ok(open) => {
@@ -160,6 +180,29 @@ impl LinuxVideoEncoder {
         self.force_keyframe = true;
     }
 
+    pub fn update_bitrate(&mut self, bitrate: usize) -> Result<Vec<EncodedFrame>, EncodeError> {
+        let config = EncoderConfig {
+            bitrate,
+            ..self.config
+        }
+        .validate()?;
+        if bitrate == self.config.bitrate {
+            return Ok(Vec::new());
+        }
+        // Reopen before draining: post-open setters are not honored by all codecs.
+        let replacement = match self.open.backend {
+            EncoderBackend::Nvenc => open_nvenc(config, self.open.codec)?,
+            EncoderBackend::Vaapi => open_vaapi(config, self.open.codec)?,
+            EncoderBackend::X264 => open_x264(config)?,
+        };
+        let pending = self.drain()?;
+        self.open = replacement;
+        self.config = config;
+        self.parameter_sets.clear();
+        self.force_keyframe = true;
+        Ok(pending)
+    }
+
     /// Encodes one tightly packed or padded BGRA frame.
     pub fn encode_bgra(
         &mut self,
@@ -174,23 +217,64 @@ impl LinuxVideoEncoder {
             return Err(EncodeError::InvalidFrame);
         }
 
-        let mut source = frame::Video::new(Pixel::BGRA, self.config.width, self.config.height);
-        let source_stride = source.stride(0);
-        for row in 0..self.config.height as usize {
-            let input_start = row * stride;
-            let output_start = row * source_stride;
-            source.data_mut(0)[output_start..output_start + row_bytes]
-                .copy_from_slice(&bgra[input_start..input_start + row_bytes]);
-        }
-
         let pts = self.next_pts;
         self.next_pts += 1;
         let mut software = frame::Video::empty();
-        self.open.scaler.run(&source, &mut software)?;
+
+        if self.open.backend == EncoderBackend::Nvenc || self.open.backend == EncoderBackend::Vaapi
+        {
+            software = frame::Video::new(Pixel::NV12, self.config.width, self.config.height);
+            let width = self.config.width as usize;
+            let height = self.config.height as usize;
+            let y_stride = software.stride(0);
+            let uv_stride = software.stride(1);
+            let dst_y = software.data_mut(0);
+
+            for y in 0..height {
+                let s_row = &bgra[y * stride..y * stride + width * 4];
+                let dy_row = &mut dst_y[y * y_stride..y * y_stride + width];
+                for x in 0..width {
+                    let p = x * 4;
+                    let b = s_row[p] as i32;
+                    let g = s_row[p + 1] as i32;
+                    let r = s_row[p + 2] as i32;
+                    dy_row[x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+                }
+            }
+
+            let dst_uv = software.data_mut(1);
+            let uv_height = height / 2;
+            for uv_y in 0..uv_height {
+                let y = uv_y * 2;
+                let s_row = &bgra[y * stride..y * stride + width * 4];
+                let duv_row = &mut dst_uv[uv_y * uv_stride..uv_y * uv_stride + width];
+                for x in (0..width).step_by(2) {
+                    let p0 = x * 4;
+                    let p1 = (x + 1) * 4;
+                    let r_avg = (s_row[p0 + 2] as i32 + s_row[p1 + 2] as i32) >> 1;
+                    let g_avg = (s_row[p0 + 1] as i32 + s_row[p1 + 1] as i32) >> 1;
+                    let b_avg = (s_row[p0] as i32 + s_row[p1] as i32) >> 1;
+                    duv_row[x] = (((-38 * r_avg - 74 * g_avg + 112 * b_avg + 128) >> 8) + 128)
+                        .clamp(0, 255) as u8;
+                    duv_row[x + 1] = (((112 * r_avg - 94 * g_avg - 18 * b_avg + 128) >> 8) + 128)
+                        .clamp(0, 255) as u8;
+                }
+            }
+        } else {
+            // For x264 software fallback (YUV420P)
+            let mut source = frame::Video::new(Pixel::BGRA, self.config.width, self.config.height);
+            let source_stride = source.stride(0);
+            for row in 0..self.config.height as usize {
+                let input_start = row * stride;
+                let output_start = row * source_stride;
+                source.data_mut(0)[output_start..output_start + row_bytes]
+                    .copy_from_slice(&bgra[input_start..input_start + row_bytes]);
+            }
+            self.open.scaler.run(&source, &mut software)?;
+        }
         software.set_pts(Some(pts));
         if self.force_keyframe {
             software.set_kind(ffmpeg::picture::Type::I);
-            self.force_keyframe = false;
         } else {
             software.set_kind(ffmpeg::picture::Type::None);
         }
@@ -219,6 +303,7 @@ impl LinuxVideoEncoder {
             self.open.encoder.send_frame(&software)?;
         }
 
+        self.force_keyframe = false;
         self.receive_packets()
     }
 
@@ -253,7 +338,7 @@ impl LinuxVideoEncoder {
                         data: avcc,
                         is_key_frame: is_key,
                         codec: self.open.codec,
-                        pts: packet.pts().unwrap_or_default(),
+                        pts: packet_timestamp(&packet)?,
                     });
                 }
                 Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::ffi::EAGAIN => break,
@@ -263,6 +348,10 @@ impl LinuxVideoEncoder {
         }
         Ok(output)
     }
+}
+
+fn packet_timestamp(packet: &Packet) -> Result<i64, EncodeError> {
+    packet.pts().ok_or(EncodeError::MissingOutputTimestamp)
 }
 
 fn base_video_context(
@@ -284,6 +373,40 @@ fn base_video_context(
     encoder.set_max_b_frames(0);
     encoder.set_threading(codec::threading::Config::count(1));
     Ok(encoder)
+}
+
+fn open_nvenc(config: EncoderConfig, video_codec: VideoCodec) -> Result<OpenEncoder, EncodeError> {
+    let name = match video_codec {
+        VideoCodec::Hevc => "hevc_nvenc",
+        VideoCodec::H264 => "h264_nvenc",
+    };
+    let codec = codec::encoder::find_by_name(name).ok_or(EncodeError::EncoderUnavailable)?;
+    let encoder = base_video_context(config, codec, Pixel::NV12)?;
+    let mut options = Dictionary::new();
+    options.set("preset", "p1");
+    options.set("tune", "ull");
+    options.set("zerolatency", "1");
+    options.set("forced-idr", "1");
+    options.set("repeat_headers", "1");
+
+    options.set("bf", "0");
+    let encoder = encoder.open_as_with(codec, options)?;
+    let scaler = ScaleContext::get(
+        Pixel::BGRA,
+        config.width,
+        config.height,
+        Pixel::NV12,
+        config.width,
+        config.height,
+        ScaleFlags::FAST_BILINEAR,
+    )?;
+    Ok(OpenEncoder {
+        encoder,
+        backend: EncoderBackend::Nvenc,
+        codec: video_codec,
+        scaler,
+        vaapi: None,
+    })
 }
 
 fn open_vaapi(config: EncoderConfig, video_codec: VideoCodec) -> Result<OpenEncoder, EncodeError> {
@@ -339,6 +462,7 @@ fn open_vaapi(config: EncoderConfig, video_codec: VideoCodec) -> Result<OpenEnco
 
     let mut options = Dictionary::new();
     options.set("rc_mode", "CBR");
+    options.set("idr_interval", "0");
     options.set("bf", "0");
     let encoder = match encoder.open_as_with(codec, options) {
         Ok(encoder) => encoder,
@@ -374,6 +498,7 @@ fn open_x264(config: EncoderConfig) -> Result<OpenEncoder, EncodeError> {
     options.set("tune", "zerolatency");
     options.set("bf", "0");
     options.set("sc_threshold", "0");
+    options.set("forced-idr", "1");
     options.set("repeat_headers", "1");
     options.set("annexb", "1");
     let encoder = encoder.open_as_with(codec, options)?;
@@ -503,6 +628,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn packet_timestamp_requires_identity_and_preserves_present_pts() {
+        let mut packet = Packet::empty();
+        assert!(
+            matches!(
+                packet_timestamp(&packet),
+                Err(EncodeError::MissingOutputTimestamp)
+            ),
+            "missing output PTS must not invent input zero"
+        );
+        for pts in [0, 1, -7, i64::MAX] {
+            packet.set_pts(Some(pts));
+            assert_eq!(packet_timestamp(&packet).unwrap(), pts);
+        }
+    }
+
+    #[test]
+    fn forced_key_frame_is_an_idr() {
+        ffmpeg::init().unwrap();
+        let config = EncoderConfig {
+            width: 32,
+            height: 32,
+            bitrate: 100_000,
+            fps: 30,
+            keyframe_interval: 300,
+            preferred_codec: VideoCodec::H264,
+        };
+        let mut encoder = LinuxVideoEncoder {
+            config,
+            open: open_x264(config).unwrap(),
+            next_pts: 0,
+            force_keyframe: true,
+            parameter_sets: Vec::new(),
+        };
+        let pixels = vec![128; 32 * 32 * 4];
+        encoder.encode_bgra(&pixels, 128).unwrap();
+        encoder.encode_bgra(&pixels, 128).unwrap();
+        encoder.force_key_frame();
+        let output = encoder.encode_bgra(&pixels, 128).unwrap();
+        assert!(
+            output.iter().any(|frame| parse_nal_units(&frame.data)
+                .unwrap()
+                .iter()
+                .any(|nalu| nalu[0] & 31 == 5)),
+            "forced I picture must contain an IDR NAL"
+        );
+    }
+
+    #[test]
     fn converts_annex_b_to_avcc_without_padding() {
         let annex_b = [0, 0, 0, 1, 0x67, 1, 2, 0, 0, 1, 0x68, 3];
         let nalus = parse_nal_units(&annex_b).unwrap();
@@ -533,6 +706,45 @@ mod tests {
             extract_parameter_sets(VideoCodec::Hevc, &hevc_refs).len(),
             3
         );
+    }
+
+    #[test]
+    fn bitrate_reopens_codec_and_preserves_pts() {
+        ffmpeg::init().unwrap();
+        let config = EncoderConfig {
+            width: 32,
+            height: 32,
+            bitrate: 100_000,
+            fps: 30,
+            keyframe_interval: 300,
+            preferred_codec: VideoCodec::H264,
+        };
+        let mut encoder = LinuxVideoEncoder {
+            config,
+            open: open_x264(config).unwrap(),
+            next_pts: 0,
+            force_keyframe: true,
+            parameter_sets: Vec::new(),
+        };
+        let pixels = vec![128; 32 * 32 * 4];
+        encoder.encode_bgra(&pixels, 128).unwrap();
+        let old_context = unsafe { encoder.open.encoder.as_ptr() };
+        encoder.update_bitrate(200_000).unwrap();
+        assert_ne!(
+            unsafe { encoder.open.encoder.as_ptr() },
+            old_context,
+            "post-open setters do not reconfigure every backend"
+        );
+        assert_eq!(encoder.config.bitrate, 200_000);
+        let output = encoder.encode_bgra(&pixels, 128).unwrap();
+        assert_eq!(output[0].pts, 1);
+        assert!(output[0].is_key_frame);
+        assert!(parse_nal_units(&output[0].data)
+            .unwrap()
+            .iter()
+            .any(|n| n[0] & 31 == 5));
+        assert!(encoder.update_bitrate(0).is_err());
+        assert_eq!(encoder.config.bitrate, 200_000);
     }
 
     #[test]

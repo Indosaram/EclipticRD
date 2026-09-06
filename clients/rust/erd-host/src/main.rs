@@ -118,7 +118,12 @@ fn main() -> Result<()> {
         }
         #[cfg(target_os = "linux")]
         {
-            let output = cli.output.clone().or_else(erd_host::focused_output_name);
+            let monitors = erd_host::probe_hyprland_monitors();
+            let output = erd_host::resolve_output_target(
+                cli.output.clone(),
+                std::env::var("ERD_OUTPUT").ok(),
+                monitors.as_ref(),
+            );
             if let Some(name) = &output {
                 eprintln!("capturing output: {name}");
             }

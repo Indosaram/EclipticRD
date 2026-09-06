@@ -19,10 +19,14 @@ pub enum InputEventType {
     FlagsChanged = 8,
     LeftMouseDragged = 9,
     RightMouseDragged = 10,
+    MiddleMouseDown = 11,
+    MiddleMouseUp = 12,
+    Reset = 13,
+    RelativeMove = 14,
 }
 
 impl InputEventType {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 15] = [
         Self::MouseMove,
         Self::LeftMouseDown,
         Self::LeftMouseUp,
@@ -34,6 +38,10 @@ impl InputEventType {
         Self::FlagsChanged,
         Self::LeftMouseDragged,
         Self::RightMouseDragged,
+        Self::MiddleMouseDown,
+        Self::MiddleMouseUp,
+        Self::Reset,
+        Self::RelativeMove,
     ];
 }
 
@@ -53,6 +61,10 @@ impl TryFrom<u8> for InputEventType {
             8 => Ok(Self::FlagsChanged),
             9 => Ok(Self::LeftMouseDragged),
             10 => Ok(Self::RightMouseDragged),
+            11 => Ok(Self::MiddleMouseDown),
+            12 => Ok(Self::MiddleMouseUp),
+            13 => Ok(Self::Reset),
+            14 => Ok(Self::RelativeMove),
             unknown => Err(CodecError::UnknownInputEventType(unknown)),
         }
     }

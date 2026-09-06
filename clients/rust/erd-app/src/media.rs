@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     time::{Duration, Instant},
@@ -24,6 +25,12 @@ struct FrameAssembly {
     timestamp_ms: u32,
 }
 
+#[derive(Debug)]
+struct OrphanAssembly {
+    chunks: BTreeMap<u16, Vec<u8>>,
+    started: Instant,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum MediaAssemblyError {
     #[error("frame header exceeds protocol caps")]
@@ -37,7 +44,7 @@ pub enum MediaAssemblyError {
 #[derive(Debug, Default)]
 pub struct FrameAssembler {
     frames: HashMap<u32, FrameAssembly>,
-    orphans: HashMap<u32, BTreeMap<u16, Vec<u8>>>,
+    orphans: HashMap<u32, OrphanAssembly>,
     expected_frame_id: Option<u32>,
     recent_loss: VecDeque<(Instant, u64, u64)>,
     completed_frames: u64,
@@ -64,7 +71,10 @@ impl FrameAssembler {
                 *frame_id >= header.frame_id || Self::complete(assembly)
             });
         }
-        let chunks = self.orphans.remove(&header.frame_id).unwrap_or_default();
+        let chunks = self
+            .orphans
+            .remove(&header.frame_id)
+            .map_or_else(BTreeMap::new, |orphan| orphan.chunks);
         let frame_id = header.frame_id;
         let assembly = FrameAssembly {
             header,
@@ -96,12 +106,18 @@ impl FrameAssembler {
         if self.orphans.len() >= MAX_ORPHAN_FRAMES && !self.orphans.contains_key(&chunk.frame_id) {
             return Ok(None);
         }
-        let orphans = self.orphans.entry(chunk.frame_id).or_default();
-        if orphans.len() >= MAX_CHUNKS_PER_FRAME as usize {
+        let orphan = self
+            .orphans
+            .entry(chunk.frame_id)
+            .or_insert_with(|| OrphanAssembly {
+                chunks: BTreeMap::new(),
+                started: now,
+            });
+        if orphan.chunks.len() >= MAX_CHUNKS_PER_FRAME as usize {
             self.orphans.remove(&chunk.frame_id);
             return Ok(None);
         }
-        orphans.entry(chunk.chunk_index).or_insert(chunk.data);
+        orphan.chunks.entry(chunk.chunk_index).or_insert(chunk.data);
         Ok(None)
     }
 
@@ -169,6 +185,8 @@ impl FrameAssembler {
         self.frames.retain(|_, assembly| {
             now.saturating_duration_since(assembly.started) < ASSEMBLY_TIMEOUT
         });
+        self.orphans
+            .retain(|_, orphan| now.saturating_duration_since(orphan.started) < ASSEMBLY_TIMEOUT);
     }
 
     fn track_loss(&mut self, frame_id: u32, now: Instant) {
@@ -194,7 +212,7 @@ impl FrameAssembler {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CursorState {
     pub x: f32,
     pub y: f32,

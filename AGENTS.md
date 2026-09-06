@@ -1,74 +1,58 @@
 # PROJECT KNOWLEDGE BASE
 
-**Generated:** 2026-08-31 13:32:57Z
-**Commit:** 9d89884
+**Generated:** 2026-09-03 06:55:00Z
 **Branch:** main
 
 ## OVERVIEW
-Ultra-low latency macOS Remote Desktop system written in Swift, leveraging ScreenCaptureKit, VideoToolbox hardware codecs, Metal GPU rendering, and Network.framework transports.
+Ultra-low latency Remote Desktop system built 100% in Rust with a Tauri v2 desktop client (`tauri-shell`), cross-platform host daemon (`erd-host`), and modular protocol/decode/render crates.
 
 ## STRUCTURE
 ```
 .
-├── Sources/
-│   ├── HostCore/    # ScreenCaptureKit capture, VideoToolbox encoding, CGEvent input
-│   ├── ClientCore/  # Metal MTKView rendering, VideoToolbox decoding, audio playback
-│   ├── Shared/      # Packet payloads, NWConnection TCP/UDP channels, STUN/Bonjour
-│   └── App/         # SwiftUI interface, ConnectionManager coordinator, ERDTheme
-├── Tests/           # TestCLI target for protocol and codec unit tests
-├── E2ETests/        # E2ETest target for loopback streaming verification
-└── project.yml      # XcodeGen project definition
+└── clients/rust/     # Cross-platform Rust workspace
+    ├── erd-proto/    # Pure v3 wire codec, packet envelopes, ChaCha20-Poly1305 handshakes
+    ├── erd-net/      # Tokio async networking (TLS-PSK TCP, UDP-GCM, STUN, signaling)
+    ├── erd-decode/   # Video/audio decoding pipeline (FFmpeg / hardware)
+    ├── erd-render/   # GPU renderer (wgpu / Metal / Vulkan / DirectX)
+    ├── erd-app/      # Client session coordinator, pairing store, input & latency tracking
+    ├── erd-host/     # Multi-platform host daemon (DXGI, Hyprland, SCK capture; MF, VAAPI, VT encode)
+    └── tauri-shell/  # Tauri v2 desktop GUI client
 ```
 
 ## WHERE TO LOOK
 | Task | Location | Notes |
 |------|----------|-------|
-| Host Streaming & Capture | `Sources/HostCore/` | `ServerCore.swift`, `ScreenCapture.swift`, `VideoEncoder.swift` |
-| Client Decoding & Metal Canvas | `Sources/ClientCore/` | `ClientCore.swift`, `MetalRenderer.swift`, `VideoDecoder.swift` |
-| Wire Protocols & Transport | `Sources/Shared/` | `ProtocolFoundation.swift`, `TCPChannel.swift`, `UDPChannel.swift` |
-| UI & State Orchestration | `Sources/App/` | `ConnectionManager.swift`, `HomeView.swift`, `RemoteDesktopView.swift` |
+| Rust Multiplatform Host | `clients/rust/erd-host/` | `session.rs`, `capture_macos.rs`, `capture_windows.rs`, `capture_linux.rs` |
+| Rust Protocol & Framing | `clients/rust/erd-proto/` | `packet.rs`, `framing.rs`, `handshake.rs`, `control.rs` |
+| Rust Async Network Layer | `clients/rust/erd-net/` | `tls_psk.rs`, `udp_gcm.rs`, `stun.rs`, `signaling.rs` |
+| Rust Client Session & Pairing | `clients/rust/erd-app/` | `session.rs`, `pairing.rs`, `input.rs` |
+| Rust Tauri Desktop Client | `clients/rust/tauri-shell/` | `src-tauri/src/main.rs`, `src-tauri/src/lib.rs`, `ui/` |
 
 ## CODE MAP
-| Symbol | Type | Location | Refs | Role |
-|--------|------|----------|------|------|
-| `ServerCore` | class | `Sources/HostCore/ServerCore.swift` | 6 | Host session coordinator and streaming manager |
-| `ClientCore` | class | `Sources/ClientCore/ClientCore.swift` | 32 | Client session coordinator and telemetry engine |
-| `MetalRenderer` | class | `Sources/ClientCore/MetalRenderer.swift` | 7 | GPU YUV/RGB texture renderer with cursor overlay |
-| `ConnectionManager` | class | `Sources/App/ConnectionManager.swift` | 12 | App-level state machine and preset coordinator |
-| `StreamConfiguration` | struct | `Sources/Shared/ProtocolFoundation.swift` | 24 | Negotiated session quality, codec, and resolution config |
-| `UDPChannel` | class | `Sources/Shared/UDPChannel.swift` | 8 | Low-latency packet transmission wrapper over NWConnection |
-| `TCPChannel` | class | `Sources/Shared/TCPChannel.swift` | 9 | Reliable control and handshake stream wrapper over NWConnection |
-| `ERDTheme` | enum | `Sources/App/AppTheme.swift` | 530 | Design system tokens and semantic color definitions |
+| Symbol | Type | Location | Role |
+|--------|------|----------|------|
+| `HostServer` | struct | `clients/rust/erd-host/src/session.rs` | Rust cross-platform streaming daemon orchestrator |
+| `ClientSession` | struct | `clients/rust/erd-app/src/session.rs` | Rust client session manager |
+| `WireCodec` | trait | `clients/rust/erd-proto/src/lib.rs` | Rust wire protocol serialization/deserialization contract |
+| `DatagramCipher` | struct | `clients/rust/erd-net/src/udp_gcm.rs` | Direction-separated AES-GCM packet encryptor/decryptor |
+| `TlsPskStream` | struct | `clients/rust/erd-net/src/tls_psk.rs` | Authenticated TCP control stream with replay defense |
+| `HevcDecoder` | struct | `clients/rust/erd-decode/src/lib.rs` | Hardware/FFmpeg video decoder |
 
 ## CONVENTIONS
-- **macOS Native**: Prefer `Network.framework` over BSD sockets, `Metal` over CoreGraphics / AppKit drawing.
-- **XcodeGen**: All Xcode project modifications MUST be made in `project.yml`, never edited directly in `.xcodeproj`.
-- **Async/Await**: Use Swift Structured Concurrency for network lifecycle and background workers.
-- **Thread Affinity**: All SwiftUI UI modifications must dispatch on `@MainActor`; video/audio pipelines run on dedicated QoS queues.
-
-## ANTI-PATTERNS (THIS PROJECT)
-- Avoid raw pointer socket operations; use `NWConnection` or `NWListener`.
-- Do not use `NSImageView` or `NSView` for high-frequency frame presentation; use `MetalRenderer`.
-- Never commit `EclipticRD.xcodeproj` manually if it conflicts with `project.yml`.
-- Never perform frame compression, decompression, or network I/O on the main dispatch queue.
+- Pure Rust architecture: Swift / Xcode projects are completely retired.
+- Workspace commands use `--manifest-path clients/rust/Cargo.toml`.
+- Strict byte-endian consistency on wire; no blocking calls on Tokio.
+- UI mutations and state are managed via Tauri v2 commands and events.
 
 ## COMMANDS
 ```bash
-# Generate Xcode project from project.yml
-xcodegen generate
+# Rust Workspace Build & Test
+cargo build --manifest-path clients/rust/Cargo.toml
+cargo test --manifest-path clients/rust/Cargo.toml
 
-# Build App Target
-xcodebuild -scheme EclipticRD -destination 'platform=macOS' build
+# Run Tauri Desktop Client
+cargo run --manifest-path clients/rust/Cargo.toml -p tauri-shell
 
-# Headless integration tests: TestCLI is a TOOL, not a test bundle —
-# `xcodebuild -scheme TestCLI test` does NOT work. Build it, then run the binary.
-xcodebuild -scheme TestCLI -destination 'platform=macOS' build
-"$(xcodebuild -scheme TestCLI -destination 'platform=macOS' -showBuildSettings build 2>/dev/null | awk '/ BUILT_PRODUCTS_DIR/{print $3}')/TestCLI"
-
-# Unit tests (XCTest: crypto, wire protocol, pairing)
-xcodebuild -scheme EclipticRDLogicTests -destination 'platform=macOS' test
+# Headless Client E2E Test
+cargo run --manifest-path clients/rust/Cargo.toml -p erd-app --bin erd-client -- --host <IP> --frames 10
 ```
-
-## NOTES
-- Requires **macOS 13.0+** for ScreenCaptureKit and modern Metal texture caching APIs.
-- Requires Hardened Runtime with Screen Recording and Accessibility permissions enabled for capture and input injection.

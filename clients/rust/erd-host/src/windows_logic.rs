@@ -44,7 +44,9 @@ pub fn normalize_absolute_pointer(
         return (0, 0);
     }
     let local_x = finite_unit(normalized_x) * target.width.saturating_sub(1) as f64;
-    let local_y = finite_unit(normalized_y) * target.height.saturating_sub(1) as f64;
+    // Protocol convention inverts Y (1.0 - y) for legacy macOS compatibility.
+    // Invert it back so (0,0) is top-left on Windows.
+    let local_y = (1.0 - finite_unit(normalized_y)) * target.height.saturating_sub(1) as f64;
     let desktop_x = (target.x as f64 + local_x - desktop.x as f64)
         .clamp(0.0, desktop.width.saturating_sub(1) as f64);
     let desktop_y = (target.y as f64 + local_y - desktop.y as f64)
@@ -89,6 +91,26 @@ pub fn modifier_vks(modifiers: Modifiers) -> Vec<u16> {
     .into_iter()
     .filter_map(|(modifier, vk)| modifiers.contains(modifier).then_some(vk))
     .collect()
+}
+
+/// Returns Win32 MOUSEEVENTF flags for mouse button down/up events.
+pub fn mouse_button_flags(event_type: erd_proto::InputEventType) -> u32 {
+    const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+    const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
+    const MOUSEEVENTF_RIGHTUP: u32 = 0x0010;
+    const MOUSEEVENTF_MIDDLEDOWN: u32 = 0x0020;
+    const MOUSEEVENTF_MIDDLEUP: u32 = 0x0040;
+
+    match event_type {
+        erd_proto::InputEventType::LeftMouseDown => MOUSEEVENTF_LEFTDOWN,
+        erd_proto::InputEventType::LeftMouseUp => MOUSEEVENTF_LEFTUP,
+        erd_proto::InputEventType::RightMouseDown => MOUSEEVENTF_RIGHTDOWN,
+        erd_proto::InputEventType::RightMouseUp => MOUSEEVENTF_RIGHTUP,
+        erd_proto::InputEventType::MiddleMouseDown => MOUSEEVENTF_MIDDLEDOWN,
+        erd_proto::InputEventType::MiddleMouseUp => MOUSEEVENTF_MIDDLEUP,
+        _ => 0,
+    }
 }
 
 /// Stable FNV-1a clipboard hash used for content-level dedup.
@@ -272,6 +294,32 @@ mod tests {
             ),
             vec![0xA0, 0xA2, 0xA4, 0x5B]
         );
+
+        assert_eq!(
+            mouse_button_flags(erd_proto::InputEventType::LeftMouseDown),
+            0x0002
+        );
+        assert_eq!(
+            mouse_button_flags(erd_proto::InputEventType::LeftMouseUp),
+            0x0004
+        );
+        assert_eq!(
+            mouse_button_flags(erd_proto::InputEventType::RightMouseDown),
+            0x0008
+        );
+        assert_eq!(
+            mouse_button_flags(erd_proto::InputEventType::RightMouseUp),
+            0x0010
+        );
+        assert_eq!(
+            mouse_button_flags(erd_proto::InputEventType::MiddleMouseDown),
+            0x0020
+        );
+        assert_eq!(
+            mouse_button_flags(erd_proto::InputEventType::MiddleMouseUp),
+            0x0040
+        );
+        assert_eq!(mouse_button_flags(erd_proto::InputEventType::MouseMove), 0);
     }
 
     #[test]
@@ -288,15 +336,16 @@ mod tests {
             width: 2560,
             height: 1440,
         };
-        let left = normalize_absolute_pointer(0.0, 0.0, target, desktop);
-        let right = normalize_absolute_pointer(1.0, 1.0, target, desktop);
-        assert!(left.0 > 0);
-        assert_eq!(left.1, 0);
-        assert_eq!(right.1, 65_535);
-        assert!(right.0 > left.0);
+        // Wire coordinates: (0.0, 1.0) is top-left, (1.0, 0.0) is bottom-right
+        let top_left = normalize_absolute_pointer(0.0, 1.0, target, desktop);
+        let bottom_right = normalize_absolute_pointer(1.0, 0.0, target, desktop);
+        assert!(top_left.0 > 0);
+        assert_eq!(top_left.1, 0);
+        assert_eq!(bottom_right.1, 65_535);
+        assert!(bottom_right.0 > top_left.0);
         assert_eq!(
             normalize_absolute_pointer(f32::NAN, f32::INFINITY, target, desktop),
-            left
+            normalize_absolute_pointer(0.0, 0.0, target, desktop)
         );
     }
 

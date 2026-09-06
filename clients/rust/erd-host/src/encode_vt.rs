@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ffmpeg_next as ffmpeg;
 use thiserror::Error;
@@ -12,6 +13,68 @@ pub const DEFAULT_BITRATE: u32 = 8_000_000;
 pub const MIN_LAN_BITRATE: u32 = 50_000_000;
 pub const MAX_LAN_BITRATE: u32 = 150_000_000;
 pub const ENCODE_QUEUE_DEPTH: usize = 3;
+const OUTPUT_QUEUE_DEPTH: usize = 3;
+
+fn output_channel() -> (
+    OutputSender,
+    mpsc::Receiver<Result<EncodedFrame, EncodeError>>,
+) {
+    let (sender, receiver) = mpsc::sync_channel(OUTPUT_QUEUE_DEPTH);
+    (
+        OutputSender {
+            sender,
+            stop: Arc::new(OutputStop::default()),
+        },
+        receiver,
+    )
+}
+
+#[derive(Default)]
+struct OutputStop {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl OutputStop {
+    fn cancel(&self) {
+        *self.stopped.lock().expect("output stop poisoned") = true;
+        self.wake.notify_all();
+    }
+
+    fn is_stopped(&self) -> bool {
+        *self.stopped.lock().expect("output stop poisoned")
+    }
+}
+
+struct OutputSender {
+    sender: SyncSender<Result<EncodedFrame, EncodeError>>,
+    stop: Arc<OutputStop>,
+}
+
+impl OutputSender {
+    fn send(
+        &self,
+        mut frame: Result<EncodedFrame, EncodeError>,
+    ) -> Result<(), mpsc::SendError<Result<EncodedFrame, EncodeError>>> {
+        let mut stopped = self.stop.stopped.lock().expect("output stop poisoned");
+        while !*stopped {
+            match self.sender.try_send(frame) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Disconnected(frame)) => return Err(mpsc::SendError(frame)),
+                Err(TrySendError::Full(pending)) => frame = pending,
+            }
+            // std's public receiver cannot notify us when space opens. Retain
+            // this exact compressed frame until space opens or stop wakes us.
+            stopped = self
+                .stop
+                .wake
+                .wait_timeout(stopped, Duration::from_millis(5))
+                .expect("output stop poisoned")
+                .0;
+        }
+        Err(mpsc::SendError(frame))
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct EncoderConfig {
@@ -80,6 +143,7 @@ pub(crate) enum Command {
 
 pub struct VideoToolboxEncoder {
     pub(crate) sender: SyncSender<Command>,
+    stop: Arc<OutputStop>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
@@ -102,12 +166,16 @@ impl VideoToolboxEncoder {
         }
 
         let (command_tx, command_rx) = mpsc::sync_channel(ENCODE_QUEUE_DEPTH);
-        let (output_tx, output_rx) = mpsc::channel();
+        let (output_tx, output_rx) = output_channel();
+        let stop = Arc::clone(&output_tx.stop);
         let worker = thread::Builder::new()
             .name("erd-host-videotoolbox".into())
             .spawn(move || {
                 let result = EncoderWorker::new(config).and_then(|mut worker| {
                     while let Ok(command) = command_rx.recv() {
+                        if output_tx.stop.is_stopped() {
+                            return Ok(());
+                        }
                         match command {
                             Command::Frame(frame) => match worker.encode(frame) {
                                 Ok(frames) => {
@@ -138,6 +206,7 @@ impl VideoToolboxEncoder {
         Ok((
             Self {
                 sender: command_tx,
+                stop,
                 worker: Some(worker),
             },
             output_rx,
@@ -164,21 +233,22 @@ impl VideoToolboxEncoder {
             .map_err(|_| EncodeError::WorkerStopped)
     }
 
-    pub fn stop(mut self) {
-        let _ = self.sender.send(Command::Stop);
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
+    /// Cancel pending output and join, even if the output receiver is full.
+    /// Compressed output is never discarded while the encoder is active.
+    pub fn stop(self) {
+        drop(self);
     }
 }
 
 impl Drop for VideoToolboxEncoder {
     fn drop(&mut self) {
-        // A blocking send is intentional: it guarantees the worker observes
-        // Stop even when the bounded queue is full, avoiding a join deadlock.
-        let _ = self.sender.send(Command::Stop);
+        self.stop.cancel();
+        // Wake an idle worker, but never wait for space in a full command queue.
+        let _ = self.sender.try_send(Command::Stop);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            if let Err(error) = worker.join() {
+                tracing::error!(?error, "VideoToolbox worker panicked");
+            }
         }
     }
 }
@@ -330,10 +400,7 @@ impl EncoderWorker {
         }
     }
 
-    fn flush(
-        &mut self,
-        output: &mpsc::Sender<Result<EncodedFrame, EncodeError>>,
-    ) -> Result<(), EncodeError> {
+    fn flush(&mut self, output: &OutputSender) -> Result<(), EncodeError> {
         self.encoder.send_eof()?;
         for frame in self.receive_available()? {
             if output.send(Ok(frame)).is_err() {
@@ -354,8 +421,9 @@ fn normalize_hevc_packet(
     let nalus = split_nalus(packet)?;
     for nalu in &nalus {
         let kind = hevc_nalu_type(nalu).ok_or(EncodeError::MalformedHevc)?;
-        if matches!(kind, 32..=34) && !parameter_sets.iter().any(|known| known == nalu) {
-            parameter_sets.push(nalu.clone());
+        if matches!(kind, 32..=34) && !parameter_sets.iter().any(|known| known.as_slice() == *nalu)
+        {
+            parameter_sets.push(nalu.to_vec());
         }
     }
 
@@ -369,22 +437,22 @@ fn normalize_hevc_packet(
         }
     }
     for nalu in nalus {
-        if is_key_frame && hevc_nalu_type(&nalu).is_some_and(|kind| matches!(kind, 32..=34)) {
+        if is_key_frame && hevc_nalu_type(nalu).is_some_and(|kind| matches!(kind, 32..=34)) {
             continue;
         }
-        append_length_prefixed(&mut output, &nalu)?;
+        append_length_prefixed(&mut output, nalu)?;
     }
     Ok(output)
 }
 
-fn split_nalus(packet: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
+fn split_nalus(packet: &[u8]) -> Result<Vec<&[u8]>, EncodeError> {
     if let Ok(nalus) = split_avcc(packet) {
         return Ok(nalus);
     }
     split_annex_b(packet)
 }
 
-fn split_avcc(packet: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
+fn split_avcc(packet: &[u8]) -> Result<Vec<&[u8]>, EncodeError> {
     let mut offset = 0;
     let mut nalus = Vec::new();
     while offset < packet.len() {
@@ -396,7 +464,7 @@ fn split_avcc(packet: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
         if length < 2 || packet.len() - offset < length {
             return Err(EncodeError::MalformedHevc);
         }
-        nalus.push(packet[offset..offset + length].to_vec());
+        nalus.push(&packet[offset..offset + length]);
         offset += length;
     }
     if nalus.is_empty() {
@@ -405,7 +473,7 @@ fn split_avcc(packet: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
     Ok(nalus)
 }
 
-fn split_annex_b(packet: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
+fn split_annex_b(packet: &[u8]) -> Result<Vec<&[u8]>, EncodeError> {
     let mut starts = Vec::new();
     let mut index = 0;
     while index + 3 <= packet.len() {
@@ -429,7 +497,7 @@ fn split_annex_b(packet: &[u8]) -> Result<Vec<Vec<u8>>, EncodeError> {
             .map_or(packet.len(), |(next, _)| *next);
         let nalu_data = &packet[start + start_len..end];
         if !nalu_data.is_empty() {
-            nalus.push(nalu_data.to_vec());
+            nalus.push(nalu_data);
         }
     }
     if nalus.is_empty() {
@@ -453,8 +521,174 @@ fn hevc_nalu_type(nalu: &[u8]) -> Option<u8> {
 mod tests {
     use super::*;
 
+    // Keep the same capacity assertion runnable against both the unbounded
+    // baseline and bounded constructor; this adapter is test-only.
+    trait Probe {
+        fn probe(&self, frame: EncodedFrame) -> bool;
+    }
+    impl Probe for mpsc::Sender<Result<EncodedFrame, EncodeError>> {
+        fn probe(&self, frame: EncodedFrame) -> bool {
+            self.send(Ok(frame)).is_ok()
+        }
+    }
+    impl Probe for SyncSender<Result<EncodedFrame, EncodeError>> {
+        fn probe(&self, frame: EncodedFrame) -> bool {
+            self.try_send(Ok(frame)).is_ok()
+        }
+    }
+    impl Probe for OutputSender {
+        fn probe(&self, frame: EncodedFrame) -> bool {
+            self.sender.try_send(Ok(frame)).is_ok()
+        }
+    }
+    fn frame(index: u8) -> EncodedFrame {
+        let now = Instant::now();
+        EncodedFrame {
+            data: vec![index],
+            is_key_frame: index == 0,
+            capture_at: now,
+            encode_started_at: now,
+            encode_completed_at: now,
+        }
+    }
+
+    #[test]
+    fn output_queue_bounds_retention_without_dropping_references() {
+        let (sender, receiver) = output_channel();
+        for index in 0..OUTPUT_QUEUE_DEPTH {
+            assert!(sender.probe(frame(index as u8)));
+        }
+        assert!(!sender.probe(frame(99)));
+        let retained: Vec<_> = receiver
+            .try_iter()
+            .map(|result| result.unwrap().data[0])
+            .collect();
+        assert_eq!(retained, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn dropping_output_receiver_releases_publisher() {
+        let (sender, receiver) = output_channel();
+        for index in 0..OUTPUT_QUEUE_DEPTH {
+            assert!(sender.probe(frame(index as u8)));
+        }
+        assert!(!sender.probe(frame(99)));
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (exit_tx, exit_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let disconnected = sender.send(Ok(frame(3))).is_err();
+            exit_tx.send(disconnected).unwrap();
+        });
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(receiver);
+        assert!(exit_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap());
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn encoder_stop_joins_worker_after_output_receiver_drops() {
+        let (output_tx, output_rx) = output_channel();
+        let stop = Arc::clone(&output_tx.stop);
+        for index in 0..OUTPUT_QUEUE_DEPTH {
+            assert!(output_tx.probe(frame(index as u8)));
+        }
+        assert!(!output_tx.probe(frame(99)));
+        let (sender, commands) = mpsc::sync_channel(ENCODE_QUEUE_DEPTH);
+        for _ in 0..ENCODE_QUEUE_DEPTH {
+            sender.send(Command::ForceKeyFrame).unwrap();
+        }
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (exit_tx, exit_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            assert!(output_tx.send(Ok(frame(3))).is_err());
+            drop(commands);
+            exit_tx.send(()).unwrap();
+        });
+        let encoder = VideoToolboxEncoder {
+            sender,
+            stop,
+            worker: Some(worker),
+        };
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        drop(output_rx);
+        let (done_tx, done_rx) = mpsc::channel();
+        let stopper = thread::spawn(move || {
+            encoder.stop();
+            done_tx.send(()).unwrap();
+        });
+        exit_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        stopper.join().unwrap();
+    }
+
     fn nalu(kind: u8, payload: u8) -> Vec<u8> {
         vec![kind << 1, 1, payload]
+    }
+
+    #[test]
+    fn encoder_stop_joins_with_full_output_and_retained_receiver() {
+        // Given: the real public queue is full and the consumer is gated.
+        let (output_tx, output_rx) = output_channel();
+        let stop = Arc::clone(&output_tx.stop);
+        for index in 0..OUTPUT_QUEUE_DEPTH {
+            assert!(output_tx.probe(frame(index as u8)));
+        }
+        assert!(!output_tx.probe(frame(99)));
+        let (sender, commands) = mpsc::sync_channel(ENCODE_QUEUE_DEPTH);
+        for _ in 0..ENCODE_QUEUE_DEPTH {
+            sender.send(Command::ForceKeyFrame).unwrap();
+        }
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            ready_tx.send(()).unwrap();
+            let _ = output_tx.send(Ok(frame(3)));
+            drop(commands);
+        });
+        let encoder = VideoToolboxEncoder {
+            sender,
+            stop,
+            worker: Some(worker),
+        };
+        ready_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let (done_tx, done_rx) = mpsc::channel();
+        // When: stop is requested without dropping or draining the receiver.
+        let stopper = thread::spawn(move || {
+            encoder.stop();
+            done_tx.send(()).unwrap();
+        });
+        let stopped = done_rx.recv_timeout(std::time::Duration::from_secs(2));
+        // Release even on RED so no test worker is left blocked.
+        drop(output_rx);
+        stopper.join().unwrap();
+        // Then: stop joined while the full receiver was still retained.
+        assert!(
+            stopped.is_ok(),
+            "encoder stop waited for the output consumer: {stopped:?}"
+        );
+    }
+
+    #[test]
+    fn nalu_splitting_borrows_packet_storage() {
+        // Given: an AVCC P frame with no parameter-set ownership requirement.
+        let packet = [0, 0, 0, 3, 2, 1, 99];
+        // When: splitting for wire normalization.
+        let nalus = split_avcc(&packet).unwrap();
+        // Then: do not allocate and copy each compressed payload.
+        assert_eq!(nalus[0].as_ptr(), packet[4..].as_ptr());
     }
 
     #[test]

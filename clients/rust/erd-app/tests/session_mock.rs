@@ -136,6 +136,7 @@ fn handshake_ack_timeout_is_reported() {
         .bind("127.0.0.1:0")
         .unwrap();
     let tcp_address = listener.local_addr().unwrap();
+    let (completed_tx, completed_rx) = mpsc::channel();
     let server = thread::spawn(move || {
         let mut stream = listener.accept().unwrap();
         let _ = stream.read_frame().unwrap();
@@ -148,7 +149,7 @@ fn handshake_ack_timeout_is_reported() {
             .write_frame(&packet(PacketType::PairingGrant, &grant.encode().unwrap()))
             .unwrap();
         let _ = stream.read_frame().unwrap();
-        thread::sleep(Duration::from_millis(150));
+        completed_rx.recv_timeout(Duration::from_secs(10)).unwrap();
     });
     let temporary = tempfile::tempdir().unwrap();
     let config = SessionConfig {
@@ -162,11 +163,10 @@ fn handshake_ack_timeout_is_reported() {
         handshake_ack_timeout: Duration::from_millis(50),
     };
     let session = ClientSession::new(config).unwrap();
-    assert!(matches!(
-        session.pair_with_pin(pin),
-        Err(SessionError::HandshakeAckTimeout)
-    ));
+    let result = session.pair_with_pin(pin);
+    completed_tx.send(()).unwrap();
     server.join().unwrap();
+    assert!(matches!(result, Err(SessionError::HandshakeAckTimeout)));
 }
 
 #[test]
@@ -253,5 +253,89 @@ fn pre_ready_input_is_refused() {
     assert!(matches!(
         session.send_input(event),
         Err(SessionError::NotReady)
+    ));
+}
+
+#[test]
+fn stalled_consumer_retains_latest_clipboard_and_terminal_error() {
+    use erd_proto::{
+        ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdate, ControlMessage,
+    };
+    let key = [42; 32];
+    let listener = TlsPskServer::new([PskIdentity::pairing("bounded", &key).unwrap()])
+        .unwrap()
+        .bind("127.0.0.1:0")
+        .unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let temporary = tempfile::tempdir().unwrap();
+    let mut config = SessionConfig::direct("127.0.0.1", "bounded");
+    config.tcp_port = listener.local_addr().unwrap().port();
+    config.udp_port = udp.local_addr().unwrap().port();
+    config.pairing_store_path = Some(temporary.path().join("pairings.json"));
+    let (done_tx, done_rx) = mpsc::channel();
+    let server = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap();
+        stream
+            .ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let frame = stream.read_frame().unwrap();
+        let (_, payload) = split_packet(&frame);
+        stream
+            .write_frame(&packet(PacketType::HandshakeAck, payload))
+            .unwrap();
+        for index in 0..128 {
+            let update = ControlMessage::ClipboardSyncUpdate(ClipboardSyncUpdate {
+                request_id: index,
+                direction: ClipboardSyncDirection::HostToClient,
+                origin: ClipboardSyncOrigin::LocalPasteboard,
+                text: index.to_string(),
+            });
+            stream
+                .write_frame(&packet(PacketType::Control, &update.encode().unwrap()))
+                .unwrap();
+            stream.write_frame(&packet(PacketType::Ping, &[])).unwrap();
+            let pong = stream.read_frame().unwrap();
+            assert_eq!(
+                ControlMessage::decode(split_packet(&pong).1).unwrap(),
+                ControlMessage::Pong
+            );
+        }
+        done_tx.send(()).unwrap();
+    });
+    let session = ClientSession::new(config).unwrap();
+    session
+        .connect_with_pairing(erd_app::PairingRecord {
+            id: "bounded".into(),
+            name: "host".into(),
+            key: key.to_vec(),
+            added_at_unix_ms: 0,
+        })
+        .unwrap();
+    let mut runtime = session.spawn_tcp_runtime().unwrap();
+    done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+    server.join().unwrap();
+    let mut events = Vec::new();
+    loop {
+        let event = runtime
+            .events()
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap();
+        let terminal = event.is_err();
+        events.push(event);
+        if terminal {
+            break;
+        }
+    }
+    runtime.stop().unwrap();
+    session.disconnect().unwrap();
+    assert!(events.len() <= 3, "retained {} events", events.len());
+    assert!(events
+        .iter()
+        .any(|event| matches!(event, Ok(erd_app::SessionEvent::Clipboard(text)) if text == "127")));
+    assert!(matches!(
+        runtime.events().try_recv(),
+        Err(mpsc::TryRecvError::Disconnected)
     ));
 }

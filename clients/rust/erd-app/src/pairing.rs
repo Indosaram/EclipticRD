@@ -1,6 +1,5 @@
 use std::{
-    fmt,
-    fs, io,
+    fmt, fs, io,
     path::{Path, PathBuf},
 };
 
@@ -16,10 +15,7 @@ const SWIFT_REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
 pub struct PairingRecord {
     pub id: String,
     pub name: String,
-    #[serde(
-        deserialize_with = "deserialize_key",
-        serialize_with = "serialize_key"
-    )]
+    #[serde(deserialize_with = "deserialize_key", serialize_with = "serialize_key")]
     pub key: Vec<u8>,
     #[serde(
         rename = "addedAt",
@@ -242,6 +238,18 @@ impl PairingStore {
 
     pub fn load(&self, id: &str) -> Result<Option<PairingRecord>, PairingStoreError> {
         Ok(self.load_all()?.into_iter().find(|record| record.id == id))
+    }
+
+    /// Latest record whose host name matches `host_name` — the Parsec-style
+    /// "connect by computer name" lookup for reconnects without a PIN.
+    pub fn find_by_host(
+        &self,
+        host_name: &str,
+    ) -> Result<Option<PairingRecord>, PairingStoreError> {
+        Ok(self
+            .load_all()?
+            .into_iter()
+            .rfind(|record| record.name.eq_ignore_ascii_case(host_name)))
     }
 
     pub fn save(&self, record: PairingRecord) -> Result<(), PairingStoreError> {

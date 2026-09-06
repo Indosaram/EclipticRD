@@ -4,268 +4,837 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>EclipticRD</title>
-  <style>
-    :root {
-      --bg: #141416;
-      --card-bg: #1e1f24;
-      --text: #f3f4f6;
-      --text-muted: #9ca3af;
-      --accent: #3b82f6;
-      --accent-hover: #2563eb;
-      --danger: #ef4444;
-      --border: #2e3138;
-      --success: #10b981;
-    }
-    body {
-      margin: 0;
-      padding: 24px;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-    }
-    h1 {
-      font-size: 1.5rem;
-      margin-bottom: 1.5rem;
-    }
-    .panel {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 16px;
-      margin-bottom: 16px;
-      max-width: 600px;
-    }
-    .form-group {
-      display: flex;
-      flex-direction: column;
-      margin-bottom: 12px;
-    }
-    label {
-      font-size: 0.85rem;
-      color: var(--text-muted);
-      margin-bottom: 4px;
-    }
-    input {
-      background: #111215;
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      color: var(--text);
-      padding: 8px 12px;
-      font-size: 0.95rem;
-    }
-    .row {
-      display: flex;
-      gap: 12px;
-    }
-    .row .form-group {
-      flex: 1;
-    }
-    button {
-      background: var(--accent);
-      color: #fff;
-      border: none;
-      border-radius: 6px;
-      padding: 10px 16px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.15s ease;
-    }
-    button:hover {
-      background: var(--accent-hover);
-    }
-    button.danger {
-      background: var(--danger);
-    }
-    .button-row {
-      display: flex;
-      gap: 10px;
-      margin-top: 12px;
-    }
-    #status-container {
-      margin-top: 16px;
-      font-size: 0.9rem;
-      line-height: 1.5;
-    }
-    .stats-table {
-      width: 100%;
-      border-collapse: collapse;
-      margin-top: 8px;
-    }
-    .stats-table td {
-      padding: 4px 8px;
-      border-bottom: 1px solid var(--border);
-    }
-    .canvas-container {
-      margin-top: 16px;
-      border: 1px dashed var(--border);
-      border-radius: 8px;
-      width: 100%;
-      height: 200px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      color: var(--text-muted);
-      user-select: none;
-    }
-  </style>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <h1>EclipticRD Shell</h1>
 
-  <div class="panel">
-    <div class="row">
-      <div class="form-group">
-        <label for="host">Host</label>
-        <input type="text" id="host" value="127.0.0.1" />
+  <nav id="sidebar" aria-label="Computer library">
+    <div class="sidebar-header"><div class="brand-icon">E</div><div class="brand-title">EclipticRD</div></div>
+    <div class="sidebar-nav">
+      <button id="nav-computers" aria-label="Computers" aria-current="page"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></svg><span class="nav-label">Computers</span></button>
+      <button id="nav-favorites" aria-label="Favorites"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3 3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1Z"/></svg><span class="nav-label">Favorites</span></button>
+    </div>
+    <div class="sidebar-footer">EclipticRD</div>
+  </nav>
+  <main id="main-view" data-ui-scope>
+    <header class="dashboard-header"><div class="dash-titles"><h1>Computers</h1><p>Find a computer or connect by address.</p></div><button id="btn-refresh">Refresh</button></header>
+    <div class="library-toolbar">
+      <label for="host-search">Search computers</label>
+      <input id="host-search" type="search" placeholder="Name, address or OS" spellcheck="false">
+      <button id="btn-clear-search">Clear search</button>
+      <div class="filter-group" aria-label="Filter computers"><button id="filter-all" aria-pressed="true">All</button><button id="filter-available" aria-pressed="false">Available</button><button id="filter-favorites" aria-pressed="false">Favorites</button></div>
+    </div>
+    <section class="computers-section" aria-labelledby="library-heading">
+      <h2 id="library-heading">Listed computers <span id="library-count">0</span></h2>
+      <div id="library-status" role="status"></div>
+      <p>Availability is a discovery hint, not an ERD readiness check. Default testbeds may appear available without a probe.</p>
+      <div id="host-grid" role="list" aria-busy="false"></div>
+      <div id="preference-error" role="status" hidden></div>
+    </section>
+    <section class="direct-bar" aria-labelledby="direct-heading">
+      <h2 id="direct-heading">Direct connection</h2><p id="direct-help">Enter a host address. For a new pairing, enter the host's eight-digit PIN.</p>
+      <form id="direct-form" novalidate>
+        <div class="field"><label for="direct-ip">Host address</label><input id="direct-ip" spellcheck="false" autocomplete="off" aria-describedby="direct-help direct-ip-error"><span class="field-error" id="direct-ip-error"></span></div>
+        <div class="field"><label for="direct-pin">PIN (optional)</label><input id="direct-pin" type="password" inputmode="numeric" autocomplete="off" aria-describedby="direct-help direct-pin-error"><span class="field-error" id="direct-pin-error"></span></div>
+        <button id="btn-direct-connect" type="submit">Connect</button>
+        <div id="direct-error" role="alert" hidden></div>
+      </form>
+    </section>
+  </main>
+  <div id="session-error" role="alert" data-ui-scope hidden><span id="session-error-text"></span><button id="btn-retry-cleanup" hidden>Retry disconnect</button><button id="btn-dismiss-session-error">Dismiss</button></div>
+
+  <div id="viewport-container">
+    <div id="session-overlay" data-ui-scope role="group" aria-label="Session controls">
+      <div class="launcher-bar">
+        <div class="overlay-badge">
+          <div class="status-dot"></div>
+          <span id="session-host-name"></span>
+        </div>
+        <div class="overlay-stats">
+          <span id="session-stat-fps">Rendered FPS —</span>
+          <span id="session-stat-lat">Decode p50 —</span>
+        </div>
+        <button type="button" class="overlay-btn icon-only" id="btn-home" title="Home — end session and return to main screen" aria-label="Home — end session and return to main screen">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        </button>
+        <button type="button" class="overlay-btn icon-only" id="btn-expand" aria-expanded="false" aria-controls="launcher-panel" title="More session controls" aria-label="More session controls">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <button type="button" class="overlay-btn btn-disconnect" id="btn-disconnect" title="Disconnect">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
+          Disconnect
+        </button>
       </div>
-      <div class="form-group">
-        <label for="tcp-port">TCP Port</label>
-        <input type="number" id="tcp-port" value="19730" />
-      </div>
-      <div class="form-group">
-        <label for="udp-port">UDP Port</label>
-        <input type="number" id="udp-port" value="19731" />
+      <div class="launcher-panel" id="launcher-panel" role="region" aria-label="Session details" hidden>
+        <div class="section-title">Session details</div><p>Frames rendered by this client per second. Decode measures local receive-to-decode time, not network latency.</p><p id="session-stats-notice" role="status" hidden></p>
+        <dl class="stats-grid">
+          <dt>State</dt><dd id="session-stat-state">—</dd>
+          <dt>Decode p50</dt><dd id="session-stat-p50">—</dd><dt>Decode p99</dt><dd id="session-stat-p99">—</dd>
+          <dt>Frames received</dt><dd id="session-stat-frames">—</dd>
+          <dt>Frames decoded</dt><dd id="session-stat-decoded">—</dd>
+          <dt>Audio packets</dt><dd id="session-stat-audio">—</dd>
+        </dl>
+        <div class="panel-actions">
+          <button type="button" class="overlay-btn" id="btn-fullscreen" aria-pressed="false" title="Toggle fullscreen">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
+            <span id="btn-fullscreen-label">Fullscreen</span>
+          </button>
+        </div>
       </div>
     </div>
-    <div class="form-group">
-      <label for="pin">PIN / Pairing ID</label>
-      <input type="text" id="pin" placeholder="Enter PIN (e.g. 123456) or leave blank for reconnect" />
+
+    <div id="session-connecting-modal" data-ui-scope role="dialog" aria-modal="true" aria-labelledby="modal-connecting-text" hidden>
+      <div class="connection-panel"><div class="spinner" aria-hidden="true"></div><div id="modal-connecting-text" role="status"></div><p id="modal-host-name"></p><button id="btn-cancel-connect">Cancel</button></div>
     </div>
-    <div class="button-row">
-      <button id="connect-btn" onclick="doConnect()">Connect</button>
-      <button id="disconnect-btn" class="danger" onclick="doDisconnect()">Disconnect</button>
+
+    <div id="viewport" tabindex="0">
+      <canvas id="screen-canvas" aria-label="Remote desktop video; focus to send remote input" width="3840" height="1600" tabindex="0"></canvas>
+      <div id="remote-cursor" class="remote-cursor" aria-hidden="true"></div>
     </div>
   </div>
 
-  <div class="panel">
-    <h3>Session Stats</h3>
-    <div id="status-container">Disconnected</div>
-    <table class="stats-table">
-      <tr>
-        <td>Connected:</td>
-        <td id="stat-connected">false</td>
-      </tr>
-      <tr>
-        <td>Frames Decoded / Received:</td>
-        <td id="stat-frames">0</td>
-      </tr>
-      <tr>
-        <td>Audio Packets:</td>
-        <td id="stat-audio">0</td>
-      </tr>
-      <tr>
-        <td>Latency p50:</td>
-        <td id="stat-p50">-</td>
-      </tr>
-      <tr>
-        <td>Latency p99:</td>
-        <td id="stat-p99">-</td>
-      </tr>
-    </table>
-  </div>
-
-  <div class="panel">
-    <h3>Input Surface</h3>
-    <div class="canvas-container" id="input-surface">
-      Hover and click here to send input events
-    </div>
-  </div>
-
+  <script src="session-overlay.js"></script>
+  <script src="library.js"></script>
+  <script src="connection-state.js"></script>
   <script>
-    const { invoke } = window.__TAURI__.core || window.__TAURI__.tauri || {
-      invoke: async (cmd, args) => console.log('Tauri mock invoke:', cmd, args)
-    };
+    const tauriApi = window.__TAURI__ ? (window.__TAURI__.core || window.__TAURI__.tauri) : null;
+    const invoke = tauriApi
+      ? tauriApi.invoke.bind(tauriApi)
+      : async () => { throw new Error('Desktop connection controls are unavailable in this browser.'); };
 
-    async function doConnect() {
-      const host = document.getElementById('host').value.trim();
-      const tcpPort = parseInt(document.getElementById('tcp-port').value, 10);
-      const udpPort = parseInt(document.getElementById('udp-port').value, 10);
-      const pinRaw = document.getElementById('pin').value.trim();
-      const pin = pinRaw.length > 0 ? pinRaw : null;
+    let isConnected = false;
+    let renderLoopActive = false;
 
+    const canvas = document.getElementById('screen-canvas');
+    const remoteCursor = document.getElementById('remote-cursor');
+    const viewportContainer = document.getElementById('viewport-container');
+
+    function updateRemoteCursor(cx, cy, visible) {
+      if (!remoteCursor) return;
+      if (!visible || cx < 0 || cy < 0 || !canvas) {
+        remoteCursor.style.display = 'none';
+        return;
+      }
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+      const videoAspect = (canvas.width > 0 && canvas.height > 0) ? (canvas.width / canvas.height) : (16 / 9);
+      const canvasAspect = rect.width / rect.height;
+      let displayW = rect.width;
+      let displayH = rect.height;
+      let offsetX = 0;
+      let offsetY = 0;
+
+      if (canvasAspect > videoAspect) {
+        displayH = rect.height;
+        displayW = displayH * videoAspect;
+        offsetX = (rect.width - displayW) / 2;
+      } else {
+        displayW = rect.width;
+        displayH = displayW / videoAspect;
+        offsetY = (rect.height - displayH) / 2;
+      }
+
+      const px = rect.left + offsetX + cx * displayW;
+      const py = rect.top + offsetY + cy * displayH;
+      remoteCursor.style.display = 'block';
+      remoteCursor.style.transform = `translate(${px}px, ${py}px)`;
+    }
+    const connectingModal = document.getElementById('session-connecting-modal');
+
+    // Parsec-style session launcher: persistent compact bar + expandable
+    // controls. Overlay UI is a local input scope; held remote input is
+    // released whenever attention moves back to local UI.
+    const overlayRoot = document.getElementById('session-overlay');
+    const launcherPanel = document.getElementById('launcher-panel');
+    const btnExpand = document.getElementById('btn-expand');
+    const btnFullscreen = document.getElementById('btn-fullscreen');
+    const btnFullscreenLabel = document.getElementById('btn-fullscreen-label');
+    const heldInputs = SessionOverlay.createHeldInputTracker();
+    const launcherState = SessionOverlay.createOverlayState();
+    const lastPointer = { x: 0, y: 0, viewWidth: 1280, viewHeight: 800 };
+
+    launcherState.subscribe((state) => {
+      launcherPanel.hidden = !state.expanded;
+      btnExpand.setAttribute('aria-expanded', String(state.expanded));
+      btnFullscreen.setAttribute('aria-pressed', String(state.fullscreenActive));
+      btnFullscreenLabel.innerText = state.fullscreenActive ? 'Exit Fullscreen' : 'Fullscreen';
+    });
+
+    document.addEventListener('fullscreenchange', () => {
+      launcherState.setFullscreenActive(!!document.fullscreenElement);
+    });
+
+    let gl = canvas.getContext('webgl2');
+    let program = null;
+    let yTexture = null;
+    let uvTexture = null;
+    let lastRenderWidth = 0;
+    let lastRenderHeight = 0;
+
+    if (gl) {
+      const vsSource = `#version 300 es
+        in vec2 a_pos;
+        in vec2 a_texCoord;
+        out vec2 v_texCoord;
+        void main() {
+          gl_Position = vec4(a_pos, 0.0, 1.0);
+          v_texCoord = a_texCoord;
+        }
+      `;
+      const fsSource = `#version 300 es
+        precision highp float;
+        in vec2 v_texCoord;
+        out vec4 fragColor;
+        uniform sampler2D u_yPlane;
+        uniform sampler2D u_uvPlane;
+        void main() {
+          float y = (texture(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
+          vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(128.0 / 255.0, 128.0 / 255.0);
+          float u = uv.r * (255.0 / 224.0);
+          float v = uv.g * (255.0 / 224.0);
+
+          float r = y + 1.402 * v;
+          float g = y - 0.344136 * u - 0.714136 * v;
+          float b = y + 1.772 * u;
+          fragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
+        }
+      `;
+
+      function createShader(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src);
+        gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+          console.error("Shader compile error:", gl.getShaderInfoLog(s));
+        }
+        return s;
+      }
+
+      const vs = createShader(gl.VERTEX_SHADER, vsSource);
+      const fs = createShader(gl.FRAGMENT_SHADER, fsSource);
+      program = gl.createProgram();
+      gl.attachShader(program, vs);
+      gl.attachShader(program, fs);
+      gl.linkProgram(program);
+      if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        console.error("Program link error:", gl.getProgramInfoLog(program));
+      }
+      gl.useProgram(program);
+
+      const posBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        -1.0, -1.0,  1.0, -1.0, -1.0,  1.0,
+        -1.0,  1.0,  1.0, -1.0,  1.0,  1.0,
+      ]), gl.STATIC_DRAW);
+
+      const posLoc = gl.getAttribLocation(program, "a_pos");
+      gl.enableVertexAttribArray(posLoc);
+      gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+      const texBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, texBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+        0.0, 1.0,  1.0, 1.0,  0.0, 0.0,
+        0.0, 0.0,  1.0, 1.0,  1.0, 0.0,
+      ]), gl.STATIC_DRAW);
+
+      const texLoc = gl.getAttribLocation(program, "a_texCoord");
+      gl.enableVertexAttribArray(texLoc);
+      gl.vertexAttribPointer(texLoc, 2, gl.FLOAT, false, 0, 0);
+
+      yTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, yTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+      uvTexture = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, uvTexture);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+      gl.uniform1i(gl.getUniformLocation(program, "u_yPlane"), 0);
+      gl.uniform1i(gl.getUniformLocation(program, "u_uvPlane"), 1);
+    }
+
+    function renderNv12(width, height, yData, uvData) {
+      if (!gl || gl.isContextLost() || !gl.getProgramParameter(program, gl.LINK_STATUS)) return false;
+      if (lastRenderWidth !== width || lastRenderHeight !== height) {
+        canvas.width = width;
+        canvas.height = height;
+        gl.viewport(0, 0, width, height);
+        lastRenderWidth = width;
+        lastRenderHeight = height;
+
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, yTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+
+        gl.activeTexture(gl.TEXTURE1);
+        gl.bindTexture(gl.TEXTURE_2D, uvTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, width / 2, height / 2, 0, gl.RG, gl.UNSIGNED_BYTE, null);
+      }
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, yTexture);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, yData);
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, uvTexture);
+      gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width / 2, height / 2, gl.RG, gl.UNSIGNED_BYTE, uvData);
+
+      gl.drawArrays(gl.TRIANGLES, 0, 6);
+      return true;
+    }
+
+    let frameCount = 0;
+    let lastFpsCalcTime = performance.now();
+
+    let sessionGeneration = 0;
+    let videoRaf = null;
+
+    function stopPresentation() {
+      sessionGeneration = connection.token();
+      renderLoopActive = false;
+      isConnected = false;
+      cancelAnimationFrame(videoRaf);
+      videoRaf = null;
+      cancelAnimationFrame(pointerRaf);
+      pointerRaf = null;
+      // End of session: the final pending motion must reach the host before
+      // the cleanup path releases held input and disconnects, or the synthetic
+      // button-up lands at a position the host never received a drag for.
+      const event = pendingPointer;
+      pendingPointer = null;
+      if (event) invoke('send_input', { event }).catch((err) => {
+        console.error('send_input pointer error:', err);
+      });
+    }
+
+    async function pollVideoFrame(generation) {
+      if (!renderLoopActive || !connection.isCurrent(generation)) return;
+      videoRaf = null;
       try {
-        document.getElementById('status-container').innerText = 'Connecting...';
-        const res = await invoke('connect', { host, tcpPort, udpPort, pin });
-        document.getElementById('status-container').innerText = `Connected: ${JSON.stringify(res)}`;
+        const rawBuf = await invoke('poll_frame_raw');
+        if (!renderLoopActive || !connection.isCurrent(generation)) return;
+        if (rawBuf && rawBuf.byteLength >= 16) {
+          const view = new DataView(rawBuf);
+          const width = view.getUint32(0, true);
+          const height = view.getUint32(4, true);
+          const yLen = width * height;
+          const uvLen = width * (height / 2);
+
+          if (rawBuf.byteLength >= 16 + yLen + uvLen) {
+            const yData = new Uint8Array(rawBuf, 16, yLen);
+            const uvData = new Uint8Array(rawBuf, 16 + yLen, uvLen);
+            if (renderNv12(width, height, yData, uvData)) {
+              frameCount++;
+              connection.markFrameRendered(generation);
+            } else {
+              await connection.reportFrameError(generation, 'WebGL2 video rendering is unavailable');
+            }
+
+            if (rawBuf.byteLength >= 16 + yLen + uvLen + 9) {
+              const cursorOffset = 16 + yLen + uvLen;
+              const cursorX = view.getFloat32(cursorOffset, true);
+              const cursorY = view.getFloat32(cursorOffset + 4, true);
+              const cursorType = view.getUint8(cursorOffset + 8);
+              updateRemoteCursor(cursorX, cursorY, cursorType > 0);
+            }
+          }
+        }
       } catch (err) {
-        document.getElementById('status-container').innerText = `Error: ${err}`;
+        if (!connection.isCurrent(generation)) return;
+        await connection.reportFrameError(generation, err);
+      }
+      if (!renderLoopActive || !connection.isCurrent(generation)) return;
+
+      const now = performance.now();
+      if (now - lastFpsCalcTime >= 1000) {
+        const fps = Math.round((frameCount * 1000) / (now - lastFpsCalcTime));
+        document.getElementById('session-stat-fps').innerText = `Rendered FPS ${fps}`;
+        frameCount = 0;
+        lastFpsCalcTime = now;
+      }
+
+      videoRaf = requestAnimationFrame(() => pollVideoFrame(generation));
+    }
+
+    const byId = id => document.getElementById(id);
+    const library = LibraryModel.createLibrary({ invoke, nativeAvailable: !!tauriApi,
+      storage: { getItem: key => window.localStorage.getItem(key), setItem: (key, value) => window.localStorage.setItem(key, value) } });
+    const connection = ConnectionLifecycle.createConnection({ invoke, nativeAvailable: !!tauriApi, releaseInputs: releaseHeldInputs });
+    let returnFocus = null;
+    let previousPhase = null;
+    let releaseChain = Promise.resolve();
+
+    function text(id, value) { const node = byId(id); if (node.textContent !== value) node.textContent = value; }
+    function showSessionError(error) {
+      if (!error) return;
+      const str = String(error);
+      // Suppress transport teardown notices (e.g. TCP unexpected EOF, Session not initialized)
+      // that arrive asynchronously when the session is already idle or disconnecting.
+      if (!connection.snapshot().busy && (str.includes('unexpected EOF') || str.includes('Session not initialized') || str.includes('Session disconnecting'))) {
+        console.warn('Ignoring transport teardown notice while idle:', str);
+        return;
+      }
+      text('session-error-text', str);
+      byId('session-error').hidden = false;
+      // An active video must not cover a local failure/recovery surface.
+      (viewportContainer.classList.contains('active') ? overlayRoot : byId('main-view')).append(byId('session-error'));
+    }
+    function button(label, action, id) {
+      const node = document.createElement('button'); node.type = 'button'; node.textContent = label;
+      if (id) node.id = id;
+      node.addEventListener('click', action); return node;
+    }
+    const computerIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></svg>';
+    const favoriteIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3 3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1Z"/></svg>';
+    function renderHostGrid(hosts) {
+      const container = byId('host-grid');
+      const focused = document.activeElement;
+      const focusCard = focused.closest('[data-host-id]');
+      const focusAction = focused.dataset.action;
+      container.replaceChildren();
+      const state = library.snapshot();
+      for (const host of hosts) {
+        const card = document.createElement('article'); card.className = 'host-card'; card.setAttribute('role', 'listitem');
+        card.dataset.hostId = host.id; card.dataset.availability = host.online === true ? 'available' : 'offline';
+        const top = document.createElement('div'); top.className = 'card-top';
+        const icon = document.createElement('div'); icon.className = 'os-badge'; icon.innerHTML = computerIcon;
+        const info = document.createElement('div'); info.className = 'host-info';
+        for (const [className, value] of [['host-name', host.name], ['host-address', host.ip], ['host-meta', `${host.os || 'Computer'} · ${host.online === true ? 'Available' : 'Offline'} · ${host.paired ? 'Saved pairing' : 'PIN may be needed'}`]]) {
+          const node = document.createElement('div'); node.className = className; node.textContent = value;
+          if (className === 'host-name') node.title = value;
+          info.append(node);
+        }
+        const favorite = button('', () => library.toggleFavorite(host.ip)); favorite.dataset.action = 'favorite'; favorite.innerHTML = favoriteIcon;
+        favorite.setAttribute('aria-label', `Favorite ${host.name}`); favorite.title = `Favorite ${host.name}`;
+        favorite.setAttribute('aria-pressed', String(state.favoriteIps.includes(LibraryModel.normalizeHostKey(host.ip))));
+        const actions = document.createElement('div'); actions.className = 'card-actions';
+        const connect = button('Connect', () => {
+          if (host.paired) connectToHost(host.ip, host.name);
+          else { byId('direct-ip').value = host.ip; byId('direct-pin').value = ''; byId('direct-pin').focus(); }
+        });
+        connect.dataset.action = 'connect'; connect.disabled = host.online !== true || connection.snapshot().busy || !tauriApi;
+        if (host.online !== true) connect.title = 'Offline discovery record. Use Direct connection to try an address explicitly.';
+        top.append(icon, info, favorite); actions.append(connect); card.append(top, actions); container.append(card);
+        if (focusCard && focusCard.dataset.hostId === String(host.id)) (focusAction === 'favorite' ? favorite : connect).focus();
+      }
+    }
+    function renderLibrary(state) {
+      renderHostGrid(state.visibleHosts);
+      text('library-count', String(state.visibleHosts.length));
+      byId('host-grid').setAttribute('aria-busy', String(state.status === 'loading'));
+      byId('btn-refresh').disabled = state.status === 'loading' || !tauriApi;
+      byId('btn-refresh').setAttribute('aria-busy', String(state.status === 'loading'));
+      byId('filter-all').setAttribute('aria-pressed', String(!state.availableOnly && !state.favoritesOnly));
+      byId('filter-available').setAttribute('aria-pressed', String(state.availableOnly));
+      byId('filter-favorites').setAttribute('aria-pressed', String(state.favoritesOnly));
+      byId('nav-computers').setAttribute('aria-current', state.favoritesOnly ? 'false' : 'page');
+      byId('nav-favorites').setAttribute('aria-current', state.favoritesOnly ? 'page' : 'false');
+      const status = byId('library-status'); status.replaceChildren();
+      let kind = 'ready', message = '';
+      if (state.status === 'unavailable') { kind = 'unavailable'; message = 'Desktop connection controls are unavailable in this browser.'; }
+      else if (state.status === 'error') { kind = 'error'; message = `Computers not refreshed: ${state.error}`; }
+      else if (state.status === 'loading') { kind = 'loading'; message = 'Loading computers'; }
+      else if (!state.hosts.length) { kind = 'empty'; message = 'No computers listed. Connect by address below.'; }
+      else if (!state.visibleHosts.length) {
+        kind = state.query.trim() ? 'no-match' : state.favoritesOnly ? 'empty-favorites' : 'empty-available';
+        message = kind === 'no-match' ? 'No matching computers.' : kind === 'empty-favorites' ? 'No favorites here. Star a computer to keep it in this local view.' : 'No available computers match these filters.';
+      }
+      status.dataset.state = kind; status.append(document.createTextNode(message));
+      if (kind === 'error') status.append(button('Retry', refreshHosts, 'btn-retry-hosts'));
+      if (kind === 'no-match') status.append(button('Clear search', clearSearch));
+      if (kind.startsWith('empty-')) status.append(button('Clear filters', () => library.clearFilters()));
+      if (kind === 'empty') status.append(button('Enter address', () => byId('direct-ip').focus()));
+      text('preference-error', state.preferenceError || ''); byId('preference-error').hidden = !state.preferenceError;
+    }
+    function clearSearch() { byId('host-search').value = ''; library.setQuery(''); byId('host-search').focus(); }
+    function refreshHosts() { return library.refresh(); }
+    function connectToHost(ip, name, pin = null) {
+      if (!connection.snapshot().busy) returnFocus = document.activeElement;
+      return connection.connect({ host: ip, name, pin });
+    }
+    function connectDirect() { return connectToHost(byId('direct-ip').value, byId('direct-ip').value.trim(), byId('direct-pin').value); }
+    function cancelConnecting() { return connection.cancel(); }
+    function doDisconnect() { return connection.disconnect(); }
+    function endSessionToHome() { return doDisconnect(); }
+    function releaseHeldInputs() {
+      flushPointerMotion();
+      const events = heldInputs.releaseEvents(lastPointer.x, lastPointer.y, lastPointer.viewWidth, lastPointer.viewHeight);
+      if (!events.length || !connection.snapshot().busy) return Promise.resolve();
+      const release = releaseChain.then(async () => {
+        const errors = [];
+        for (const event of events) {
+          try { await invoke('send_input', { event }); }
+          catch (error) { errors.push(String(error)); }
+        }
+        if (errors.length) throw new Error(errors.join('\n'));
+      });
+      // Keep serialization usable for later sessions; the returned operation
+      // still rejects for lifecycle cleanup and the original error stays visible.
+      releaseChain = release.catch((err) => {
+        if (connection.snapshot().busy) {
+          showSessionError(err);
+        }
+      });
+      return release;
+    }
+    function releaseLocalInputs() {
+      if (!isConnected || !connection.snapshot().busy) return;
+      releaseHeldInputs().catch((err) => {
+        if (isConnected) showSessionError(err);
+      });
+    }
+
+    function renderConnection(state) {
+      const phaseChanged = state.phase !== previousPhase;
+      const visible = ['connecting', 'waiting-video', 'streaming', 'disconnecting'].includes(state.phase);
+      const modal = visible && state.phase !== 'streaming';
+      isConnected = state.phase === 'streaming';
+      viewportContainer.dataset.phase = state.phase;
+      viewportContainer.classList.toggle('active', visible);
+      setSessionChromeInert(visible);
+      connectingModal.hidden = !modal;
+      overlayRoot.inert = modal;
+      byId('viewport').inert = state.phase !== 'streaming';
+      byId('btn-cancel-connect').disabled = state.phase === 'disconnecting';
+      text('modal-connecting-text', state.phase === 'waiting-video' ? 'Waiting for video' : state.phase === 'disconnecting' ? 'Disconnecting; waiting for cleanup' : 'Connecting');
+      text('modal-host-name', state.host ? state.host.name : '');
+      text('session-host-name', state.host ? state.host.name : '');
+      text('session-stat-state', state.phase);
+      for (const [field, key, message] of [['direct-ip', 'host', 'Enter a host address.'], ['direct-pin', 'pin', 'Use exactly eight ASCII digits, or leave PIN blank for saved pairing.']]) {
+        byId(field).setAttribute('aria-invalid', String(!!state.fieldErrors[key]));
+        text(field + '-error', state.fieldErrors[key] ? message : '');
+        byId(field).disabled = state.busy || !tauriApi;
+      }
+      byId('btn-direct-connect').disabled = state.busy || !tauriApi;
+      byId('btn-direct-connect').setAttribute('aria-busy', String(state.busy));
+      text('btn-direct-connect', state.busy ? 'Connecting…' : 'Connect');
+      for (const card of byId('host-grid').children) card.querySelector('[data-action="connect"]').disabled = state.busy || !tauriApi || card.dataset.availability !== 'available';
+      text('direct-error', state.error || ''); byId('direct-error').hidden = !state.error;
+      byId('btn-retry-cleanup').hidden = !state.cleanupError;
+      if (state.cleanupError) showSessionError(state.cleanupError);
+      if (state.statsStatus === 'error') text('session-stat-fps', 'Rendered FPS —');
+      const stats = state.statsStatus === 'ready' ? state.stats : null;
+      const ms = value => value == null ? '—' : `${value.toFixed(1)} ms`;
+      text('session-stat-lat', `Decode p50 ${ms(stats?.latency_p50_ms)}`);
+      text('session-stat-p50', ms(stats?.latency_p50_ms)); text('session-stat-p99', ms(stats?.latency_p99_ms));
+      for (const [id, key] of [['frames', 'frames_received'], ['decoded', 'frames_decoded'], ['audio', 'audio_packets_received']]) text('session-stat-' + id, stats?.[key] == null ? '—' : String(stats[key]));
+      text('session-stats-notice', state.statsError || ''); byId('session-stats-notice').hidden = !state.statsError;
+      if (!connection.isCurrent(connection.token())) {
+        stopPresentation(); text('session-stat-fps', 'Rendered FPS —');
+      } else if (!renderLoopActive) {
+        renderLoopActive = true; sessionGeneration = connection.token(); frameCount = 0; lastFpsCalcTime = performance.now();
+        const generation = sessionGeneration;
+        videoRaf = requestAnimationFrame(() => pollVideoFrame(generation));
+      }
+      previousPhase = state.phase;
+      if (phaseChanged) {
+        if (state.phase === 'connecting') { byId('direct-pin').value = ''; byId('session-error').hidden = true; }
+        if (modal) byId('btn-cancel-connect').focus();
+        if (state.phase === 'streaming') canvas.focus();
+        if (!visible) {
+          byId('direct-pin').value = ''; launcherState.setExpanded(false);
+          if (gl) gl.clear(gl.COLOR_BUFFER_BIT);
+          if (document.fullscreenElement) document.exitFullscreen().catch(showSessionError);
+          if (nativeFullscreenActive) exitNativeFullscreen();
+          byId('main-view').append(byId('session-error'));
+          if (returnFocus) { (returnFocus.isConnected && !returnFocus.disabled ? returnFocus : byId('host-search')).focus(); returnFocus = null; }
+        }
       }
     }
 
-    async function doDisconnect() {
+    function toggleLauncherPanel() {
+      launcherState.toggleExpanded();
+    }
+
+    let nativeFullscreenActive = false;
+
+    async function exitNativeFullscreen() {
       try {
-        await invoke('disconnect');
-        document.getElementById('status-container').innerText = 'Disconnected';
+        const tauriWindow = window.__TAURI__ && window.__TAURI__.window
+          ? window.__TAURI__.window.getCurrentWindow()
+          : null;
+        if (tauriWindow) {
+          await tauriWindow.setFullscreen(false);
+          nativeFullscreenActive = false;
+          launcherState.setFullscreenActive(false);
+        }
       } catch (err) {
-        document.getElementById('status-container').innerText = `Error disconnecting: ${err}`;
+        showSessionError(err);
       }
     }
 
-    async function updateStats() {
+    async function toggleSessionFullscreen() {
+      // Never stack element fullscreen on top of a native fullscreen
+      // window; the first toggle leaves native fullscreen instead.
+      if (nativeFullscreenActive) {
+        await exitNativeFullscreen();
+        return;
+      }
       try {
-        const stats = await invoke('stats');
-        document.getElementById('stat-connected').innerText = stats.connected;
-        document.getElementById('stat-frames').innerText = `${stats.frames_decoded} (assembled: ${stats.frames_received})`;
-        document.getElementById('stat-audio').innerText = stats.audio_packets_received;
-        document.getElementById('stat-p50').innerText = stats.latency_p50_ms != null ? `${stats.latency_p50_ms.toFixed(2)} ms` : 'n/a';
-        document.getElementById('stat-p99').innerText = stats.latency_p99_ms != null ? `${stats.latency_p99_ms.toFixed(2)} ms` : 'n/a';
-      } catch (e) {}
+        if (document.fullscreenElement) {
+          await document.exitFullscreen();
+          return;
+        }
+        await viewportContainer.requestFullscreen();
+        return;
+      } catch (err) {
+        console.error('Element fullscreen unavailable, trying window API:', err);
+      }
+      try {
+        const tauriWindow = window.__TAURI__ && window.__TAURI__.window
+          ? window.__TAURI__.window.getCurrentWindow()
+          : null;
+        if (tauriWindow) {
+          const active = await tauriWindow.isFullscreen();
+          await tauriWindow.setFullscreen(!active);
+          nativeFullscreenActive = !active;
+          launcherState.setFullscreenActive(nativeFullscreenActive);
+        } else {
+          throw new Error('Fullscreen is unavailable on this surface.');
+        }
+      } catch (err) {
+        showSessionError(err);
+      }
     }
 
-    setInterval(updateStats, 500);
+    function setSessionChromeInert(inert) {
+      document.getElementById('sidebar').inert = inert;
+      document.getElementById('main-view').inert = inert;
+    }
 
-    const surface = document.getElementById('input-surface');
-    surface.addEventListener('mousemove', (e) => {
-      const rect = surface.getBoundingClientRect();
-      invoke('send_input', {
-        event: {
-          event_type: 'MouseMove',
-          x: e.clientX - rect.left,
-          y: e.clientY - rect.top,
-          view_width: rect.width,
-          view_height: rect.height,
-          modifiers: 0,
-          scroll_dx: 0.0,
-          scroll_dy: 0.0
-        }
-      }).catch(() => {});
-    });
+    setInterval(() => connection.refreshStats(), 500);
 
-    surface.addEventListener('mousedown', (e) => {
-      const rect = surface.getBoundingClientRect();
-      const eventType = e.button === 2 ? 'RightMouseDown' : 'LeftMouseDown';
-      invoke('send_input', {
-        event: {
+    let pendingPointer = null;
+    let pointerRaf = null;
+
+    function flushPointerMotion() {
+      cancelAnimationFrame(pointerRaf);
+      pointerRaf = null;
+      const event = pendingPointer;
+      pendingPointer = null;
+      if (isConnected && event) {
+        invoke('send_input', { event }).catch((err) => {
+          console.error('send_input pointer error:', err);
+        });
+      }
+    }
+    function sendPointerEvent(eventType, e) {
+      if (!isConnected) return;
+      const isMotion = (eventType === 'MouseMove' || eventType === 'LeftMouseDragged' || eventType === 'RightMouseDragged');
+      if (!isMotion) flushPointerMotion();
+
+      const rect = canvas.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const videoAspect = (canvas.width > 0 && canvas.height > 0) ? (canvas.width / canvas.height) : (16 / 9);
+      const canvasAspect = rect.width / rect.height;
+      let displayW = rect.width;
+      let displayH = rect.height;
+      let offsetX = 0;
+      let offsetY = 0;
+
+      if (canvasAspect > videoAspect) {
+        displayH = rect.height;
+        displayW = displayH * videoAspect;
+        offsetX = (rect.width - displayW) / 2;
+      } else {
+        displayW = rect.width;
+        displayH = displayW / videoAspect;
+        offsetY = (rect.height - displayH) / 2;
+      }
+
+      const rawX = e.clientX - rect.left - offsetX;
+      const rawY = e.clientY - rect.top - offsetY;
+      const clampedX = Math.max(0, Math.min(rawX, displayW));
+      const clampedY = Math.max(0, Math.min(rawY, displayH));
+
+      lastPointer.x = clampedX;
+      lastPointer.y = clampedY;
+      lastPointer.viewWidth = displayW;
+      lastPointer.viewHeight = displayH;
+
+      let mod = 0;
+      if (e.shiftKey) mod |= 1;
+      if (e.ctrlKey) mod |= 2;
+      if (e.altKey) mod |= 4;
+      if (e.metaKey) mod |= 8;
+
+      const event = {
           event_type: eventType,
-          x: e.clientX - rect.left,
-          y: e.clientY - rect.top,
-          view_width: rect.width,
-          view_height: rect.height,
-          modifiers: 0,
+          x: clampedX,
+          y: clampedY,
+          view_width: displayW,
+          view_height: displayH,
+          modifiers: mod,
           scroll_dx: 0.0,
           scroll_dy: 0.0
-        }
-      }).catch(() => {});
+      };
+      if (isMotion) {
+        pendingPointer = event;
+        if (pointerRaf === null) pointerRaf = requestAnimationFrame(flushPointerMotion);
+        return;
+      }
+      invoke('send_input', { event }).catch((err) => {
+        console.error("send_input pointer error:", err);
+      });
+    }
+
+    const viewport = document.getElementById('viewport');
+
+    viewport.addEventListener('mousedown', (e) => {
+      if (!isConnected) return;
+      viewport.focus();
+      canvas.focus();
+      const button = e.button === 2 ? 'right' : 'left';
+      heldInputs.mouseDown(button);
+      sendPointerEvent(button === 'right' ? 'RightMouseDown' : 'LeftMouseDown', e);
     });
 
-    surface.addEventListener('mouseup', (e) => {
-      const rect = surface.getBoundingClientRect();
-      const eventType = e.button === 2 ? 'RightMouseUp' : 'LeftMouseUp';
+    window.addEventListener('mouseup', (e) => {
+      const button = e.button === 2 ? 'right' : 'left';
+      if (heldInputs.isButtonDown(button)) {
+        heldInputs.mouseUp(button);
+        sendPointerEvent(button === 'right' ? 'RightMouseUp' : 'LeftMouseUp', e);
+      }
+    });
+
+    // Touching the overlay is a context switch: drop anything held on the
+    // remote so keys/buttons cannot stick while the user operates local UI.
+    overlayRoot.addEventListener('pointerdown', (e) => {
+      if (e.target && (e.target.closest('#btn-home') || e.target.closest('#btn-disconnect'))) {
+        return; // Disconnect actions explicitly manage their own input release sequence
+      }
+      releaseLocalInputs();
+    });
+
+    // Keyboard focus entering the overlay is the same context switch: the
+    // matching keyup would now target local UI and never reach the host,
+    // leaving the remote key stuck.
+    overlayRoot.addEventListener('focusin', () => {
+      releaseLocalInputs();
+    });
+
+    window.addEventListener('blur', releaseLocalInputs);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) releaseLocalInputs();
+    });
+
+    viewport.addEventListener('mousemove', (e) => {
+      if (heldInputs.isButtonDown('left') || heldInputs.isButtonDown('right')) {
+        sendPointerEvent(e.buttons === 2 ? 'RightMouseDragged' : 'LeftMouseDragged', e);
+      } else {
+        sendPointerEvent('MouseMove', e);
+      }
+    });
+
+    viewport.addEventListener('contextmenu', (e) => e.preventDefault());
+
+    viewport.addEventListener('wheel', (e) => {
+      if (!isConnected) return;
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const rawX = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+      const rawY = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
+
       invoke('send_input', {
         event: {
-          event_type: eventType,
-          x: e.clientX - rect.left,
-          y: e.clientY - rect.top,
+          event_type: 'ScrollWheel',
+          x: rawX,
+          y: rawY,
           view_width: rect.width,
           view_height: rect.height,
           modifiers: 0,
-          scroll_dx: 0.0,
-          scroll_dy: 0.0
+          scroll_dx: e.deltaX,
+          scroll_dy: e.deltaY
         }
-      }).catch(() => {});
+      }).catch(showSessionError);
+    }, { passive: false });
+
+    window.addEventListener('keydown', (e) => {
+      if (!SessionOverlay.shouldForwardKeyboardEvent(e)) {
+        // Focus is on local UI (launcher, modal, dashboard, inputs): never
+        // leak keys to the remote host. Escape collapses the launcher panel.
+        if (e.key === 'Escape' && launcherState.getExpanded()) {
+          launcherState.setExpanded(false);
+          btnExpand.focus();
+        }
+        return;
+      }
+      if (!isConnected) return;
+      if (e.repeat) return;
+
+      let mod = 0;
+      if (e.shiftKey) mod |= 1;
+      if (e.ctrlKey) mod |= 2;
+      if (e.altKey) mod |= 4;
+      if (e.metaKey) mod |= 8;
+
+      heldInputs.keyDown(e.keyCode, mod);
+      invoke('send_input', {
+        event: {
+          event_type: 'KeyDown',
+          key_code: e.keyCode,
+          modifiers: mod,
+          view_width: canvas.clientWidth || 1280,
+          view_height: canvas.clientHeight || 800
+        }
+      }).catch((err) => {
+        console.error("send_input keydown error:", err);
+      });
     });
 
-    surface.addEventListener('contextmenu', (e) => e.preventDefault());
+    window.addEventListener('keyup', (e) => {
+      if (!SessionOverlay.shouldForwardKeyboardEvent(e)) return;
+      if (!isConnected) return;
+
+      let mod = 0;
+      if (e.shiftKey) mod |= 1;
+      if (e.ctrlKey) mod |= 2;
+      if (e.altKey) mod |= 4;
+      if (e.metaKey) mod |= 8;
+
+      heldInputs.keyUp(e.keyCode);
+      invoke('send_input', {
+        event: {
+          event_type: 'KeyUp',
+          key_code: e.keyCode,
+          modifiers: mod,
+          view_width: canvas.clientWidth || 1280,
+          view_height: canvas.clientHeight || 800
+        }
+      }).catch((err) => {
+        console.error("send_input keyup error:", err);
+      });
+    });
+
+    byId('direct-form').addEventListener('submit', event => { event.preventDefault(); connectDirect(); });
+    byId('host-search').addEventListener('input', event => library.setQuery(event.target.value));
+    byId('btn-clear-search').addEventListener('click', clearSearch);
+    byId('btn-refresh').addEventListener('click', refreshHosts);
+    byId('filter-all').addEventListener('click', () => library.clearFilters());
+    byId('filter-available').addEventListener('click', () => library.setAvailableOnly(!library.snapshot().availableOnly));
+    byId('filter-favorites').addEventListener('click', () => library.setFavoritesOnly(!library.snapshot().favoritesOnly));
+    byId('nav-computers').addEventListener('click', () => library.clearFilters());
+    byId('nav-favorites').addEventListener('click', () => library.setFavoritesOnly(true));
+    for (const [id, action] of [['btn-home', endSessionToHome], ['btn-disconnect', doDisconnect], ['btn-expand', toggleLauncherPanel], ['btn-fullscreen', toggleSessionFullscreen], ['btn-cancel-connect', cancelConnecting], ['btn-retry-cleanup', () => connection.retryCleanup()]]) byId(id).addEventListener('click', action);
+    byId('btn-dismiss-session-error').addEventListener('click', () => { byId('session-error').hidden = true; });
+    connectingModal.addEventListener('keydown', event => {
+      if (event.key === 'Tab') { event.preventDefault(); byId('btn-cancel-connect').focus(); }
+    });
+    document.addEventListener('focusin', event => { if (!SessionOverlay.shouldForwardKeyboardEvent(event)) releaseLocalInputs(); });
+    library.subscribe(renderLibrary); connection.subscribe(renderConnection);
+    renderLibrary(library.snapshot()); renderConnection(connection.snapshot());
+    window.addEventListener('DOMContentLoaded', refreshHosts);
   </script>
 </body>
 </html>

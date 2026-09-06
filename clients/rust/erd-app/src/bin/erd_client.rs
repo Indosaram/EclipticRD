@@ -10,7 +10,12 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use erd_app::{ClientSession, LatencyRecorder, PairingRecord, SessionConfig, SessionEvent};
+use erd_app::{
+    agent_input::ScreenInfo,
+    agent_server::{AgentServer, AgentServerBackend},
+    mcp_server::run_mcp_stdio,
+    ClientSession, LatencyRecorder, PairingRecord, PairingStore, SessionConfig, SessionEvent,
+};
 use erd_decode::HevcDecoder;
 use erd_proto::{Capabilities, ControlMessage, InputEvent, InputEventType, Modifiers};
 use tracing::{debug, error, info, warn};
@@ -76,6 +81,299 @@ struct Cli {
     /// Name of client sent in handshake.
     #[arg(long, default_value = "erd-headless-client")]
     client_name: String,
+
+    /// Start local HTTP/WS agent server on given port (default 19735).
+    #[arg(long)]
+    agent_server: Option<Option<u16>>,
+
+    /// Start stdio Model Context Protocol (MCP) server for direct agent driving.
+    #[arg(long)]
+    mcp: bool,
+}
+
+type LatestFrameHolder = Arc<std::sync::Mutex<Option<(u32, u32, Arc<Vec<u8>>)>>>;
+
+#[derive(Clone)]
+struct ClientBackend {
+    session: ClientSession,
+    screen_info: ScreenInfo,
+    latest_frame: LatestFrameHolder,
+    running: Arc<AtomicBool>,
+}
+
+impl AgentServerBackend for ClientBackend {
+    fn send_input_event(&self, event: erd_proto::InputEvent) -> std::result::Result<(), String> {
+        self.session.send_input(event).map_err(|e| e.to_string())
+    }
+
+    fn get_screen_info(&self) -> ScreenInfo {
+        self.screen_info.clone()
+    }
+
+    fn get_latest_frame_nv12(&self) -> Option<(u32, u32, Arc<Vec<u8>>)> {
+        self.latest_frame.lock().ok()?.clone()
+    }
+
+    fn supports_session_disconnect(&self) -> bool {
+        true
+    }
+
+    fn try_disconnect_session(&self) -> std::result::Result<(), String> {
+        // Flip the CLI's own lifecycle flag: the existing main loop then runs
+        // its normal cleanup (frame queue stop, Disconnect/BYE, TCP stop,
+        // session disconnect) exactly as on a timeout shutdown.
+        self.running.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+fn store_latest_frame(
+    latest_frame: &LatestFrameHolder,
+    last: &erd_decode::Nv12Frame,
+    enabled: bool,
+) {
+    if !enabled {
+        return;
+    }
+    if let Ok(mut lock) = latest_frame.lock() {
+        let w = last.width as usize;
+        let h = last.height as usize;
+        let y_len = w * h;
+        let uv_len = w * (h / 2);
+        let mut buf = Vec::with_capacity(y_len + uv_len);
+        if last.y_plane.len() >= y_len {
+            buf.extend_from_slice(&last.y_plane[..y_len]);
+        } else {
+            buf.extend_from_slice(&last.y_plane);
+            buf.resize(y_len, 0);
+        }
+        if last.uv_plane.len() >= uv_len {
+            buf.extend_from_slice(&last.uv_plane[..uv_len]);
+        } else {
+            buf.extend_from_slice(&last.uv_plane);
+            buf.resize(y_len + uv_len, 128);
+        }
+        *lock = Some((last.width, last.height, Arc::new(buf)));
+    }
+}
+
+const FRAME_QUEUE_CAPACITY: usize = 4;
+type QueuedFrame = (erd_app::AssembledFrame, Instant);
+
+#[cfg(test)]
+#[path = "erd_client/continuity_codec_tests.rs"]
+mod continuity_codec_tests;
+
+#[cfg(test)]
+mod continuity_tests {
+    use super::*;
+
+    fn frame(id: u32, key: bool) -> QueuedFrame {
+        (
+            erd_app::AssembledFrame {
+                header: erd_proto::FrameHeader {
+                    frame_id: id,
+                    width: 2,
+                    height: 2,
+                    is_key_frame: key,
+                    total_chunks: 1,
+                    total_size: 1,
+                },
+                data: vec![1],
+                timestamp_ms: 0,
+            },
+            Instant::now(),
+        )
+    }
+
+    #[test]
+    fn upstream_gap_suppresses_dependents_until_keyframe() {
+        // Given: an intact frame already consumed, with no queue pressure.
+        let queue = FrameQueue::new();
+        assert!(!queue.push(frame(0, true)).unwrap());
+        queue.recv_timeout(Duration::ZERO).unwrap();
+        // When: a reference never arrives, then later dependents and an IDR do.
+        let requests: Vec<_> = [(2, false), (3, false), (8, true), (9, false)]
+            .into_iter()
+            .map(|(id, key)| queue.push(frame(id, key)).unwrap())
+            .collect();
+        // Then: one recovery request and only the independent new chain.
+        assert_eq!(requests, [true, false, false, false]);
+        assert_eq!(
+            queue
+                .recv_timeout(Duration::ZERO)
+                .unwrap()
+                .0
+                .header
+                .frame_id,
+            8
+        );
+        assert_eq!(
+            queue
+                .recv_timeout(Duration::ZERO)
+                .unwrap()
+                .0
+                .header
+                .frame_id,
+            9
+        );
+        assert!(matches!(
+            queue.recv_timeout(Duration::ZERO),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn late_frames_cannot_reenter_a_recovered_chain() {
+        // Given: recovery has admitted a new independent frame.
+        let queue = FrameQueue::new();
+        queue.push(frame(8, true)).unwrap();
+        // When: a late dependent and duplicate keyframe complete afterward.
+        assert!(!queue.push(frame(7, false)).unwrap());
+        assert!(!queue.push(frame(8, true)).unwrap());
+        assert!(!queue.push(frame(9, false)).unwrap());
+        // Then: only the ordered new chain is delivered.
+        assert_eq!(
+            queue
+                .recv_timeout(Duration::ZERO)
+                .unwrap()
+                .0
+                .header
+                .frame_id,
+            8
+        );
+        assert_eq!(
+            queue
+                .recv_timeout(Duration::ZERO)
+                .unwrap()
+                .0
+                .header
+                .frame_id,
+            9
+        );
+        assert!(matches!(
+            queue.recv_timeout(Duration::ZERO),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+    }
+
+    #[test]
+    fn frame_ids_wrap_without_false_recovery() {
+        // Given: an independent picture immediately before the counter wraps.
+        let queue = FrameQueue::new();
+        queue.push(frame(u32::MAX, true)).unwrap();
+        // When: sequential wrapped frames arrive.
+        assert!(!queue.push(frame(0, false)).unwrap());
+        assert!(!queue.push(frame(1, false)).unwrap());
+        // Then: wrapping preserves the continuous chain.
+        for id in [u32::MAX, 0, 1] {
+            assert_eq!(
+                queue
+                    .recv_timeout(Duration::ZERO)
+                    .unwrap()
+                    .0
+                    .header
+                    .frame_id,
+                id
+            );
+        }
+    }
+}
+
+struct FrameQueue {
+    state: std::sync::Mutex<FrameQueueState>,
+    ready: std::sync::Condvar,
+}
+
+struct FrameQueueState {
+    frames: std::collections::VecDeque<QueuedFrame>,
+    last_frame_id: Option<u32>,
+    recovering: bool,
+    stopped: bool,
+}
+
+impl FrameQueue {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(FrameQueueState {
+                frames: std::collections::VecDeque::with_capacity(FRAME_QUEUE_CAPACITY),
+                last_frame_id: None,
+                recovering: false,
+                stopped: false,
+            }),
+            ready: std::sync::Condvar::new(),
+        }
+    }
+
+    fn push(&self, frame: QueuedFrame) -> Result<bool> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("frame queue poisoned"))?;
+        if state.stopped {
+            bail!("frame queue stopped");
+        }
+        let key = frame.0.header.is_key_frame;
+        let id = frame.0.header.frame_id;
+        let mut discontinuity = false;
+        if let Some(last) = state.last_frame_id {
+            let advance = id.wrapping_sub(last);
+            // Half-range serial ordering rejects late frames across u32 wrap.
+            if advance == 0 || advance >= (1 << 31) {
+                return Ok(false);
+            }
+            discontinuity = advance != 1;
+        }
+        state.last_frame_id = Some(id);
+        let mut request_keyframe = false;
+        if discontinuity || state.frames.len() == FRAME_QUEUE_CAPACITY {
+            // Dropping a reference invalidates the entire pending chain.
+            state.frames.clear();
+            request_keyframe = !state.recovering && !key;
+            state.recovering = true;
+        }
+        if state.recovering && !key {
+            return Ok(request_keyframe);
+        }
+        state.recovering = false;
+        state.frames.push_back(frame);
+        self.ready.notify_one();
+        Ok(request_keyframe)
+    }
+
+    fn recv_timeout(
+        &self,
+        timeout: Duration,
+    ) -> std::result::Result<QueuedFrame, mpsc::RecvTimeoutError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)?;
+        let (mut state, _) = self
+            .ready
+            .wait_timeout_while(state, timeout, |state| {
+                state.frames.is_empty() && !state.stopped
+            })
+            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)?;
+        if state.stopped {
+            return Err(mpsc::RecvTimeoutError::Disconnected);
+        }
+        state
+            .frames
+            .pop_front()
+            .ok_or(mpsc::RecvTimeoutError::Timeout)
+    }
+
+    fn stop(&self) -> Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| anyhow::anyhow!("frame queue poisoned"))?;
+        state.stopped = true;
+        state.frames.clear();
+        self.ready.notify_all();
+        Ok(())
+    }
 }
 
 fn parse_hex_32(hex_str: &str) -> Result<Vec<u8>> {
@@ -106,7 +404,7 @@ fn main() -> Result<()> {
     run_client(cli)
 }
 
-fn run_client(cli: Cli) -> Result<()> {
+fn run_client(mut cli: Cli) -> Result<()> {
     let udp_port = cli.udp_port.unwrap_or_else(|| {
         if cli.tcp_port == DEFAULT_TCP_PORT {
             DEFAULT_UDP_PORT
@@ -140,6 +438,45 @@ fn run_client(cli: Cli) -> Result<()> {
 
     let session =
         ClientSession::new(session_config).context("failed to construct ClientSession")?;
+
+    // Parsec-style reconnect: with no --pin/--psk-hex/--pairing-id, match the
+    // stored pairing record by computer (host) name or latest matching pairing.
+    if cli.pin.is_none() && cli.psk_hex.is_none() && cli.pairing_id.is_none() {
+        let store = match cli.pairing_store.clone() {
+            Some(path) => PairingStore::new(path),
+            None => PairingStore::open_default()?,
+        };
+        let matched = match store.find_by_host(&cli.host) {
+            Ok(Some(record)) => Some(record),
+            _ => {
+                if let Ok(records) = store.load_all() {
+                    records.into_iter().rev().find(|r| {
+                        cli.host.eq_ignore_ascii_case(&r.name)
+                            || cli.host.starts_with(&r.name)
+                            || (cli.host == "100.91.254.71" && r.name == "indo")
+                    })
+                } else {
+                    None
+                }
+            }
+        };
+        match matched {
+            Some(record) => {
+                info!(
+                    pairing_id = %record.id,
+                    host_name = %record.name,
+                    "reconnecting with stored pairing (PIN-less Parsec style)"
+                );
+                cli.pairing_id = Some(record.id);
+            }
+            None => {
+                eprintln!(
+                    "no stored pairing for host '{}' — pair once with --pin, or pass --pairing-id",
+                    cli.host
+                );
+            }
+        }
+    }
 
     let ready = match (&cli.pin, &cli.psk_hex) {
         (Some(pin), None) => {
@@ -197,6 +534,8 @@ fn run_client(cli: Cli) -> Result<()> {
         .set_udp_read_timeout(Some(Duration::from_millis(5)))
         .context("failed to set UDP read timeout")?;
 
+    let _ = session.send_control(ControlMessage::RequestKeyFrame);
+
     let running = Arc::new(AtomicBool::new(true));
     let r_ctrl = running.clone();
     let _ = ctrlc_handler(move || {
@@ -209,7 +548,8 @@ fn run_client(cli: Cli) -> Result<()> {
     let mut decoder: Option<HevcDecoder> = None;
     let mut decoded_frames: u64 = 0;
 
-    let (frame_tx, frame_rx) = mpsc::sync_channel::<(erd_app::AssembledFrame, Instant)>(1024);
+    let frame_rx = Arc::new(FrameQueue::new());
+    let frame_tx = frame_rx.clone();
     let session_udp = session.clone();
     let r_udp = running.clone();
 
@@ -219,13 +559,10 @@ fn run_client(cli: Cli) -> Result<()> {
     if let Some(nudge_ms) = cli.nudge_ms.filter(|value| *value > 0) {
         let session_nudge = session.clone();
         let r_nudge = running.clone();
-        let first = Arc::clone(&first_frame_seen);
+        let _first = Arc::clone(&first_frame_seen);
         std::thread::Builder::new()
             .name("erd-client-nudge".into())
             .spawn(move || {
-                while !first.load(Ordering::Relaxed) && r_nudge.load(Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(100));
-                }
                 let mut flip = false;
                 while r_nudge.load(Ordering::Relaxed) {
                     let x = if flip { 0.501_5 } else { 0.5 };
@@ -248,6 +585,71 @@ fn run_client(cli: Cli) -> Result<()> {
             .ok();
     }
 
+    let latest_frame: LatestFrameHolder = Arc::new(std::sync::Mutex::new(None));
+
+    let mut agent_server_handle: Option<std::thread::JoinHandle<std::io::Result<()>>> = None;
+    let mut agent_spawn_result = Ok(());
+    let mut agent_server_stop: Option<tokio::sync::watch::Sender<bool>> = None;
+    if cli.agent_server.is_some() || cli.mcp {
+        let backend = Arc::new(ClientBackend {
+            session: session.clone(),
+            screen_info: ScreenInfo {
+                width: ready.server.width as u32,
+                height: ready.server.height as u32,
+                scale: ready.server.scale,
+                connected_host: cli.host.clone(),
+            },
+            latest_frame: latest_frame.clone(),
+            running: running.clone(),
+        });
+
+        if let Some(port_opt) = cli.agent_server {
+            let port = port_opt.unwrap_or(19735);
+            let b = backend.clone();
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            agent_server_stop = Some(stop_tx);
+            agent_spawn_result = std::thread::Builder::new()
+                .name("erd-client-agent-server".into())
+                .spawn(move || {
+                    run_agent_server_runtime(async move {
+                        let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+                        let server = AgentServer::new(addr, b);
+                        info!("Headless agent server listening on http://127.0.0.1:{port}");
+                        let server_task = tokio::spawn(server.run(shutdown_rx));
+                        // Owned worker join: returns when a disconnect request
+                        // closed the listener, otherwise stops the worker once
+                        // the CLI lifecycle signals shutdown - no polling.
+                        join_agent_server_worker(server_task, shutdown_tx, stop_rx).await
+                    })
+                })
+                .map(|handle| agent_server_handle = Some(handle))
+                .context("failed to spawn agent server thread");
+        }
+
+        if cli.mcp {
+            let b = backend.clone();
+            std::thread::Builder::new()
+                .name("erd-client-mcp".into())
+                .spawn(move || {
+                    let rt = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(rt) => rt,
+                        Err(e) => {
+                            error!("Failed to create mcp runtime: {e}");
+                            return;
+                        }
+                    };
+                    rt.block_on(async move {
+                        let _ = run_mcp_stdio(b).await;
+                    });
+                })
+                .ok();
+        }
+    }
+
     let udp_receiver_handle = std::thread::Builder::new()
         .name("erd-client-udp-receiver".into())
         .spawn(move || {
@@ -255,8 +657,19 @@ fn run_client(cli: Cli) -> Result<()> {
                 match session_udp.receive_udp_event() {
                     Ok(SessionEvent::Frame(assembled_frame)) => {
                         let receive_ts = Instant::now();
-                        if frame_tx.send((assembled_frame, receive_ts)).is_err() {
-                            break;
+                        match frame_tx.push((assembled_frame, receive_ts)) {
+                            Ok(true) => {
+                                if let Err(error) =
+                                    session_udp.send_control(ControlMessage::RequestKeyFrame)
+                                {
+                                    warn!(%error, "queue recovery keyframe request failed");
+                                }
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                debug!(%error, "media queue closed");
+                                break;
+                            }
                         }
                     }
                     Ok(SessionEvent::Ping) => {
@@ -273,15 +686,23 @@ fn run_client(cli: Cli) -> Result<()> {
                                 continue;
                             }
                         }
+                        warn!(%err, "UDP receiver stopped");
+                        break;
                     }
                 }
             }
+            if let Err(error) = frame_tx.stop() {
+                error!(%error, "failed to close media queue");
+            }
         })
-        .context("failed to spawn UDP receiver thread")?;
+        .context("failed to spawn UDP receiver thread");
 
     info!("Awaiting UDP media datagrams and decoding frames...");
 
-    while running.load(Ordering::Relaxed) {
+    while agent_spawn_result.is_ok()
+        && udp_receiver_handle.is_ok()
+        && running.load(Ordering::Relaxed)
+    {
         if start_time.elapsed() >= timeout {
             error!(
                 decoded_frames,
@@ -316,12 +737,6 @@ fn run_client(cli: Cli) -> Result<()> {
             Ok((assembled_frame, receive_ts)) => {
                 let is_key = assembled_frame.header.is_key_frame;
                 let data = &assembled_frame.data;
-                debug!(
-                    is_key,
-                    size = data.len(),
-                    "Received assembled video frame from UDP"
-                );
-
                 if decoder.is_none() {
                     match HevcDecoder::from_keyframe_auto(data) {
                         Ok((codec_kind, dec)) => {
@@ -329,9 +744,7 @@ fn run_client(cli: Cli) -> Result<()> {
                             decoder = Some(dec);
                         }
                         Err(err) => {
-                            if is_key {
-                                warn!(%err, "Failed to initialize HEVC decoder from frame");
-                            }
+                            info!(%err, is_key, size = data.len(), "frame not usable for keyframe decoder init");
                         }
                     }
                 }
@@ -346,6 +759,13 @@ fn run_client(cli: Cli) -> Result<()> {
                                 decoded_frames =
                                     decoded_frames.saturating_add(nv12_frames.len() as u64);
                                 first_frame_seen.store(true, Ordering::Relaxed);
+                                if let Some(last) = nv12_frames.last() {
+                                    store_latest_frame(
+                                        &latest_frame,
+                                        last,
+                                        cli.agent_server.is_some() || cli.mcp,
+                                    );
+                                }
                             }
                         }
                         Err(err) => {
@@ -376,14 +796,48 @@ fn run_client(cli: Cli) -> Result<()> {
     }
 
     running.store(false, Ordering::SeqCst);
+    if let Some(stop_tx) = agent_server_stop.take() {
+        let _ = stop_tx.send(true);
+    }
+    let frame_result = frame_rx.stop();
     let reached_target = decoded_frames >= target_frames;
 
     info!(
         decoded_frames,
         target_frames, "Cleaning up session transport..."
     );
-    teardown(&session, &mut tcp_runtime)?;
-    let _ = udp_receiver_handle.join();
+    let transport_result = teardown(&session, &mut tcp_runtime);
+    let udp_result = udp_receiver_handle.and_then(|handle| {
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("UDP receiver panicked"))
+    });
+    let agent_result = if let Some(handle) = agent_server_handle {
+        handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("agent server worker thread panicked"))
+            .and_then(|result| result.context("agent server worker failed"))
+    } else {
+        Ok(())
+    };
+    // Finish every cleanup before propagating errors, retaining secondary
+    // failures as context instead of losing them behind the first `?`.
+    let mut cleanup_result = Ok(());
+    for result in [
+        agent_spawn_result,
+        frame_result,
+        transport_result,
+        udp_result,
+        agent_result,
+    ] {
+        if let Err(error) = result {
+            cleanup_result = match cleanup_result {
+                Ok(()) => Err(error),
+                Err(previous) => Err(previous.context(error)),
+            };
+        }
+    }
+    cleanup_result?;
 
     let stats_json = latency_recorder.stats_json();
     info!(stats = %stats_json, "Latency statistics summary");
@@ -394,19 +848,47 @@ fn run_client(cli: Cli) -> Result<()> {
         bail!("timeout expired before decoding requested frames (got {decoded_frames}/{target_frames})");
     }
 
-    let stats_json = latency_recorder.stats_json();
-    info!(stats = %stats_json, "Latency statistics summary");
-
-    write_stats_file(cli.stats_json.as_deref(), &latency_recorder)?;
-
     Ok(())
+}
+
+fn run_agent_server_runtime(
+    server: impl std::future::Future<Output = std::io::Result<()>>,
+) -> std::io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(server);
+    // The server already bounded its blocking-work drain. Implicit Drop would
+    // wait forever for a backend that outlived that deadline, hiding its error.
+    runtime.shutdown_background();
+    result
+}
+
+/// Join the owned agent-server worker: returns as soon as the worker itself
+/// ends (a disconnect request closes the listener), and otherwise asks it to
+/// stop once the CLI lifecycle signals shutdown, still joining it here.
+async fn join_agent_server_worker(
+    mut server_task: tokio::task::JoinHandle<std::io::Result<()>>,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
+    mut stop_rx: tokio::sync::watch::Receiver<bool>,
+) -> std::io::Result<()> {
+    let outcome = tokio::select! {
+        res = &mut server_task => res,
+        _ = stop_rx.changed() => {
+            let _ = shutdown_tx.send(true);
+            server_task.await
+        }
+    };
+    outcome.map_err(|err| std::io::Error::other(err.to_string()))?
 }
 
 fn teardown(session: &ClientSession, tcp_runtime: &mut erd_app::SessionRuntime) -> Result<()> {
     // Send Disconnect / BYE control message
     let _ = session.send_control(ControlMessage::Disconnect);
-    tcp_runtime.stop();
-    let _ = session.disconnect();
+    let runtime_result = tcp_runtime.stop();
+    let disconnect_result = session.disconnect();
+    runtime_result?;
+    disconnect_result?;
     Ok(())
 }
 
@@ -439,4 +921,305 @@ where
     }
     let _ = f;
     Ok(())
+}
+
+#[cfg(test)]
+mod pipeline_tests {
+    use super::*;
+
+    #[test]
+    fn screenshot_snapshot_shares_storage_after_new_frame_is_published() {
+        let holder: LatestFrameHolder = Arc::new(std::sync::Mutex::new(None));
+        let frame = erd_decode::Nv12Frame {
+            width: 2,
+            height: 2,
+            y_plane: vec![16, 17, 18, 19],
+            uv_plane: vec![128, 128],
+            ..nv12()
+        };
+        store_latest_frame(&holder, &frame, true);
+        let current = holder.lock().unwrap();
+        let stored_ptr = current.as_ref().unwrap().2.as_ptr();
+        let snapshot = current.clone().unwrap();
+        drop(current);
+        assert_eq!(
+            snapshot.2.as_ptr(),
+            stored_ptr,
+            "screenshot snapshot deep-copied the retained frame"
+        );
+        let replacement = erd_decode::Nv12Frame {
+            width: 2,
+            height: 2,
+            y_plane: vec![20; 4],
+            uv_plane: vec![20; 2],
+            ..nv12()
+        };
+        store_latest_frame(&holder, &replacement, true);
+        assert_eq!(&snapshot.2[..], &[16, 17, 18, 19, 128, 128]);
+    }
+
+    fn frame(id: u32, key: bool) -> QueuedFrame {
+        (
+            erd_app::AssembledFrame {
+                header: erd_proto::FrameHeader {
+                    frame_id: id,
+                    width: 2,
+                    height: 2,
+                    is_key_frame: key,
+                    total_chunks: 1,
+                    total_size: 1,
+                },
+                data: vec![1],
+                timestamp_ms: id,
+            },
+            Instant::now(),
+        )
+    }
+
+    #[test]
+    fn producer_exits_when_full_queue_is_stopped() {
+        // Given: full queue with no consumer; completion subscribed before stop.
+        let queue = Arc::new(FrameQueue::new());
+        for id in 0..1024 {
+            queue.push(frame(id, id % 4 == 0)).unwrap();
+        }
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let producer = queue.clone();
+        let worker = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            let result = producer.push(frame(1024, false));
+            done_tx.send(result.is_err()).unwrap();
+        });
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // When: stop races the next push into the full queue.
+        queue.stop().unwrap();
+        let completion = done_rx.recv_timeout(Duration::from_secs(2));
+        // Release the baseline sender on failure so RED leaves no worker behind.
+        if completion.is_err() {
+            queue.recv_timeout(Duration::ZERO).unwrap();
+        }
+        worker.join().unwrap();
+        // Then: completion requires no draining and future pushes are rejected.
+        assert!(completion.is_ok());
+        assert!(queue.push(frame(1025, true)).is_err());
+    }
+
+    #[test]
+    fn overload_discards_backlog_and_recovers_in_keyframe_order() {
+        // Given: a full small queue containing one valid reference chain.
+        let queue = FrameQueue::new();
+        for id in 0..FRAME_QUEUE_CAPACITY as u32 {
+            assert!(!queue.push(frame(id, id == 0)).unwrap());
+        }
+        // When: overload, dependent frames, then a new keyframe arrive.
+        let requests: Vec<_> = [(4, false), (5, false), (6, false), (7, true), (8, false)]
+            .into_iter()
+            .map(|(id, key)| queue.push(frame(id, key)).unwrap())
+            .collect();
+        // Then: one request and only the new chain survive, in order.
+        assert_eq!(requests, [true, false, false, false, false]);
+        assert_eq!(
+            queue
+                .recv_timeout(Duration::ZERO)
+                .unwrap()
+                .0
+                .header
+                .frame_id,
+            7
+        );
+        assert_eq!(
+            queue
+                .recv_timeout(Duration::ZERO)
+                .unwrap()
+                .0
+                .header
+                .frame_id,
+            8
+        );
+        assert_eq!(
+            queue.recv_timeout(Duration::ZERO),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        );
+    }
+
+    fn nv12() -> erd_decode::Nv12Frame {
+        erd_decode::Nv12Frame {
+            width: 2,
+            height: 2,
+            y_stride: 2,
+            uv_stride: 2,
+            y_plane: vec![1, 2, 3, 4],
+            uv_plane: vec![5, 6],
+            timestamp_ms: 0,
+        }
+    }
+
+    #[test]
+    fn screenshot_storage_is_unused_without_consumers() {
+        // Given: no agent/MCP consumer.
+        let latest = Arc::new(std::sync::Mutex::new(None));
+        // When: decoded pixels are offered for storage.
+        store_latest_frame(&latest, &nv12(), false);
+        // Then: no pixels are retained.
+        assert!(latest.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn screenshot_storage_preserves_pixels_with_consumers() {
+        // Given: an agent/MCP consumer.
+        let latest = Arc::new(std::sync::Mutex::new(None));
+        // When: decoded pixels are offered for storage.
+        store_latest_frame(&latest, &nv12(), true);
+        // Then: packed NV12 remains available to the backend.
+        assert_eq!(
+            *latest.lock().unwrap(),
+            Some((2, 2, Arc::new(vec![1, 2, 3, 4, 5, 6])))
+        );
+    }
+
+    struct IdleBackend;
+
+    struct BlockedBackend {
+        entered: mpsc::Sender<()>,
+        release: std::sync::Mutex<mpsc::Receiver<()>>,
+        dropped: mpsc::Sender<()>,
+    }
+
+    impl AgentServerBackend for BlockedBackend {
+        fn send_input_event(&self, _event: InputEvent) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn get_screen_info(&self) -> ScreenInfo {
+            self.entered.send(()).unwrap();
+            // Closing the gate also releases this job on assertion unwinding.
+            match self.release.lock().unwrap().recv() {
+                Ok(()) | Err(mpsc::RecvError) => {}
+            }
+            IdleBackend.get_screen_info()
+        }
+
+        fn get_latest_frame_nv12(&self) -> Option<(u32, u32, Arc<Vec<u8>>)> {
+            None
+        }
+    }
+
+    impl Drop for BlockedBackend {
+        fn drop(&mut self) {
+            self.dropped.send(()).unwrap();
+        }
+    }
+
+    #[test]
+    fn agent_runtime_returns_timeout_before_blocked_backend_is_released() {
+        use std::io::Write;
+
+        // Given: real HTTP work on the owned runtime's spawn_blocking pool,
+        // with all lifecycle observations subscribed before starting it.
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (dropped_tx, dropped_rx) = mpsc::channel();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let worker = std::thread::spawn(move || {
+            let result = run_agent_server_runtime(async move {
+                let backend = Arc::new(BlockedBackend {
+                    entered: entered_tx,
+                    release: std::sync::Mutex::new(release_rx),
+                    dropped: dropped_tx,
+                });
+                let (server, addr) = AgentServer::bind(([127, 0, 0, 1], 0).into(), backend).await?;
+                ready_tx.send(addr).unwrap();
+                let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+                let task = tokio::spawn(server.run(shutdown_rx));
+                join_agent_server_worker(task, shutdown_tx, stop_rx).await
+            });
+            done_tx.send(()).unwrap();
+            result
+        });
+        let addr = ready_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let mut client =
+            std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)).unwrap();
+        client
+            .set_write_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        client
+            .write_all(b"GET /api/v1/screen/info HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // When: stop times out its five-second drain while the backend is gated.
+        stop_tx.send(true).unwrap();
+        let completed_before_release = done_rx.recv_timeout(Duration::from_secs(8));
+
+        // Always release and join before the RED assertion: no leaked job.
+        drop(release_tx);
+        let result = worker.join().unwrap();
+        dropped_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        // Then: runtime shutdown is bounded and its error crosses the thread join.
+        assert!(
+            completed_before_release.is_ok(),
+            "runtime owner waited for the blocked backend after the server drain timed out"
+        );
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    impl AgentServerBackend for IdleBackend {
+        fn send_input_event(&self, _event: erd_proto::InputEvent) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn get_screen_info(&self) -> ScreenInfo {
+            ScreenInfo {
+                width: 1,
+                height: 1,
+                scale: 1.0,
+                connected_host: "idle".to_string(),
+            }
+        }
+
+        fn get_latest_frame_nv12(&self) -> Option<(u32, u32, Arc<Vec<u8>>)> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_worker_join_returns_when_worker_ends_on_disconnect() {
+        // Given: an owned worker that ends itself, as after a disconnect request.
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::watch::channel(false);
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(async { Ok::<(), std::io::Error>(()) });
+        // When: the main flow joins without any lifecycle stop signal.
+        let joined = join_agent_server_worker(task, shutdown_tx, stop_rx.clone()).await;
+        // Then: the worker is joined and the stop signal was never needed.
+        joined.unwrap();
+        assert!(!(*stop_rx.borrow()));
+        let _ = stop_tx;
+    }
+
+    #[tokio::test]
+    async fn agent_worker_join_stops_listener_on_lifecycle_stop() {
+        // Given: a real listener worker that only ends when asked.
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let (server, addr) =
+            AgentServer::bind("127.0.0.1:0".parse().unwrap(), Arc::new(IdleBackend))
+                .await
+                .unwrap();
+        let worker = tokio::spawn(server.run(shutdown_rx));
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        // When: the CLI lifecycle signals stop before the worker ends.
+        stop_tx.send(true).unwrap();
+        let joined = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            join_agent_server_worker(worker, shutdown_tx, stop_rx),
+        )
+        .await
+        .expect("worker join deadline");
+        // Then: the join succeeds and the listener port is closed.
+        joined.unwrap();
+        assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+    }
 }

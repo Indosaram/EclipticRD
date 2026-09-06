@@ -40,8 +40,8 @@ pub use inject_macos::{accessibility_is_trusted, request_accessibility, InputInj
 #[cfg(target_os = "windows")]
 pub use inject_windows::WindowsInputInjector;
 #[cfg(target_os = "linux")]
-pub use session::focused_output_name;
+pub use session::{focused_output_name, probe_hyprland_monitors, resolve_output_target};
 pub use session::{
-    random_pin, ConsentPrompt, DisplayInfo, HostConfig, HostServer, PairingRecord, PairingStore,
-    SessionState, TimestampStats, VideoFrame,
+    random_pin, select_focused_output, ConsentPrompt, DisplayInfo, HostConfig, HostServer,
+    PairingRecord, PairingStore, SessionState, TimestampStats, VideoFrame,
 };

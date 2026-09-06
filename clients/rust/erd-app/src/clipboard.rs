@@ -217,7 +217,6 @@ pub struct MemoryClipboard {
     state: Arc<Mutex<ClipboardSnapshot>>,
 }
 
-
 impl PlatformClipboard for MemoryClipboard {
     fn snapshot(&self) -> Result<ClipboardSnapshot, ClipboardError> {
         Ok(self

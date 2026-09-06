@@ -78,15 +78,18 @@ pub fn parse_length_prefixed_nalus(access_unit: &[u8]) -> Result<Vec<Nalu<'_>>, 
 
 /// Converts length-prefixed NALUs to Annex-B (0x00, 0x00, 0x00, 0x01 prefixed).
 pub fn to_annex_b(data: &[u8]) -> Vec<u8> {
-    if let Ok(nalus) = parse_length_prefixed_nalus(data) {
-        let mut out = Vec::with_capacity(data.len() + nalus.len() * 4);
-        for nalu in nalus {
-            out.extend_from_slice(&[0, 0, 0, 1]);
-            out.extend_from_slice(nalu.data);
-        }
-        return out;
+    prepare_annex_b(data).unwrap_or_else(|_| data.to_vec())
+}
+
+fn prepare_annex_b(data: &[u8]) -> Result<Vec<u8>, DecodeError> {
+    let nalus = parse_length_prefixed_nalus(data)?;
+    // Four-byte start codes replace four-byte lengths without changing size.
+    let mut out = Vec::with_capacity(data.len());
+    for nalu in nalus {
+        out.extend_from_slice(&[0, 0, 0, 1]);
+        out.extend_from_slice(nalu.data);
     }
-    data.to_vec()
+    Ok(out)
 }
 
 /// Extracts the direct AVCC-style VPS/SPS/PPS blob expected by the decoder context.
@@ -184,8 +187,8 @@ mod ffmpeg_impl {
     use ffmpeg_next as ffmpeg;
 
     use super::{
-        hevc_parameter_set_blob, parse_length_prefixed_nalus, to_annex_b, DecodeError,
-        HardwareAcceleration, Nv12Frame,
+        hevc_parameter_set_blob, prepare_annex_b, to_annex_b, DecodeError, HardwareAcceleration,
+        Nv12Frame,
     };
 
     pub struct HevcDecoder {
@@ -226,6 +229,10 @@ mod ffmpeg_impl {
                     ffmpeg::ffi::AV_EF_CRCCHECK | ffmpeg::ffi::AV_EF_BUFFER;
                 (*context.as_mut_ptr()).flags |= ffmpeg::ffi::AV_CODEC_FLAG_LOW_DELAY as i32;
                 (*context.as_mut_ptr()).flags2 |= ffmpeg::ffi::AV_CODEC_FLAG2_FAST;
+                // Disable multi-frame threading (FF_THREAD_FRAME introduces 1-frame latency per thread).
+                // Use slice-level threading (FF_THREAD_SLICE = 2) for zero latency.
+                (*context.as_mut_ptr()).thread_type = ffmpeg::ffi::FF_THREAD_SLICE;
+                (*context.as_mut_ptr()).thread_count = 4;
             }
             let annex_b = to_annex_b(extradata);
             let raw_len = annex_b.len();
@@ -282,8 +289,7 @@ mod ffmpeg_impl {
             access_unit: &[u8],
             timestamp_ms: i64,
         ) -> Result<Vec<Nv12Frame>, DecodeError> {
-            parse_length_prefixed_nalus(access_unit)?;
-            let annex_b = to_annex_b(access_unit);
+            let annex_b = prepare_annex_b(access_unit)?;
             let mut packet = ffmpeg::Packet::copy(&annex_b);
             packet.set_pts(Some(timestamp_ms));
             packet.set_dts(Some(timestamp_ms));
@@ -495,6 +501,70 @@ impl HevcDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn annex_b_preserves_payloads_when_replacing_length_prefixes() {
+        // Given multiple NALs, including an emulation-prevention sequence.
+        let data = [0, 0, 0, 5, 64, 1, 0, 0, 3, 0, 0, 0, 2, 103, 2];
+        let expected = [0, 0, 0, 1, 64, 1, 0, 0, 3, 0, 0, 0, 1, 103, 2];
+        // When the same strict preparation used by decode converts the NALs.
+        let prepared = prepare_annex_b(&data).unwrap();
+        // Then only the four-byte prefixes change; public normalization agrees.
+        assert_eq!(prepared, expected);
+        assert_eq!(prepared.capacity(), data.len());
+        assert_eq!(to_annex_b(&data), expected);
+    }
+
+    #[test]
+    fn parser_borrows_payloads_when_access_unit_has_multiple_nals() {
+        // Given two distinct HEVC NAL headers.
+        let data = [0, 0, 0, 2, 64, 1, 0, 0, 0, 2, 66, 2];
+        // When the public parser returns its NAL metadata.
+        let nalus = parse_length_prefixed_nalus(&data).unwrap();
+        // Then NAL types and payload slices retain the public borrowed contract.
+        assert_eq!(nalus.len(), 2);
+        assert_eq!((nalus[0].nal_type, nalus[1].nal_type), (32, 33));
+        assert_eq!(nalus[0].data, &data[4..6]);
+        assert_eq!(nalus[1].data, &data[10..12]);
+        assert_eq!(nalus[0].data.as_ptr(), data[4..].as_ptr());
+        assert_eq!(nalus[1].data.as_ptr(), data[10..].as_ptr());
+    }
+
+    #[test]
+    fn strict_errors_preserve_offsets_when_normalization_falls_back() {
+        // Given empty, short-prefix, short-NAL, oversized and trailing garbage inputs.
+        let cases: &[(&[u8], bool, usize)] = &[
+            (&[], false, 0),
+            (&[0], false, 0),
+            (&[0, 0, 0], false, 0),
+            (&[0, 0, 0, 0], true, 0),
+            (&[0, 0, 0, 1, 64], true, 0),
+            (&[0, 0, 0, 8, 64, 1], false, 0),
+            (&[255, 255, 255, 255], false, 0),
+            (&[0, 0, 0, 2, 64, 1, 0], false, 6),
+        ];
+        // When strict preparation receives malformed lengths.
+        for &(data, empty, offset) in cases {
+            // Then errors retain their type/offset; public normalization falls back.
+            for error in [
+                prepare_annex_b(data).unwrap_err(),
+                parse_length_prefixed_nalus(data).unwrap_err(),
+            ] {
+                match error {
+                    DecodeError::EmptyNalu { offset: actual } => {
+                        assert!(empty);
+                        assert_eq!(actual, offset);
+                    }
+                    DecodeError::TruncatedNalu { offset: actual } => {
+                        assert!(!empty);
+                        assert_eq!(actual, offset);
+                    }
+                    other => panic!("unexpected error: {other:?}"),
+                }
+            }
+            assert_eq!(to_annex_b(data), data);
+        }
+    }
 
     #[test]
     fn corrupt_length_prefix_is_a_graceful_error() {

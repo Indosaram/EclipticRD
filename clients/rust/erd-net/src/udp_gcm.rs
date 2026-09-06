@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use aes_gcm::{
-    aead::{Aead, KeyInit, Payload},
+    aead::{Aead, AeadInPlace, KeyInit, Payload},
     Aes256Gcm, Nonce,
 };
 use erd_proto::{PacketHeader, WireCodec};
@@ -131,6 +131,21 @@ impl DatagramCipher {
 
     /// Seals a payload as `nonce || ciphertext || tag`, authenticating `aad`.
     pub fn seal(&mut self, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, DatagramError> {
+        let mut output = Vec::with_capacity(NONCE_SIZE + plaintext.len() + TAG_SIZE);
+        self.seal_into(plaintext, aad, &mut output)?;
+        Ok(output)
+    }
+
+    /// Appends `nonce || ciphertext || tag` to a caller-owned buffer.
+    /// Existing bytes are preserved, including on error. With sufficient spare
+    /// capacity this allocates nothing. Each attempt consumes a fresh counter;
+    /// exhaustion leaves the buffer unchanged and never wraps the nonce.
+    pub fn seal_into(
+        &mut self,
+        plaintext: &[u8],
+        aad: &[u8],
+        output: &mut Vec<u8>,
+    ) -> Result<(), DatagramError> {
         self.send_counter = self
             .send_counter
             .checked_add(1)
@@ -139,21 +154,23 @@ impl DatagramCipher {
         let mut nonce_bytes = [0_u8; NONCE_SIZE];
         nonce_bytes[..4].copy_from_slice(&self.nonce_prefix);
         nonce_bytes[4..].copy_from_slice(&self.send_counter.to_be_bytes());
-        let ciphertext = self
-            .cipher
-            .encrypt(
-                Nonce::from_slice(&nonce_bytes),
-                Payload {
-                    msg: plaintext,
-                    aad,
-                },
-            )
-            .map_err(|_| DatagramError::Authentication)?;
-
-        let mut output = Vec::with_capacity(NONCE_SIZE + ciphertext.len());
+        let start = output.len();
+        output.reserve(NONCE_SIZE + plaintext.len() + TAG_SIZE);
         output.extend_from_slice(&nonce_bytes);
-        output.extend_from_slice(&ciphertext);
-        Ok(output)
+        output.extend_from_slice(plaintext);
+        let tag = self.cipher.encrypt_in_place_detached(
+            Nonce::from_slice(&nonce_bytes),
+            aad,
+            &mut output[start + NONCE_SIZE..],
+        );
+        match tag {
+            Ok(tag) => output.extend_from_slice(&tag),
+            Err(_) => {
+                output.truncate(start);
+                return Err(DatagramError::Authentication);
+            }
+        }
+        Ok(())
     }
 
     /// Opens `nonce || ciphertext || tag`, rejecting tampering and replay.
@@ -195,10 +212,9 @@ impl DatagramCipher {
         payload: &[u8],
     ) -> Result<Vec<u8>, DatagramError> {
         let header_bytes = header.encode()?;
-        let sealed = self.seal(payload, &header_bytes)?;
-        let mut datagram = Vec::with_capacity(header_bytes.len() + sealed.len());
+        let mut datagram = Vec::with_capacity(HEADER_SIZE + NONCE_SIZE + payload.len() + TAG_SIZE);
         datagram.extend_from_slice(&header_bytes);
-        datagram.extend_from_slice(&sealed);
+        self.seal_into(payload, &header_bytes, &mut datagram)?;
         Ok(datagram)
     }
 
@@ -386,5 +402,188 @@ mod tests {
         datagram[3] ^= 1;
         assert!(receiver.open_datagram(&datagram).is_err());
         assert_eq!(header.encode().unwrap().len(), PacketHeader::SIZE);
+    }
+
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    struct TrackingAlloc;
+    thread_local! {
+        static ALLOC_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
+    }
+
+    // SAFETY: forwards every allocation and deallocation unchanged to System.
+    // The allocation-free, thread-local counter never accesses allocated memory.
+    unsafe impl GlobalAlloc for TrackingAlloc {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            ALLOC_COUNT.with(|count| {
+                if let Some(value) = count.get() {
+                    count.set(Some(value + 1));
+                }
+            });
+            // SAFETY: GlobalAlloc's caller provides the valid layout.
+            unsafe { System.alloc(layout) }
+        }
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            // SAFETY: pointer and layout are forwarded to their original allocator.
+            unsafe { System.dealloc(ptr, layout) }
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: TrackingAlloc = TrackingAlloc;
+
+    fn allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                ALLOC_COUNT.with(|count| count.set(None));
+            }
+        }
+        ALLOC_COUNT.with(|count| {
+            assert_eq!(count.replace(Some(0)), None);
+        });
+        let reset = Reset;
+        let result = operation();
+        let count = ALLOC_COUNT.with(|count| count.get().unwrap());
+        drop(reset);
+        (result, count)
+    }
+
+    #[test]
+    fn seal_uses_one_allocation() {
+        let (mut sender, _) = matching_pair();
+        let (sealed, count) = allocations(|| sender.seal(b"payload", AAD).unwrap());
+        assert_eq!(sealed.len(), 7 + NONCE_SIZE + TAG_SIZE);
+        assert_eq!(count, 1, "seal must allocate only its returned buffer");
+    }
+
+    #[test]
+    fn seal_datagram_uses_two_allocations() {
+        let (mut sender, _) = matching_pair();
+        let header = PacketHeader::new(PacketType::Ping, 1, 100, 0);
+        let (_, count) = allocations(|| sender.seal_datagram(&header, b"hello world").unwrap());
+        assert_eq!(
+            count, 2,
+            "header codec plus final datagram; no intermediate AEAD buffer"
+        );
+    }
+
+    #[test]
+    fn exact_wire_bytes_match_baseline() {
+        let (mut sender, _) = matching_pair();
+        let header = PacketHeader::new(PacketType::Ping, 1, 100, 0);
+        let datagram = sender.seal_datagram(&header, b"hello world").unwrap();
+        assert_eq!(
+            datagram,
+            [
+                0x1d, 0xec, 0x07, 0x01, 0, 0, 0, 0x64, 0, 0, 0, 0, 0xe2, 0x6c, 0x23, 0xc1, 0, 0, 0,
+                0, 0, 0, 0, 1, 0x5a, 0xe8, 0xb6, 0x27, 0x27, 0x08, 0x4e, 0x4f, 0xa9, 0xf8, 0xf0,
+                0x50, 0x29, 0xbc, 0x09, 0x7b, 0x7a, 0x51, 0x0d, 0xea, 0xb1, 0x34, 0xba, 0xa7, 0x87,
+                0x2a, 0xdb,
+            ]
+        );
+    }
+
+    #[test]
+    fn reusable_buffer_has_zero_allocations_and_preserves_prefix() {
+        let (mut sender, mut receiver) = matching_pair();
+        let mut output = Vec::with_capacity(2048);
+        for payload in [b"payload".as_slice(), b"", b"short"] {
+            output.clear();
+            output.extend_from_slice(AAD);
+            let (_, count) = allocations(|| sender.seal_into(payload, AAD, &mut output).unwrap());
+            assert_eq!(count, 0);
+            assert_eq!(&output[..AAD.len()], AAD);
+            assert_eq!(receiver.open(&output[AAD.len()..], AAD).unwrap(), payload);
+        }
+    }
+
+    #[test]
+    fn every_wire_byte_is_authenticated_without_poisoning_replay() {
+        let header = PacketHeader::new(PacketType::Ping, 1, 100, 0);
+        let (mut sender, _) = matching_pair();
+        let valid = sender.seal_datagram(&header, b"hello world").unwrap();
+        for index in 0..valid.len() {
+            let (_, mut receiver) = matching_pair();
+            let mut tampered = valid.clone();
+            tampered[index] ^= 1;
+            let result = receiver.open_datagram(&tampered);
+            match index {
+                0..=1 => assert!(matches!(result, Err(DatagramError::InvalidHeader(_)))),
+                12..=15 => assert!(matches!(result, Err(DatagramError::WrongDirection))),
+                _ => assert!(matches!(result, Err(DatagramError::Authentication))),
+            }
+            assert_eq!(
+                receiver.open_datagram(&valid).unwrap(),
+                (header, b"hello world".to_vec())
+            );
+            assert!(matches!(
+                receiver.open_datagram(&valid),
+                Err(DatagramError::Replay)
+            ));
+        }
+    }
+
+    #[test]
+    fn both_directions_match_legacy_aead_for_multiple_counters() {
+        for direction in [Direction::ClientToHost, Direction::HostToClient] {
+            let mut sender = DatagramCipher::derive(&MASTER_KEY, &SESSION_SALT, direction).unwrap();
+            for counter in 1_u64..=3 {
+                let payload = [0x73; 1200];
+                let mut nonce = [0; NONCE_SIZE];
+                nonce[..4].copy_from_slice(&sender.nonce_prefix);
+                nonce[4..].copy_from_slice(&counter.to_be_bytes());
+                let expected = sender
+                    .cipher
+                    .encrypt(
+                        Nonce::from_slice(&nonce),
+                        Payload {
+                            msg: &payload,
+                            aad: AAD,
+                        },
+                    )
+                    .unwrap();
+                let sealed = sender.seal(&payload, AAD).unwrap();
+                assert_eq!(&sealed[..NONCE_SIZE], &nonce);
+                assert_eq!(&sealed[NONCE_SIZE..], expected);
+            }
+        }
+    }
+
+    #[test]
+    fn replay_accepts_reordered_window_edge_but_rejects_stale() {
+        let (mut sender, mut receiver) = matching_pair();
+        let stale = sender.seal(b"stale", AAD).unwrap();
+        let edge = sender.seal(b"edge", AAD).unwrap();
+        sender.send_counter = REPLAY_WINDOW_SIZE;
+        let latest = sender.seal(b"latest", AAD).unwrap();
+        assert_eq!(receiver.open(&latest, AAD).unwrap(), b"latest");
+        assert_eq!(receiver.open(&edge, AAD).unwrap(), b"edge");
+        assert!(matches!(
+            receiver.open(&stale, AAD),
+            Err(DatagramError::Replay)
+        ));
+        assert!(matches!(
+            receiver.open(&edge, AAD),
+            Err(DatagramError::Replay)
+        ));
+    }
+
+    #[test]
+    fn exhausted_counter_preserves_output_and_never_wraps() {
+        let (mut sender, _) = matching_pair();
+        sender.send_counter = u64::MAX - 1;
+        let final_packet = sender.seal(b"last", AAD).unwrap();
+        assert_eq!(&final_packet[4..NONCE_SIZE], &u64::MAX.to_be_bytes());
+        let mut output = b"prefix".to_vec();
+        for _ in 0..2 {
+            assert!(matches!(
+                sender.seal_into(b"no", AAD, &mut output),
+                Err(DatagramError::CounterExhausted)
+            ));
+            assert_eq!(output, b"prefix");
+            assert_eq!(sender.send_counter, u64::MAX);
+        }
     }
 }

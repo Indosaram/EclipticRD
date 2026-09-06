@@ -25,7 +25,10 @@ impl AudioFragmentReassembler {
             return None;
         }
 
-        if self.newest_frame_id.map_or(true, |newest| frame_id > newest) {
+        if self
+            .newest_frame_id
+            .map_or(true, |newest| frame_id > newest)
+        {
             self.skip_incomplete_before(frame_id);
             self.newest_frame_id = Some(frame_id);
         }
