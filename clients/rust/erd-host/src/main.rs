@@ -61,7 +61,7 @@ fn main() -> Result<()> {
     let store = PairingStore::host_default()?;
     if cli.list_paired {
         let mut records = store.load_all()?;
-        records.sort_by(|left, right| right.added_at_unix_ms.cmp(&left.added_at_unix_ms));
+        records.sort_by_key(|left| std::cmp::Reverse(left.added_at_unix_ms));
         if records.is_empty() {
             println!("No paired devices.");
         } else {

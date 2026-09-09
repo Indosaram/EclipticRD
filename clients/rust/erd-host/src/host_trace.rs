@@ -3,10 +3,10 @@ use serde::Serialize;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
-pub(super) const LIMIT: usize = 65_536;
+pub(crate) const LIMIT: usize = 65_536;
 
 #[derive(Clone, Copy, Default, Serialize)]
-pub(super) struct Record {
+pub(crate) struct Record {
     pub at_us: u64,
     pub session: u64,
     pub event: u8,
@@ -20,7 +20,7 @@ pub(super) struct Record {
 }
 
 #[derive(Default, Serialize)]
-pub(super) struct Records {
+pub(crate) struct Records {
     pub records: Vec<Record>,
     pub overflow: u64,
 }
@@ -35,13 +35,13 @@ impl Records {
     }
 }
 
-pub(super) struct Trace {
+pub(crate) struct Trace {
     origin: Instant,
     path: std::path::PathBuf,
     pub records: Mutex<Records>,
 }
 
-pub(super) fn enabled() -> Option<&'static Arc<Trace>> {
+pub(crate) fn enabled() -> Option<&'static Arc<Trace>> {
     static TRACE: OnceLock<Option<Arc<Trace>>> = OnceLock::new();
     TRACE
         .get_or_init(|| {

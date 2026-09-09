@@ -79,7 +79,7 @@ pub const PAIRING_WINDOW: Duration = Duration::from_secs(300);
 pub use erd_proto::{TimestampStats, TIMESTAMP_STATS_MAGIC};
 const SWIFT_REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
 #[path = "host_trace.rs"]
-mod host_trace;
+pub(crate) mod host_trace;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingRecord {
@@ -300,8 +300,8 @@ impl HostConfig {
         bootstrap_pin: Option<String>,
         pairing_store: PairingStore,
     ) -> Result<Self, SessionError> {
-        let (pixel_width, pixel_height) =
-            crate::capture_windows::WindowsCapture::primary_output_geometry()
+        let meta =
+            crate::capture_windows::WindowsCapture::primary_output_metadata()
                 .map_err(|error| SessionError::Io(io::Error::other(error.to_string())))?;
         Ok(Self {
             tcp_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_TCP_PORT)),
@@ -314,11 +314,11 @@ impl HostConfig {
                 .to_string_lossy()
                 .into_owned(),
             display: DisplayInfo {
-                logical_width: pixel_width,
-                logical_height: pixel_height,
-                pixel_width,
-                pixel_height,
-                scale_factor_milli: 1_000,
+                logical_width: meta.logical_width,
+                logical_height: meta.logical_height,
+                pixel_width: meta.pixel_width,
+                pixel_height: meta.pixel_height,
+                scale_factor_milli: meta.scale_factor_milli,
             },
             frames_per_second: 60,
             bitrate: WINDOWS_DEFAULT_BITRATE,
@@ -1096,14 +1096,14 @@ mod display_power {
 mod cursor_jiggle {
     #[repr(C)]
     #[derive(Default)]
-    pub struct POINT {
+    pub struct Point {
         pub x: i32,
         pub y: i32,
     }
 
     #[link(name = "user32")]
     extern "system" {
-        pub fn GetCursorPos(point: *mut POINT) -> i32;
+        pub fn GetCursorPos(point: *mut Point) -> i32;
         fn SetCursorPos(x: i32, y: i32) -> i32;
     }
 
@@ -1114,7 +1114,7 @@ mod cursor_jiggle {
     /// never disturbed.
     pub fn nudge(odd: bool) {
         unsafe {
-            let mut point = POINT::default();
+            let mut point = Point::default();
             if GetCursorPos(&mut point) != 0 {
                 let dx = if odd { 1 } else { -1 };
                 SetCursorPos(point.x + dx, point.y);
@@ -1155,7 +1155,8 @@ impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
     }
 
     fn encode(&mut self, frame: WindowsRawFrame) -> Result<Vec<VideoFrame>, String> {
-        if let Some(trace) = host_trace::enabled() {
+        let trace = host_trace::enabled();
+        if let Some(trace) = trace {
             let (content, residence) = frame.ages(Instant::now());
             for (event, value) in [
                 (14, trace.time(frame.captured_at)),
@@ -1176,8 +1177,18 @@ impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
                 });
             }
         }
-        self.0
-            .encode_nv12(&frame.nv12, frame.captured_at)
+        let started = trace.map(|_| Instant::now());
+        let result = self.0.encode_nv12(&frame.nv12, frame.captured_at);
+        if let (Some(trace), Some(started)) = (trace, started) {
+            trace.record(host_trace::Record {
+                event: 40,
+                frame: frame.capture_id,
+                value: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                repeat: frame.repeat,
+                ..Default::default()
+            });
+        }
+        result
             .map(|frames| {
                 frames
                     .into_iter()
@@ -1233,6 +1244,29 @@ impl MediaSource for WindowsMediaSource {
                 let mut last_emit = Instant::now();
                 let mut jiggle_flip = false;
                 let mut last_jiggle = Instant::now() - Duration::from_millis(700);
+                let send_cursor = |sender: &SyncSender<MediaEvent>,
+                                   event: MediaEvent,
+                                   frame_id: u64| {
+                    let trace = host_trace::enabled();
+                    let started = trace.map(|_| Instant::now());
+                    if let Some(trace) = trace {
+                        trace.record(host_trace::Record {
+                            event: 21,
+                            frame: frame_id,
+                            ..Default::default()
+                        });
+                    }
+                    let res = sender.send(event);
+                    if let (Some(trace), Some(started)) = (trace, started) {
+                        trace.record(host_trace::Record {
+                            event: 22,
+                            frame: frame_id,
+                            value: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                            repeat: res.is_err(),
+                            ..Default::default()
+                        });
+                    }
+                };
                 while !handoff.is_stopped() {
                     let started = Instant::now();
                     if let Some(trace) = host_trace::enabled() {
@@ -1256,25 +1290,33 @@ impl MediaSource for WindowsMediaSource {
                                 let (px, py) = if let Some(pos) = frame.pointer_position {
                                     pos
                                 } else {
-                                    let mut pt = cursor_jiggle::POINT::default();
+                                    let mut pt = cursor_jiggle::Point::default();
                                     unsafe { cursor_jiggle::GetCursorPos(&mut pt) };
                                     (pt.x, pt.y)
                                 };
                                 if frame.width > 0 && frame.height > 0 {
                                     let cx = (px as f32) / (frame.width as f32);
                                     let cy = (py as f32) / (frame.height as f32);
-                                    let _ = sender.send(MediaEvent::Cursor(CursorUpdate {
-                                        x: cx.clamp(0.0, 1.0),
-                                        y: cy.clamp(0.0, 1.0),
-                                        cursor_type: 1,
-                                    }));
+                                    send_cursor(
+                                        &sender,
+                                        MediaEvent::Cursor(CursorUpdate {
+                                            x: cx.clamp(0.0, 1.0),
+                                            y: cy.clamp(0.0, 1.0),
+                                            cursor_type: 1,
+                                        }),
+                                        capture_id + 1,
+                                    );
                                 }
                             } else {
-                                let _ = sender.send(MediaEvent::Cursor(CursorUpdate {
-                                    x: -1.0,
-                                    y: -1.0,
-                                    cursor_type: 0,
-                                }));
+                                send_cursor(
+                                    &sender,
+                                    MediaEvent::Cursor(CursorUpdate {
+                                        x: -1.0,
+                                        y: -1.0,
+                                        cursor_type: 0,
+                                    }),
+                                    capture_id + 1,
+                                );
                             }
                             let captured_at = Instant::now();
                             let nv12 = match bgra_to_nv12(
@@ -1324,17 +1366,21 @@ impl MediaSource for WindowsMediaSource {
                             }
                         }
                         Err(CaptureError::Timeout) => {
-                            let mut pt = cursor_jiggle::POINT::default();
+                            let mut pt = cursor_jiggle::Point::default();
                             if unsafe { cursor_jiggle::GetCursorPos(&mut pt) } != 0 {
                                 let (w, h) = capture.geometry();
                                 if w > 0 && h > 0 {
                                     let cx = (pt.x as f32) / (w as f32);
                                     let cy = (pt.y as f32) / (h as f32);
-                                    let _ = sender.send(MediaEvent::Cursor(CursorUpdate {
-                                        x: cx.clamp(0.0, 1.0),
-                                        y: cy.clamp(0.0, 1.0),
-                                        cursor_type: 1,
-                                    }));
+                                    send_cursor(
+                                        &sender,
+                                        MediaEvent::Cursor(CursorUpdate {
+                                            x: cx.clamp(0.0, 1.0),
+                                            y: cy.clamp(0.0, 1.0),
+                                            cursor_type: 1,
+                                        }),
+                                        capture_id,
+                                    );
                                 }
                             }
                             if (!first_keyframe_emitted.load(Ordering::Relaxed)
@@ -1432,7 +1478,26 @@ impl MediaSource for WindowsMediaSource {
                 },
                 |frame| {
                     let is_key = frame.is_key_frame;
+                    let trace = host_trace::enabled();
+                    let started = trace.map(|_| Instant::now());
+                    if let Some(trace) = trace {
+                        trace.record(host_trace::Record {
+                            event: 23,
+                            keyframe: is_key,
+                            size: frame.data.len(),
+                            ..Default::default()
+                        });
+                    }
                     let sent = sender.send(MediaEvent::Video(frame)).is_ok();
+                    if let (Some(trace), Some(started)) = (trace, started) {
+                        trace.record(host_trace::Record {
+                            event: 24,
+                            keyframe: is_key,
+                            value: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                            repeat: !sent,
+                            ..Default::default()
+                        });
+                    }
                     if sent && is_key {
                         first_keyframe_emitted.store(true, Ordering::Relaxed);
                     }
@@ -2075,14 +2140,14 @@ impl HostServer {
             self.config.display.logical_height as f32,
         );
         #[cfg(target_os = "windows")]
-        let mut input = WindowsInputInjector::new(None).map_err(|error| SessionError::Io(error))?;
+        let mut input = WindowsInputInjector::new(None).map_err(SessionError::Io)?;
         #[cfg(all(target_os = "linux", not(test)))]
         let mut input =
             LinuxInputInjector::new(crate::inject_linux::OutputGeometry::single_output(
                 self.config.display.pixel_width,
                 self.config.display.pixel_height,
             ))
-            .map_err(|error| SessionError::Io(error))?;
+            .map_err(SessionError::Io)?;
         #[cfg(all(target_os = "linux", test))]
         let mut input = tests::admission_input(self)?;
         // Establish the diagnostic clock before any session-local timestamps.
@@ -2600,6 +2665,59 @@ impl HostServer {
     }
 }
 
+/// Explicit conservative UDP payload budget ensuring datagrams never exceed
+/// the 1280-byte MTU standard for IPv6 and Tailscale / WireGuard virtual interfaces.
+///
+/// Budget calculation:
+/// ```text
+///   1280 bytes MTU
+/// -   40 bytes IPv6 header (or 20 bytes IPv4)
+/// -    8 bytes UDP header
+/// = 1232 bytes maximum UDP payload under IPv6
+/// ```
+///
+/// To provide safe headroom for IP options and encapsulation headers,
+/// ERD targets a conservative 1200-byte UDP payload budget.
+pub const UDP_PAYLOAD_BUDGET: usize = 1200;
+
+/// Encrypted envelope overhead on the wire:
+/// PacketHeader::SIZE (12 B) + udp_gcm::NONCE_SIZE (12 B) + udp_gcm::TAG_SIZE (16 B) = 40 bytes.
+pub const ENCRYPTED_DATAGRAM_OVERHEAD: usize =
+    PacketHeader::SIZE + erd_net::udp_gcm::NONCE_SIZE + erd_net::udp_gcm::TAG_SIZE;
+
+/// Maximum plaintext payload per datagram within the conservative UDP payload budget:
+/// 1200 - 40 = 1160 bytes.
+pub const MAX_SENDER_PLAINTEXT_PAYLOAD: usize = UDP_PAYLOAD_BUDGET - ENCRYPTED_DATAGRAM_OVERHEAD;
+
+/// MTU-safe sender video chunk size (1154 bytes).
+/// Plaintext video chunk payload = FrameChunk::HEADER_SIZE (6 B) + data bytes.
+/// Total datagram = 40 (envelope) + 6 (header) + 1154 (data) = 1200 bytes <= UDP_PAYLOAD_BUDGET.
+/// Note: Wire protocol accepts up to MAX_VIDEO_CHUNK_BYTES (1382 B) on the receiver side.
+pub const SENDER_MAX_VIDEO_CHUNK_BYTES: usize =
+    MAX_SENDER_PLAINTEXT_PAYLOAD - erd_proto::FrameChunk::HEADER_SIZE;
+
+/// MTU-safe sender audio fragment size (1152 bytes).
+/// Plaintext audio fragment payload = AudioFragmentHeader::SIZE (8 B) + data bytes.
+/// Total datagram = 40 (envelope) + 8 (header) + 1152 (data) = 1200 bytes <= UDP_PAYLOAD_BUDGET.
+/// Note: Wire protocol accepts up to MAX_AUDIO_FRAGMENT_BYTES (1380 B) on the receiver side.
+pub const SENDER_MAX_AUDIO_FRAGMENT_BYTES: usize =
+    MAX_SENDER_PLAINTEXT_PAYLOAD - AudioFragmentHeader::SIZE;
+
+const _: () = assert!(SENDER_MAX_VIDEO_CHUNK_BYTES <= MAX_VIDEO_CHUNK_BYTES);
+const _: () = assert!(SENDER_MAX_AUDIO_FRAGMENT_BYTES <= MAX_AUDIO_FRAGMENT_BYTES);
+const _: () = assert!(
+    ENCRYPTED_DATAGRAM_OVERHEAD
+        + erd_proto::FrameChunk::HEADER_SIZE
+        + SENDER_MAX_VIDEO_CHUNK_BYTES
+        <= UDP_PAYLOAD_BUDGET
+);
+const _: () = assert!(
+    ENCRYPTED_DATAGRAM_OVERHEAD
+        + AudioFragmentHeader::SIZE
+        + SENDER_MAX_AUDIO_FRAGMENT_BYTES
+        <= UDP_PAYLOAD_BUDGET
+);
+
 #[derive(Default)]
 struct UdpSender {
     trace: Option<Arc<host_trace::Trace>>,
@@ -2702,8 +2820,20 @@ impl UdpSender {
         frame: VideoFrame,
         session_origin: Instant,
     ) -> Result<(), SessionError> {
-        self.frame_id = self.frame_id.wrapping_add(1);
-        let frame_id = self.frame_id;
+        let chunk_count = frame.data.len().div_ceil(SENDER_MAX_VIDEO_CHUNK_BYTES);
+        let frame_id = self.frame_id.wrapping_add(1);
+        let header = FrameHeader {
+            frame_id,
+            width: width.min(u16::MAX as u32) as u16,
+            height: height.min(u16::MAX as u32) as u16,
+            is_key_frame: frame.is_key_frame,
+            total_chunks: u16::try_from(chunk_count)
+                .map_err(|_| SessionError::Store("encoded frame has too many chunks".into()))?,
+            total_size: u32::try_from(frame.data.len())
+                .map_err(|_| SessionError::Store("encoded frame is too large".into()))?,
+        };
+        let encoded_header = header.encode()?;
+        self.frame_id = frame_id;
         self.trace_keyframe = frame.is_key_frame;
         if let Some(trace) = &self.trace {
             trace.record(host_trace::Record {
@@ -2715,25 +2845,14 @@ impl UdpSender {
                 ..Default::default()
             });
         }
-        let chunk_count = frame.data.len().div_ceil(MAX_VIDEO_CHUNK_BYTES);
-        let header = FrameHeader {
-            frame_id,
-            width: width.min(u16::MAX as u32) as u16,
-            height: height.min(u16::MAX as u32) as u16,
-            is_key_frame: frame.is_key_frame,
-            total_chunks: u16::try_from(chunk_count)
-                .map_err(|_| SessionError::Store("encoded frame has too many chunks".into()))?,
-            total_size: u32::try_from(frame.data.len())
-                .map_err(|_| SessionError::Store("encoded frame is too large".into()))?,
-        };
         self.send_packet(
             socket,
             peer,
             cipher,
             PacketType::FrameHeader,
-            &header.encode()?,
+            &encoded_header,
         )?;
-        for (index, bytes) in frame.data.chunks(MAX_VIDEO_CHUNK_BYTES).enumerate() {
+        for (index, bytes) in frame.data.chunks(SENDER_MAX_VIDEO_CHUNK_BYTES).enumerate() {
             // Spread keyframe-sized bursts (100+ datagrams at line rate lose
             // mid-frame chunks on WiFi/relay paths, stranding assembly until
             // the next keyframe). Only large frames are paced, so the 60 fps
@@ -2784,10 +2903,10 @@ impl UdpSender {
             return Ok(());
         }
         self.audio_frame_id = self.audio_frame_id.wrapping_add(1);
-        let fragment_count = bytes.len().div_ceil(MAX_AUDIO_FRAGMENT_BYTES);
+        let fragment_count = bytes.len().div_ceil(SENDER_MAX_AUDIO_FRAGMENT_BYTES);
         let fragment_count = u16::try_from(fragment_count)
             .map_err(|_| SessionError::Store("audio frame has too many fragments".into()))?;
-        for (index, data) in bytes.chunks(MAX_AUDIO_FRAGMENT_BYTES).enumerate() {
+        for (index, data) in bytes.chunks(SENDER_MAX_AUDIO_FRAGMENT_BYTES).enumerate() {
             let header = AudioFragmentHeader {
                 frame_id: self.audio_frame_id,
                 fragment_index: index as u16,
@@ -2887,6 +3006,9 @@ mod tests {
     use erd_proto::{AudioFragment, FrameChunk};
     mod sender_trace {
         include!("sender_trace_tests.rs");
+    }
+    mod sender_packetization {
+        include!("sender_packetization_tests.rs");
     }
 
     #[test]

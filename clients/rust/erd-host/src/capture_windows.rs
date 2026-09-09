@@ -11,6 +11,9 @@
 
 use std::time::Duration;
 
+pub use crate::windows_logic::{
+    resolve_output_metadata, RawDuplDesc, RawOutputDesc, SelectedOutputMetadata,
+};
 use dxgi_capture_rs::{CaptureError as DxgiCaptureError, DXGIManager};
 use thiserror::Error;
 use windows::{
@@ -24,9 +27,8 @@ use windows::{
                 D3D11_SDK_VERSION,
             },
             Dxgi::{
-                Common::{DXGI_MODE_ROTATION_ROTATE270, DXGI_MODE_ROTATION_ROTATE90},
                 CreateDXGIFactory1, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput1,
-                DXGI_ERROR_NOT_FOUND, DXGI_OUTPUT_DESC,
+                DXGI_ERROR_NOT_FOUND, DXGI_OUTDUPL_DESC, DXGI_OUTPUT_DESC,
             },
         },
     },
@@ -80,6 +82,8 @@ pub enum CaptureError {
     Capture(String),
     #[error("captured frame dimensions or buffer length overflowed")]
     InvalidFrame,
+    #[error("display rotation ({0}) is unsupported without a pixel rotation transform")]
+    UnsupportedRotation(i32),
 }
 
 /// Blocking capture source for one Windows display.
@@ -90,10 +94,17 @@ pub struct WindowsCapture {
 
 impl WindowsCapture {
     /// Pixel dimensions of the primary DXGI output, for session negotiation
-    /// before a full capture pipeline starts. Reads the output description
-    /// without waiting for a desktop update or acquiring pixels.
+    /// before a full capture pipeline starts. Reads the physical output
+    /// duplication mode without waiting for a desktop update or acquiring pixels.
     pub fn primary_output_geometry() -> Result<(u32, u32), CaptureError> {
-        output_geometry(&selected_output_description(0)?)
+        let meta = Self::primary_output_metadata()?;
+        Ok((meta.pixel_width, meta.pixel_height))
+    }
+
+    /// Full metadata (physical pixels, logical desktop bounds, DPI scale) of
+    /// the primary DXGI output.
+    pub fn primary_output_metadata() -> Result<SelectedOutputMetadata, CaptureError> {
+        selected_output_metadata(0)
     }
 
     pub fn new(display_index: usize, timeout: Duration) -> Result<Self, CaptureError> {
@@ -181,6 +192,7 @@ impl WindowsCapture {
     }
 }
 
+#[cfg(test)]
 trait OutputGeometry {
     fn geometry(&self) -> (usize, usize);
     fn rotation(&self) -> i32 {
@@ -188,6 +200,7 @@ trait OutputGeometry {
     }
 }
 
+#[cfg(test)]
 impl OutputGeometry for DXGI_OUTPUT_DESC {
     fn geometry(&self) -> (usize, usize) {
         let rect = self.DesktopCoordinates;
@@ -202,15 +215,14 @@ impl OutputGeometry for DXGI_OUTPUT_DESC {
     }
 }
 
+#[cfg(test)]
 fn output_geometry(source: &impl OutputGeometry) -> Result<(u32, u32), CaptureError> {
     let (width, height) = source.geometry();
     if width == 0 || height == 0 {
         return Err(CaptureError::InvalidFrame);
     }
     // Match dxgi-capture-rs 1.2.2 copy_surface_data, not its unrotated geometry().
-    let (width, height) = if source.rotation() == DXGI_MODE_ROTATION_ROTATE90.0
-        || source.rotation() == DXGI_MODE_ROTATION_ROTATE270.0
-    {
+    let (width, height) = if source.rotation() == 2 || source.rotation() == 4 {
         (height, width)
     } else {
         (width, height)
@@ -221,7 +233,7 @@ fn output_geometry(source: &impl OutputGeometry) -> Result<(u32, u32), CaptureEr
     ))
 }
 
-fn selected_output_description(display_index: usize) -> Result<DXGI_OUTPUT_DESC, CaptureError> {
+fn selected_output_metadata(display_index: usize) -> Result<SelectedOutputMetadata, CaptureError> {
     let initialization =
         |error: windows::core::Error| CaptureError::Initialization(error.to_string());
     // SAFETY: DXGI returns an owned COM interface; no caller-owned raw pointers.
@@ -246,7 +258,7 @@ fn selected_output_description(display_index: usize) -> Result<DXGI_OUTPUT_DESC,
                 Err(_) => break,
             };
             // SAFETY: output is live; GetDesc initializes the returned value.
-            let desc = unsafe { output.GetDesc() }.map_err(initialization)?;
+            let desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }.map_err(initialization)?;
             if !desc.AttachedToDesktop.as_bool() {
                 continue;
             }
@@ -257,15 +269,36 @@ fn selected_output_description(display_index: usize) -> Result<DXGI_OUTPUT_DESC,
             let output: IDXGIOutput1 = output.cast().map_err(initialization)?;
             // DuplicateOutput is only a capability/selection check, never pixel acquisition.
             // SAFETY: both COM interfaces remain live for the call.
-            let duplication = unsafe { output.DuplicateOutput(&device) }.or_else(|_| {
-                let fallback = geometry_device(&adapter, None)?;
-                // SAFETY: fallback device and output remain live for the call.
-                unsafe { output.DuplicateOutput(&fallback) }
+            let duplication = unsafe { output.DuplicateOutput(&device) }
+                .or_else(|_| {
+                    let fallback = geometry_device(&adapter, None)?;
+                    // SAFETY: fallback device and output remain live for the call.
+                    unsafe { output.DuplicateOutput(&fallback) }
+                })
+                .map_err(initialization)?;
+
+            let dupl_desc: DXGI_OUTDUPL_DESC = unsafe { duplication.GetDesc() };
+            let raw_output = RawOutputDesc {
+                desktop_left: desc.DesktopCoordinates.left,
+                desktop_top: desc.DesktopCoordinates.top,
+                desktop_right: desc.DesktopCoordinates.right,
+                desktop_bottom: desc.DesktopCoordinates.bottom,
+                rotation: desc.Rotation.0,
+            };
+            let raw_dupl = RawDuplDesc {
+                mode_width: dupl_desc.ModeDesc.Width,
+                mode_height: dupl_desc.ModeDesc.Height,
+                rotation: dupl_desc.Rotation.0,
+            };
+            return resolve_output_metadata(&raw_output, &raw_dupl).map_err(|_| {
+                if dupl_desc.Rotation.0 != 1 && dupl_desc.Rotation.0 != 0 {
+                    CaptureError::UnsupportedRotation(dupl_desc.Rotation.0)
+                } else if desc.Rotation.0 != 1 && desc.Rotation.0 != 0 {
+                    CaptureError::UnsupportedRotation(desc.Rotation.0)
+                } else {
+                    CaptureError::InvalidFrame
+                }
             });
-            if duplication.is_ok() {
-                return Ok(desc);
-            }
-            break; // Do not select a different output on this adapter after failure.
         }
     }
     Err(CaptureError::Initialization(
@@ -296,12 +329,12 @@ fn geometry_device(
     device.ok_or_else(|| windows::core::Error::from_hresult(E_FAIL))
 }
 
-fn duration_ms(timeout: Duration) -> u32 {
-    u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX)
-}
-
 fn saturating_u32(value: usize) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+fn duration_ms(timeout: Duration) -> u32 {
+    u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX)
 }
 
 fn rect_from_edges(left: i32, top: i32, right: i32, bottom: i32) -> Option<DirtyRect> {

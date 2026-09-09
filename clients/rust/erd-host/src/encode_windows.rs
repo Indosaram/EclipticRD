@@ -23,6 +23,7 @@ use std::{marker::PhantomData, mem::ManuallyDrop, ptr, rc::Rc, slice, time::Inst
 
 use synchronous::{InputMetadata, PendingInputs, SynchronousTransform};
 
+use crate::session::host_trace;
 use thiserror::Error;
 use windows::{
     core::{Interface, GUID},
@@ -34,8 +35,8 @@ use windows::{
             CODECAPI_AVEncNumWorkerThreads, CODECAPI_AVEncVideoForceKeyFrame, ICodecAPI,
             IMFActivate, IMFMediaBuffer, IMFMediaType, IMFSample, IMFTransform, MFCreateMediaType,
             MFCreateMemoryBuffer, MFCreateSample, MFMediaType_Video, MFSampleExtension_CleanPoint,
-            MFShutdown, MFStartup, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_HEVC,
-            MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_FULL,
+            MFShutdown, MFStartup, MFTEnumEx, MFT_TRANSFORM_CLSID_Attribute, MFVideoFormat_H264,
+            MFVideoFormat_HEVC, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFSTARTUP_FULL,
             MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_FLAG, MFT_ENUM_FLAG_SORTANDFILTER,
             MFT_ENUM_FLAG_SYNCMFT, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
             MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
@@ -239,8 +240,8 @@ impl MediaFoundationEncoder {
         let mut last_error = None;
         for codec in codecs {
             match create_transform(codec) {
-                Ok((transform, backend)) => {
-                    return Self::configure(runtime, transform, backend, codec, config);
+                Ok((transform, backend, clsid_id)) => {
+                    return Self::configure(runtime, transform, backend, codec, clsid_id, config);
                 }
                 Err(error) => last_error = Some(error),
             }
@@ -253,8 +254,26 @@ impl MediaFoundationEncoder {
         transform: IMFTransform,
         backend: EncoderBackend,
         codec: VideoCodec,
+        clsid_id: u64,
         config: EncoderConfig,
     ) -> Result<Self, EncodeError> {
+        if let Some(trace) = host_trace::enabled() {
+            let backend_code = match backend {
+                EncoderBackend::MediaFoundationSoftware => 1,
+                EncoderBackend::MediaFoundationHardware => 2,
+            };
+            let codec_code = match codec {
+                VideoCodec::Hevc => 1,
+                VideoCodec::H264 => 2,
+            };
+            trace.record(host_trace::Record {
+                event: 39,
+                kind: backend_code,
+                size: codec_code,
+                value: clsid_id,
+                ..Default::default()
+            });
+        }
         // Per Microsoft Media Foundation specification ("H.264 Video Encoder", MSDN):
         // "Before setting the media types on the encoder, configure the encoder properties
         // by using the ICodecAPI interface."
@@ -338,7 +357,30 @@ impl MediaFoundationEncoder {
             .ok()
             .and_then(|index| index.checked_mul(self.config.frame_duration_hns()))
             .ok_or(EncodeError::TimestampOverflow)?;
-        let sample = sample_from_bytes(nv12, timestamp, self.config.frame_duration_hns())?;
+        let sample = {
+            let trace = host_trace::enabled();
+            let started = trace.map(|_| Instant::now());
+            if let Some(trace) = trace {
+                trace.record(host_trace::Record {
+                    event: 25,
+                    frame: self.frame_index,
+                    size: nv12.len(),
+                    ..Default::default()
+                });
+            }
+            let sample_res = sample_from_bytes(nv12, timestamp, self.config.frame_duration_hns());
+            if let (Some(trace), Some(started)) = (trace, started) {
+                trace.record(host_trace::Record {
+                    event: 26,
+                    frame: self.frame_index,
+                    value: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                    size: nv12.len(),
+                    repeat: sample_res.is_err(),
+                    ..Default::default()
+                });
+            }
+            sample_res?
+        };
         let input = PreparedInput {
             sample,
             timestamp_hns: timestamp,
@@ -368,8 +410,27 @@ impl MediaFoundationEncoder {
         }
         if let Some(api) = &self.codec_api {
             let value = VARIANT::from(bitrate);
+            let trace = host_trace::enabled();
+            let started = trace.map(|_| Instant::now());
+            if let Some(trace) = trace {
+                trace.record(host_trace::Record {
+                    event: 35,
+                    value: u64::from(bitrate),
+                    ..Default::default()
+                });
+            }
             // SAFETY: the API and UI4 variant live through the synchronous call.
-            match unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value) } {
+            let res = unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value) };
+            if let (Some(trace), Some(started)) = (trace, started) {
+                trace.record(host_trace::Record {
+                    event: 36,
+                    value: u64::from(bitrate),
+                    size: usize::try_from(started.elapsed().as_micros()).unwrap_or(usize::MAX),
+                    repeat: res.is_err(),
+                    ..Default::default()
+                });
+            }
+            match res {
                 Ok(()) => {
                     self.config.bitrate = bitrate;
                     return Ok(());
@@ -379,9 +440,26 @@ impl MediaFoundationEncoder {
                 }
             }
         }
+        let trace = host_trace::enabled();
+        let started = trace.map(|_| Instant::now());
+        if let Some(trace) = trace {
+            trace.record(host_trace::Record {
+                event: 37,
+                value: u64::from(bitrate),
+                ..Default::default()
+            });
+        }
         let mut config = self.config;
         config.bitrate = bitrate;
         *self = MediaFoundationEncoder::new(config)?;
+        if let (Some(trace), Some(started)) = (trace, started) {
+            trace.record(host_trace::Record {
+                event: 38,
+                value: u64::from(bitrate),
+                size: usize::try_from(started.elapsed().as_micros()).unwrap_or(usize::MAX),
+                ..Default::default()
+            });
+        }
         Ok(())
     }
 
@@ -407,6 +485,15 @@ impl MediaFoundationEncoder {
     }
 
     fn take_output(&mut self) -> Result<Option<EncodedFrame>, EncodeError> {
+        let trace = host_trace::enabled();
+        let started = trace.map(|_| Instant::now());
+        if let Some(trace) = trace {
+            trace.record(host_trace::Record {
+                event: 33,
+                frame: self.frame_index,
+                ..Default::default()
+            });
+        }
         let stream_info = unsafe { self.transform.GetOutputStreamInfo(0)? };
         let transform_provides_sample = stream_info.dwFlags
             & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32
@@ -433,15 +520,48 @@ impl MediaFoundationEncoder {
         let _events = unsafe { ManuallyDrop::take(&mut output[0].pEvents) };
         match result {
             Ok(()) => {}
-            Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => return Ok(None),
+            Err(error) if error.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => {
+                if let (Some(trace), Some(started)) = (trace, started) {
+                    trace.record(host_trace::Record {
+                        event: 34,
+                        frame: self.frame_index,
+                        value: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                        size: 0,
+                        ..Default::default()
+                    });
+                }
+                return Ok(None);
+            }
             Err(error) if error.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                if let (Some(trace), Some(started)) = (trace, started) {
+                    trace.record(host_trace::Record {
+                        event: 34,
+                        frame: self.frame_index,
+                        value: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                        size: 0,
+                        repeat: true,
+                        ..Default::default()
+                    });
+                }
                 let new_type = unsafe { self.transform.GetOutputAvailableType(0, 0)? };
                 unsafe { self.transform.SetOutputType(0, &new_type, 0)? };
                 self.output_type = new_type;
                 self.parameter_sets = media_type_parameter_sets(&self.output_type, self.codec);
                 return self.take_output();
             }
-            Err(error) => return Err(error.into()),
+            Err(error) => {
+                if let (Some(trace), Some(started)) = (trace, started) {
+                    trace.record(host_trace::Record {
+                        event: 34,
+                        frame: self.frame_index,
+                        value: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                        size: 0,
+                        repeat: true,
+                        ..Default::default()
+                    });
+                }
+                return Err(error.into());
+            }
         }
 
         let sample = output_sample.ok_or(EncodeError::MissingOutput)?;
@@ -486,8 +606,20 @@ impl MediaFoundationEncoder {
             }
         }
 
+        let data = write_avcc(&nalus)?;
+        if let (Some(trace), Some(started)) = (trace, started) {
+            trace.record(host_trace::Record {
+                event: 34,
+                frame: self.frame_index,
+                value: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                size: data.len(),
+                keyframe: is_key_frame,
+                ..Default::default()
+            });
+        }
+
         Ok(Some(EncodedFrame {
-            data: write_avcc(&nalus)?,
+            data,
             is_key_frame,
             timestamp_hns,
             codec: self.codec,
@@ -504,7 +636,18 @@ impl SynchronousTransform for MediaFoundationEncoder {
     type Error = EncodeError;
 
     fn process_input(&mut self, input: &PreparedInput) -> Result<(), EncodeError> {
-        if input.force_keyframe || !self.first_keyframe_emitted {
+        let is_key = input.force_keyframe || !self.first_keyframe_emitted;
+        let trace = host_trace::enabled();
+        let started = trace.map(|_| Instant::now());
+        if let Some(trace) = trace {
+            trace.record(host_trace::Record {
+                event: 27,
+                frame: self.frame_index,
+                keyframe: is_key,
+                ..Default::default()
+            });
+        }
+        if is_key {
             if let Some(api) = &self.codec_api {
                 let value = VARIANT::from(1_u32);
                 // SAFETY: keyframe is VT_UI4; reapply on the SAME rejected input.
@@ -512,7 +655,18 @@ impl SynchronousTransform for MediaFoundationEncoder {
             }
         }
         // SAFETY: input owns a timestamped NV12 sample matching the negotiated type.
-        unsafe { self.transform.ProcessInput(0, &input.sample, 0)? };
+        let result = unsafe { self.transform.ProcessInput(0, &input.sample, 0) };
+        if let (Some(trace), Some(started)) = (trace, started) {
+            trace.record(host_trace::Record {
+                event: 28,
+                frame: self.frame_index,
+                value: u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+                keyframe: is_key,
+                repeat: result.is_err(),
+                ..Default::default()
+            });
+        }
+        result?;
         self.pending_inputs
             .accept(input.timestamp_hns, input.metadata);
         self.frame_index += 1;
@@ -539,15 +693,15 @@ impl Drop for MediaFoundationEncoder {
     }
 }
 
-fn create_transform(codec: VideoCodec) -> Result<(IMFTransform, EncoderBackend), EncodeError> {
+fn create_transform(codec: VideoCodec) -> Result<(IMFTransform, EncoderBackend, u64), EncodeError> {
     // Synchronous MFTs first: the Microsoft Software H.264/HEVC encoders work
     // with the synchronous processInput/processMessage pipeline below. Hardware
     // MFTs (NVIDIA etc.) are asynchronous and require the event-driven
     // IMFMediaEventGenerator pipeline, which is not implemented yet — they are
     // deliberately skipped until that lands.
     let sync_flags = MFT_ENUM_FLAG(MFT_ENUM_FLAG_SYNCMFT.0 | MFT_ENUM_FLAG_SORTANDFILTER.0);
-    if let Some(transform) = enumerate_transform(codec, sync_flags)? {
-        return Ok((transform, EncoderBackend::MediaFoundationSoftware));
+    if let Some((transform, clsid_id)) = enumerate_transform(codec, sync_flags)? {
+        return Ok((transform, EncoderBackend::MediaFoundationSoftware, clsid_id));
     }
     // Do NOT fall back to MFT_ENUM_FLAG_ALL: it surfaces asynchronous hardware
     // MFTs (NVIDIA etc.), which hang the synchronous ProcessInput/ProcessOutput
@@ -558,7 +712,7 @@ fn create_transform(codec: VideoCodec) -> Result<(IMFTransform, EncoderBackend),
 fn enumerate_transform(
     codec: VideoCodec,
     flags: MFT_ENUM_FLAG,
-) -> Result<Option<IMFTransform>, EncodeError> {
+) -> Result<Option<(IMFTransform, u64)>, EncodeError> {
     let input = MFT_REGISTER_TYPE_INFO {
         guidMajorType: MFMediaType_Video,
         guidSubtype: MFVideoFormat_NV12,
@@ -591,7 +745,14 @@ fn enumerate_transform(
                 continue;
             };
             if selected.is_none() {
-                selected = Some(activation.ActivateObject::<IMFTransform>()?);
+                let clsid_id = activation
+                    .GetGUID(&MFT_TRANSFORM_CLSID_Attribute)
+                    .map(|guid| {
+                        let bytes = guid.to_u128().to_le_bytes();
+                        u64::from_le_bytes(bytes[0..8].try_into().unwrap())
+                    })
+                    .unwrap_or(0);
+                selected = Some((activation.ActivateObject::<IMFTransform>()?, clsid_id));
             }
         }
         CoTaskMemFree(Some(activations.cast()));

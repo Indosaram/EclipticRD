@@ -116,7 +116,7 @@ mod imp {
                     break;
                 }
                 let frame_bytes =
-                    self.source.channels as usize * if self.source.is_float { 4 } else { 2 };
+                    self.source.channels * if self.source.is_float { 4 } else { 2 };
                 if flags & AUDCLNT_BUFFERFLAGS_SILENT != 0 {
                     // Buffer contents are undefined while the flag is set.
                     raw.resize(raw.len() + frames as usize * frame_bytes, 0);

@@ -77,3 +77,80 @@ fn sender_trace_retains_first_fixed_records_and_overflow() {
     assert_eq!(records.records[65_535].sequence, 65_535);
     assert_eq!(records.records[0].frame, 7);
 }
+
+#[test]
+fn windows_stage_attribution_events_record_and_serialize() {
+    let directory = tempfile::tempdir().unwrap();
+    let trace = host_trace::Trace::for_test(directory.path().join("attribution.json"));
+
+    // Stage attribution events across pipeline:
+    // 21/22: cursor send start/end
+    // 23/24: video output send start/end
+    // 25/26: MFT sample alloc/copy start/end
+    // 27/28: ProcessInput start/end
+    // 33/34: ProcessOutput start/end
+    // 35/36: bitrate SetValue start/end
+    // 37/38: bitrate Recreate start/end
+    // 39: selected MFT identity & backend
+    // 40: total encode wall-time
+    let events: [(u8, u64, u64, usize, u8, bool); 17] = [
+        (21, 100, 0, 0, 0, false),            // cursor send start
+        (22, 100, 45, 0, 0, false),           // cursor send end: 45us
+        (25, 100, 0, 9_216_000, 0, false),    // sample alloc/copy start
+        (26, 100, 1200, 9_216_000, 0, false), // sample alloc/copy end: 1200us
+        (27, 100, 0, 0, 0, true),             // ProcessInput start (keyframe)
+        (28, 100, 340, 0, 0, false),          // ProcessInput end: 340us
+        (33, 100, 0, 0, 0, false),            // ProcessOutput start
+        (34, 100, 850, 42_000, 0, true),      // ProcessOutput end: 850us, 42KB, keyframe
+        (40, 100, 2390, 0, 0, false),         // total encode wall-time: 2390us
+        (23, 100, 0, 42_000, 0, true),        // video output send start
+        (24, 100, 60, 0, 0, false),           // video output send end: 60us
+        (35, 0, 5_000_000, 0, 0, false),      // bitrate SetValue start: 5Mbps
+        (36, 0, 5_000_000, 150, 0, false),    // bitrate SetValue end: 150us
+        (37, 0, 6_000_000, 0, 0, false),      // bitrate Recreate start: 6Mbps
+        (38, 0, 6_000_000, 45_000, 0, false), // bitrate Recreate end: 45ms
+        (39, 0, 0x6ca5_0344, 1, 1, false),    // selected MFT: backend=1 (SW), codec=1 (HEVC), clsid
+        (20, 100, 123_456, 0, 0, true),       // send_frame start
+    ];
+
+    for (event, frame, value, size, kind, keyframe) in events {
+        trace.record(host_trace::Record {
+            event,
+            frame,
+            value,
+            size,
+            kind,
+            keyframe,
+            ..Default::default()
+        });
+    }
+
+    let records = trace.records.lock().unwrap();
+    assert_eq!(records.records.len(), 17);
+    assert_eq!(records.overflow, 0);
+    assert_eq!(records.records[0].event, 21);
+    assert_eq!(records.records[1].event, 22);
+    assert_eq!(records.records[1].value, 45);
+    assert_eq!(records.records[8].event, 40);
+    assert_eq!(records.records[8].value, 2390);
+    assert_eq!(records.records[15].event, 39);
+    assert_eq!(records.records[15].kind, 1);
+    assert_eq!(records.records[15].size, 1);
+    assert_eq!(records.records[15].value, 0x6ca5_0344);
+    drop(records);
+
+    trace.dump().unwrap();
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(directory.path().join("attribution.json")).unwrap())
+            .unwrap();
+    let array = json["records"].as_array().unwrap();
+    assert_eq!(array.len(), 17);
+    assert_eq!(array[0]["event"], 21);
+    assert_eq!(array[1]["event"], 22);
+    assert_eq!(array[1]["value"], 45);
+    assert_eq!(array[8]["event"], 40);
+    assert_eq!(array[8]["value"], 2390);
+    assert_eq!(array[15]["event"], 39);
+    assert_eq!(array[15]["kind"], 1);
+    assert_eq!(array[15]["size"], 1);
+}

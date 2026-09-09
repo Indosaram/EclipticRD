@@ -360,6 +360,82 @@ const KEY_MAP: &[(u16, u16)] = &[
     (126, 0x26),
 ];
 
+/// Raw descriptor information extracted from DXGI output enumeration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawOutputDesc {
+    pub desktop_left: i32,
+    pub desktop_top: i32,
+    pub desktop_right: i32,
+    pub desktop_bottom: i32,
+    pub rotation: i32,
+}
+
+/// Raw descriptor information extracted from DXGI desktop duplication mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawDuplDesc {
+    pub mode_width: u32,
+    pub mode_height: u32,
+    pub rotation: i32,
+}
+
+/// Consolidated output geometry describing both physical capture pixels and logical desktop space.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SelectedOutputMetadata {
+    pub pixel_width: u32,
+    pub pixel_height: u32,
+    pub logical_width: u32,
+    pub logical_height: u32,
+    pub scale_factor_milli: u32,
+}
+
+impl SelectedOutputMetadata {
+    pub fn scale_factor(&self) -> f32 {
+        self.scale_factor_milli as f32 / 1_000.0
+    }
+}
+
+pub fn resolve_output_metadata(
+    output: &RawOutputDesc,
+    dupl: &RawDuplDesc,
+) -> Result<SelectedOutputMetadata, &'static str> {
+    if dupl.mode_width == 0 || dupl.mode_height == 0 {
+        return Err("physical output mode dimensions must be positive");
+    }
+    // Rotation values: 0 = Unspecified, 1 = Identity, 2 = Rotate90, 3 = Rotate180, 4 = Rotate270.
+    // The DXGI duplication surface always arrives in unrotated native raster orientation.
+    // Without a GPU shader or CPU transposition pass, rotated displays cannot be displayed correctly.
+    if (dupl.rotation != 1 && dupl.rotation != 0) || (output.rotation != 1 && output.rotation != 0)
+    {
+        return Err("display rotation is unsupported without pixel rotation transform");
+    }
+
+    // Preserve the unrotated physical raster directly from the DXGI duplication mode.
+    let pixel_width = dupl.mode_width;
+    let pixel_height = dupl.mode_height;
+
+    let raw_log_w = (output.desktop_right - output.desktop_left).unsigned_abs();
+    let raw_log_h = (output.desktop_bottom - output.desktop_top).unsigned_abs();
+    if raw_log_w == 0 || raw_log_h == 0 {
+        return Err("desktop coordinate dimensions must be positive");
+    }
+    let logical_width = raw_log_w;
+    let logical_height = raw_log_h;
+
+    let scale_factor_milli = if logical_width > 0 && pixel_width > 0 {
+        ((u64::from(pixel_width) * 1_000) / u64::from(logical_width)).clamp(1_000, 10_000) as u32
+    } else {
+        1_000
+    };
+
+    Ok(SelectedOutputMetadata {
+        pixel_width,
+        pixel_height,
+        logical_width,
+        logical_height,
+        scale_factor_milli,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -538,5 +614,135 @@ mod tests {
         assert_eq!(out[0], 0.0); // frame 0 -> source frame 0
         assert_eq!(out[2], 0.5); // frame 1 -> halfway 0..1
         assert!((out[4] - 1.0).abs() < 1e-6); // frame 2 -> source frame 1
+    }
+
+    #[test]
+    fn windows_geometry_dpi_scaling_resolves_physical_and_logical() {
+        // Given a 3840x1600 physical monitor virtualized to 3072x1280 (125% DPI scale).
+        let output = RawOutputDesc {
+            desktop_left: 0,
+            desktop_top: 0,
+            desktop_right: 3072,
+            desktop_bottom: 1280,
+            rotation: 1, // IDENTITY
+        };
+        let dupl = RawDuplDesc {
+            mode_width: 3840,
+            mode_height: 1600,
+            rotation: 1, // IDENTITY
+        };
+
+        // When resolving metadata.
+        let meta = resolve_output_metadata(&output, &dupl).unwrap();
+
+        // Then physical pixel dimensions match DXGI capture texture (3840x1600),
+        // preventing the 5,898,240 vs 9,216,000 NV12 length mismatch.
+        assert_eq!(meta.pixel_width, 3840);
+        assert_eq!(meta.pixel_height, 1600);
+        assert_eq!(meta.logical_width, 3072);
+        assert_eq!(meta.logical_height, 1280);
+        assert_eq!(meta.scale_factor_milli, 1250);
+        assert!((meta.scale_factor() - 1.25).abs() < 1e-6);
+
+        // Verify buffer length calculation:
+        let physical_nv12_len = (meta.pixel_width as usize) * (meta.pixel_height as usize) * 3 / 2;
+        assert_eq!(physical_nv12_len, 9_216_000);
+        let flawed_logical_nv12_len =
+            (meta.logical_width as usize) * (meta.logical_height as usize) * 3 / 2;
+        assert_eq!(flawed_logical_nv12_len, 5_898_240);
+        // Flawed logical length fails against physical frame size.
+        assert_ne!(flawed_logical_nv12_len, physical_nv12_len);
+    }
+
+    #[test]
+    fn windows_geometry_ordinary_100_percent_scaling() {
+        // Given standard 1080p display with 100% scaling.
+        let output = RawOutputDesc {
+            desktop_left: 0,
+            desktop_top: 0,
+            desktop_right: 1920,
+            desktop_bottom: 1080,
+            rotation: 1,
+        };
+        let dupl = RawDuplDesc {
+            mode_width: 1920,
+            mode_height: 1080,
+            rotation: 1,
+        };
+
+        let meta = resolve_output_metadata(&output, &dupl).unwrap();
+        assert_eq!(meta.pixel_width, 1920);
+        assert_eq!(meta.pixel_height, 1080);
+        assert_eq!(meta.logical_width, 1920);
+        assert_eq!(meta.logical_height, 1080);
+        assert_eq!(meta.scale_factor_milli, 1000);
+        assert_eq!(meta.scale_factor(), 1.0);
+    }
+
+    #[test]
+    fn windows_geometry_rotated_display_rejected_without_pixel_transform() {
+        // Given 90-degree and 270-degree rotated display configurations.
+        let output_90 = RawOutputDesc {
+            desktop_left: 0,
+            desktop_top: 0,
+            desktop_right: 1280,
+            desktop_bottom: 3072,
+            rotation: 2, // ROTATE90
+        };
+        let dupl_90 = RawDuplDesc {
+            mode_width: 3840,
+            mode_height: 1600,
+            rotation: 2, // ROTATE90
+        };
+        // When/Then: explicitly rejected rather than shipping mismatched input/advertisement.
+        assert!(resolve_output_metadata(&output_90, &dupl_90).is_err());
+
+        let output_270 = RawOutputDesc {
+            desktop_left: 0,
+            desktop_top: 0,
+            desktop_right: 1280,
+            desktop_bottom: 3072,
+            rotation: 4, // ROTATE270
+        };
+        let dupl_270 = RawDuplDesc {
+            mode_width: 3840,
+            mode_height: 1600,
+            rotation: 4, // ROTATE270
+        };
+        assert!(resolve_output_metadata(&output_270, &dupl_270).is_err());
+    }
+
+    #[test]
+    fn windows_geometry_invalid_dimensions_rejected() {
+        assert!(resolve_output_metadata(
+            &RawOutputDesc {
+                desktop_left: 0,
+                desktop_top: 0,
+                desktop_right: 0,
+                desktop_bottom: 0,
+                rotation: 1
+            },
+            &RawDuplDesc {
+                mode_width: 1920,
+                mode_height: 1080,
+                rotation: 1
+            },
+        )
+        .is_err());
+        assert!(resolve_output_metadata(
+            &RawOutputDesc {
+                desktop_left: 0,
+                desktop_top: 0,
+                desktop_right: 1920,
+                desktop_bottom: 1080,
+                rotation: 1
+            },
+            &RawDuplDesc {
+                mode_width: 0,
+                mode_height: 0,
+                rotation: 1
+            },
+        )
+        .is_err());
     }
 }
