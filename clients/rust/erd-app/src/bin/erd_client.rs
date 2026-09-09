@@ -13,7 +13,7 @@ use clap::Parser;
 use erd_app::{
     agent_input::ScreenInfo,
     agent_server::{AgentServer, AgentServerBackend},
-    mcp_server::run_mcp_stdio,
+    mcp_server::run_mcp_stdio_until,
     ClientSession, LatencyRecorder, PairingRecord, PairingStore, ReceiverSnapshot, SessionConfig,
     SessionEvent,
 };
@@ -76,8 +76,8 @@ struct Cli {
     stats_json: Option<PathBuf>,
 
     /// Overall execution timeout in seconds.
-    #[arg(long, default_value_t = DEFAULT_TIMEOUT_SECS)]
-    timeout_secs: u64,
+    #[arg(long)]
+    timeout_secs: Option<u64>,
 
     /// Name of client sent in handshake.
     #[arg(long, default_value = "erd-headless-client")]
@@ -93,6 +93,16 @@ struct Cli {
 }
 
 type LatestFrameHolder = Arc<std::sync::Mutex<Option<(u32, u32, Arc<Vec<u8>>)>>>;
+
+impl Cli {
+    fn deadline_expired(&self, elapsed: Duration) -> bool {
+        self.timeout_secs
+            .or_else(|| {
+                (!(self.mcp || self.agent_server.is_some())).then_some(DEFAULT_TIMEOUT_SECS)
+            })
+            .is_some_and(|seconds| elapsed >= Duration::from_secs(seconds))
+    }
+}
 
 #[derive(Clone)]
 struct ClientBackend {
@@ -307,8 +317,17 @@ fn parse_hex_32(hex_str: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+#[cfg(windows)]
+#[path = "../mcp_windows_relay.rs"]
+mod mcp_windows_relay;
+
 fn main() -> Result<()> {
+    #[cfg(windows)]
+    if mcp_windows_relay::run_if_requested()? {
+        return Ok(());
+    }
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
@@ -328,7 +347,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
     });
 
     let target_frames = cli.frames.unwrap_or(u64::MAX);
-    let timeout = Duration::from_secs(cli.timeout_secs);
+
     let start_time = Instant::now();
 
     let session_config = SessionConfig {
@@ -346,7 +365,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
         host = %cli.host,
         tcp_port = cli.tcp_port,
         udp_port = udp_port,
-        timeout_secs = cli.timeout_secs,
+        timeout_secs = ?cli.timeout_secs,
         "Initializing headless client session"
     );
 
@@ -462,7 +481,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
     let mut decoder: Option<HevcDecoder> = None;
     let mut decoded_frames: u64 = 0;
 
-    let frame_rx = Arc::new(FrameQueue::new());
+    let frame_rx = Arc::new(FrameQueue::with_receiver_trace(session.receiver_trace()));
     let frame_tx = frame_rx.clone();
     let session_udp = session.clone();
     let r_udp = running.clone();
@@ -504,6 +523,8 @@ fn run_client(mut cli: Cli) -> Result<()> {
     let mut agent_server_handle: Option<std::thread::JoinHandle<std::io::Result<()>>> = None;
     let mut agent_spawn_result = Ok(());
     let mut agent_server_stop: Option<tokio::sync::watch::Sender<bool>> = None;
+    let mut mcp_handle = None;
+    let mut mcp_stop = None;
     if cli.agent_server.is_some() || cli.mcp {
         let backend = Arc::new(ClientBackend {
             session: session.clone(),
@@ -520,22 +541,25 @@ fn run_client(mut cli: Cli) -> Result<()> {
         if let Some(port_opt) = cli.agent_server {
             let port = port_opt.unwrap_or(19735);
             let b = backend.clone();
+            let r_agent = running.clone();
             let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
             agent_server_stop = Some(stop_tx);
             agent_spawn_result = std::thread::Builder::new()
                 .name("erd-client-agent-server".into())
                 .spawn(move || {
-                    run_agent_server_runtime(async move {
+                    let result = run_agent_server_runtime(async move {
                         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
                         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-                        let server = AgentServer::new(addr, b);
-                        info!("Headless agent server listening on http://127.0.0.1:{port}");
+                        let (server, addr) = AgentServer::bind(addr, b).await?;
+                        info!("Headless agent server listening on http://{addr}");
                         let server_task = tokio::spawn(server.run(shutdown_rx));
                         // Owned worker join: returns when a disconnect request
                         // closed the listener, otherwise stops the worker once
                         // the CLI lifecycle signals shutdown - no polling.
                         join_agent_server_worker(server_task, shutdown_tx, stop_rx).await
-                    })
+                    });
+                    r_agent.store(false, Ordering::SeqCst);
+                    result
                 })
                 .map(|handle| agent_server_handle = Some(handle))
                 .context("failed to spawn agent server thread");
@@ -543,24 +567,24 @@ fn run_client(mut cli: Cli) -> Result<()> {
 
         if cli.mcp {
             let b = backend.clone();
-            std::thread::Builder::new()
+            let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+            mcp_stop = Some(stop_tx);
+            let r_mcp = running.clone();
+            let result = std::thread::Builder::new()
                 .name("erd-client-mcp".into())
                 .spawn(move || {
-                    let rt = match tokio::runtime::Builder::new_current_thread()
+                    let result = tokio::runtime::Builder::new_current_thread()
                         .enable_all()
                         .build()
-                    {
-                        Ok(rt) => rt,
-                        Err(e) => {
-                            error!("Failed to create mcp runtime: {e}");
-                            return;
-                        }
-                    };
-                    rt.block_on(async move {
-                        let _ = run_mcp_stdio(b).await;
-                    });
+                        .and_then(|rt| rt.block_on(run_mcp_stdio_until(b, stop_rx)));
+                    r_mcp.store(false, Ordering::SeqCst);
+                    result
                 })
-                .ok();
+                .context("failed to spawn MCP worker");
+            match result {
+                Ok(handle) => mcp_handle = Some(handle),
+                Err(error) => agent_spawn_result = Err(error),
+            }
         }
     }
 
@@ -625,11 +649,8 @@ fn run_client(mut cli: Cli) -> Result<()> {
         && udp_receiver_handle.is_ok()
         && running.load(Ordering::Relaxed)
     {
-        if start_time.elapsed() >= timeout {
-            error!(
-                decoded_frames,
-                target_frames, "Session timed out after {} seconds", cli.timeout_secs
-            );
+        if cli.deadline_expired(start_time.elapsed()) {
+            error!(decoded_frames, target_frames, "Session deadline expired");
             break;
         }
 
@@ -740,6 +761,10 @@ fn run_client(mut cli: Cli) -> Result<()> {
     }
 
     running.store(false, Ordering::SeqCst);
+    if let Some(stop) = mcp_stop.take() {
+        // A closed receiver means the worker has already completed.
+        stop.send_replace(true);
+    }
     if let Some(stop_tx) = agent_server_stop.take() {
         let _ = stop_tx.send(true);
     }
@@ -759,7 +784,13 @@ fn run_client(mut cli: Cli) -> Result<()> {
             .and_then(|result| result)
     });
     let receiver_result = session.receiver_snapshot();
-    let transport_result = teardown(&session, &mut tcp_runtime);
+    let mcp_result = match mcp_handle {
+        Some(handle) => handle
+            .join()
+            .map_err(|_| anyhow::anyhow!("MCP worker panicked"))
+            .and_then(|result| result.context("MCP worker failed")),
+        None => Ok(()),
+    };
     let agent_result = if let Some(handle) = agent_server_handle {
         handle
             .join()
@@ -768,6 +799,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
     } else {
         Ok(())
     };
+    let transport_result = teardown(&session, &mut tcp_runtime);
     // Export even when transport cleanup failed, but never substitute an empty
     // snapshot for a failed acquisition. All teardown precedes fallible file I/O.
     let stats_result = receiver_result
@@ -786,6 +818,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
         transport_result,
         udp_result,
         agent_result,
+        mcp_result,
         stats_result,
     ] {
         if let Err(error) = result {
@@ -797,7 +830,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
     }
     cleanup_result?;
 
-    if !reached_target && start_time.elapsed() >= timeout {
+    if !reached_target && cli.deadline_expired(start_time.elapsed()) {
         bail!("timeout expired before decoding requested frames (got {decoded_frames}/{target_frames})");
     }
 
@@ -897,6 +930,30 @@ where
 #[cfg(test)]
 mod pipeline_tests {
     use super::*;
+
+    #[test]
+    fn agent_default_has_no_deadline() {
+        let cli = Cli::parse_from(["erd-client", "--host", "fixture", "--mcp"]);
+        assert_eq!(
+            serde_json::to_value(cli.timeout_secs).unwrap(),
+            serde_json::Value::Null
+        );
+        assert!(!cli.deadline_expired(Duration::from_secs(31)));
+        let http = Cli::parse_from(["erd-client", "--host", "fixture", "--agent-server"]);
+        assert!(!http.deadline_expired(Duration::from_secs(31)));
+        let smoke = Cli::parse_from(["erd-client", "--host", "fixture"]);
+        assert!(!smoke.deadline_expired(Duration::from_secs(29)));
+        assert!(smoke.deadline_expired(Duration::from_secs(30)));
+        let zero = Cli::parse_from([
+            "erd-client",
+            "--host",
+            "fixture",
+            "--mcp",
+            "--timeout-secs",
+            "0",
+        ]);
+        assert!(zero.deadline_expired(Duration::ZERO));
+    }
 
     #[test]
     fn screenshot_snapshot_shares_storage_after_new_frame_is_published() {
