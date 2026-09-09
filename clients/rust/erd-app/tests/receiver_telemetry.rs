@@ -15,6 +15,7 @@ use erd_proto::{
 };
 
 struct Connected {
+    // Each fixture owns its ports, credentials and temporary output directory.
     session: ClientSession,
     udp: UdpSocket,
     peer: SocketAddr,
@@ -25,6 +26,10 @@ struct Connected {
 
 impl Connected {
     fn new() -> Self {
+        Self::with_trace(erd_app::ReceiverTrace::default())
+    }
+
+    fn with_trace(trace: erd_app::ReceiverTrace) -> Self {
         let key = [0x39; 32];
         let listener = TlsPskServer::new([PskIdentity::pairing("telemetry", &key).unwrap()])
             .unwrap()
@@ -67,7 +72,8 @@ impl Connected {
                 .send((udp, peer, handshake.session_salt, stream))
                 .unwrap();
         });
-        let session = ClientSession::new(config).unwrap();
+        let mut session = ClientSession::new(config).unwrap();
+        session.set_receiver_trace(trace);
         session
             .connect_with_pairing(PairingRecord {
                 id: "telemetry".into(),
@@ -100,6 +106,203 @@ impl Connected {
     fn receive(&self, bytes: &[u8]) -> Result<SessionEvent, SessionError> {
         self.udp.send_to(bytes, self.peer).unwrap();
         self.session.receive_udp_event()
+    }
+}
+
+#[test]
+fn receiver_trace_attributes_authenticated_and_rejected_ingress() {
+    // Given an isolated authenticated endpoint, observe both trust outcomes.
+    use erd_app::{ReceiverTrace, ReceiverTraceEvent};
+    let dir = tempfile::tempdir().unwrap();
+    let trace = ReceiverTrace::at_path(dir.path().join("trace.json"));
+    let mut fixture = Connected::with_trace(trace.clone());
+    assert!(trace.snapshot().unwrap().unwrap().session.is_some());
+    let ping = fixture.seal(PacketType::Ping, 10, b"ping");
+    let mut invalid = ping.clone();
+    *invalid.last_mut().unwrap() ^= 1;
+    assert!(fixture.receive(&invalid).is_err());
+    assert_eq!(fixture.receive(&ping).unwrap(), SessionEvent::Ping);
+    let records = trace.snapshot().unwrap().unwrap().records;
+    assert!(records
+        .iter()
+        .any(|r| r.event == ReceiverTraceEvent::SocketBuffer && r.bytes > 0));
+    assert!(records
+        .iter()
+        .any(|r| r.event == ReceiverTraceEvent::AuthRejected
+            && r.sequence == Some(10)
+            && r.result == 1));
+    assert!(records
+        .iter()
+        .any(|r| r.event == ReceiverTraceEvent::Authenticated
+            && r.sequence == Some(10)
+            && r.bytes == ping.len() as u64));
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| r.event == ReceiverTraceEvent::Receive)
+            .count(),
+        2
+    );
+    fixture.session.disconnect().unwrap();
+    assert!(dir.path().join("trace.json").exists());
+}
+
+fn complete_frame(
+    fixture: &mut Connected,
+    id: u32,
+    key: bool,
+    now: Instant,
+) -> erd_app::AssembledFrame {
+    let header = fixture.seal(
+        PacketType::FrameHeader,
+        id * 2,
+        &FrameHeader {
+            frame_id: id,
+            width: 1,
+            height: 1,
+            is_key_frame: key,
+            total_chunks: 1,
+            total_size: 1,
+        }
+        .encode()
+        .unwrap(),
+    );
+    let chunk = fixture.seal(
+        PacketType::FrameChunk,
+        id * 2 + 1,
+        &FrameChunk {
+            frame_id: id,
+            chunk_index: 0,
+            data: vec![1],
+        }
+        .encode()
+        .unwrap(),
+    );
+    fixture.udp.send_to(&header, fixture.peer).unwrap();
+    assert_eq!(
+        fixture.session.receive_udp_event_at(now).unwrap(),
+        SessionEvent::Ignored
+    );
+    fixture.udp.send_to(&chunk, fixture.peer).unwrap();
+    match fixture.session.receive_udp_event_at(now).unwrap() {
+        SessionEvent::Frame(frame) => frame,
+        other => panic!("expected complete frame, got {other:?}"),
+    }
+}
+
+#[test]
+fn linux_transport_overload_preserves_accounting_and_recovers() {
+    use std::sync::Arc;
+    let mut fixture = Connected::new();
+    let queue = Arc::new(erd_app::frame_queue::FrameQueue::new());
+    let consumer = queue.clone();
+    let (release, gate) = mpsc::channel();
+    let (delivered, delivery) = mpsc::channel();
+    let worker = thread::spawn(move || {
+        gate.recv_timeout(Duration::from_secs(5)).unwrap();
+        while let Ok(frame) = consumer.recv() {
+            delivered.send(frame.0.header.frame_id).unwrap();
+        }
+    });
+    let now = Instant::now();
+    let mut requests = 0;
+    for id in 0..6 {
+        requests += usize::from(
+            queue
+                .push((complete_frame(&mut fixture, id, false, now), now))
+                .unwrap(),
+        );
+    }
+    queue
+        .push((complete_frame(&mut fixture, 6, true, now), now))
+        .unwrap();
+    queue
+        .push((complete_frame(&mut fixture, 7, false, now), now))
+        .unwrap();
+    release.send(()).unwrap();
+    let first = delivery.recv_timeout(Duration::from_secs(5));
+    let second = delivery.recv_timeout(Duration::from_secs(5));
+    queue.stop().unwrap();
+    worker.join().unwrap();
+    assert_eq!(requests, 1);
+    assert_eq!((first.unwrap(), second.unwrap()), (6, 7));
+    assert!(delivery.try_recv().is_err());
+    let snapshot = fixture
+        .session
+        .receiver_snapshot_at(now + RECEIVER_REORDER_GRACE)
+        .unwrap();
+    assert_eq!(
+        (
+            snapshot.loss_expected_packets,
+            snapshot.loss_missing_packets
+        ),
+        (16, 0)
+    );
+    fixture.session.disconnect().unwrap();
+}
+
+#[test]
+fn late_authenticated_chunk_completes_frame_without_rewriting_finalized_loss() {
+    for (delay, missing) in [(99, 0), (101, 1)] {
+        let mut fixture = Connected::new();
+        let now = Instant::now();
+        let header = fixture.seal(
+            PacketType::FrameHeader,
+            10,
+            &FrameHeader {
+                frame_id: 99,
+                width: 1,
+                height: 1,
+                is_key_frame: false,
+                total_chunks: 1,
+                total_size: 1,
+            }
+            .encode()
+            .unwrap(),
+        );
+        let chunk = fixture.seal(
+            PacketType::FrameChunk,
+            11,
+            &FrameChunk {
+                frame_id: 99,
+                chunk_index: 0,
+                data: vec![7],
+            }
+            .encode()
+            .unwrap(),
+        );
+        let timing = fixture.seal(
+            PacketType::Ping,
+            12,
+            &TimestampStats {
+                frame_id: 99,
+                capture_us: 0,
+                encode_start_us: 1,
+                encode_end_us: 2,
+                send_us: 3,
+            }
+            .encode(),
+        );
+        for bytes in [&header, &timing] {
+            fixture.udp.send_to(bytes, fixture.peer).unwrap();
+            fixture.session.receive_udp_event_at(now).unwrap();
+        }
+        fixture.udp.send_to(&chunk, fixture.peer).unwrap();
+        assert!(
+            matches!(fixture.session.receive_udp_event_at(now + Duration::from_millis(delay)).unwrap(), SessionEvent::Frame(frame) if frame.data == [7])
+        );
+        let snapshot = fixture
+            .session
+            .receiver_snapshot_at(now + Duration::from_millis(102))
+            .unwrap();
+        assert_eq!(
+            (
+                snapshot.loss_expected_packets,
+                snapshot.loss_missing_packets
+            ),
+            (3, missing)
+        );
+        fixture.session.disconnect().unwrap();
     }
 }
 

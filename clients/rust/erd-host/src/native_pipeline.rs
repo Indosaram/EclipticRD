@@ -120,6 +120,24 @@ impl<T> Handoff<T> {
         }
     }
 
+    /// Linearization point before submission: replace raw work only, and merge
+    /// controls without losing keyframe intent across a bitrate reopen.
+    fn reselect(&self, work: &mut Work<T>) -> bool {
+        let mut state = self.state.lock().expect("native handoff poisoned");
+        if state.stopped {
+            return false;
+        }
+        if state.frame.is_some() {
+            work.frame = state.frame.take();
+        }
+        work.controls.force_keyframe |= state.controls.force_keyframe;
+        state.controls.force_keyframe = false;
+        if state.controls.bitrate.is_some() {
+            work.controls.bitrate = state.controls.bitrate.take();
+        }
+        true
+    }
+
     /// Capture cadence is timed, but shutdown wakes it immediately. Controls
     /// share this Condvar without shortening the next capture interval.
     pub fn pace_until(&self, deadline: Instant) {
@@ -209,6 +227,7 @@ impl<T> Drop for Workers<T> {
 pub(super) trait Encoder<T> {
     type Output;
     type Error;
+    fn selected(&mut self, _frame: &T) {}
     fn force_keyframe(&mut self);
     fn bitrate(&mut self, bitrate: u32) -> Result<Vec<Self::Output>, Self::Error>;
     fn encode(&mut self, frame: T) -> Result<Vec<Self::Output>, Self::Error>;
@@ -222,19 +241,43 @@ pub(super) fn run_encoder<T, E: Encoder<T>>(
     mut emit: impl FnMut(E::Output) -> bool,
 ) -> Result<(), E::Error> {
     let mut encoder = initialize()?;
-    while let Some(work) = handoff.next() {
-        if let Some(bitrate) = work.controls.bitrate {
-            for packet in encoder.bitrate(bitrate)? {
-                if !emit(packet) {
-                    handoff.stop();
-                    return Ok(());
+    while let Some(mut work) = handoff.next() {
+        loop {
+            if let Some(bitrate) = work.controls.bitrate.take() {
+                if let Some(trace) = super::host_trace::enabled() {
+                    trace.record(super::host_trace::Record {
+                        event: 30,
+                        value: u64::from(bitrate),
+                        ..Default::default()
+                    });
                 }
+                let packets = encoder.bitrate(bitrate)?;
+                if let Some(trace) = super::host_trace::enabled() {
+                    trace.record(super::host_trace::Record {
+                        event: 31,
+                        value: u64::from(bitrate),
+                        ..Default::default()
+                    });
+                }
+                for packet in packets {
+                    if !emit(packet) {
+                        handoff.stop();
+                        return Ok(());
+                    }
+                }
+            }
+            if !handoff.reselect(&mut work) {
+                return Ok(());
+            }
+            if work.controls.bitrate.is_none() {
+                break;
             }
         }
         if work.controls.force_keyframe {
             encoder.force_keyframe();
         }
         if let Some(frame) = work.frame {
+            encoder.selected(&frame);
             for packet in encoder.encode(frame)? {
                 if !emit(packet) {
                     handoff.stop();
@@ -319,6 +362,9 @@ impl FrameTimes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod stalls {
+        include!("native_stall_tests.rs");
+    }
     use std::sync::mpsc::{self, Receiver};
 
     const BOUND: Duration = Duration::from_secs(2);

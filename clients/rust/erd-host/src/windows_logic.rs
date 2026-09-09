@@ -2,6 +2,9 @@
 
 use erd_proto::Modifiers;
 
+#[path = "windows_freshness.rs"]
+pub mod freshness;
+
 /// Wire audio format produced by every host: interleaved f32 LE stereo at 48 kHz,
 /// matching the client's cpal output contract in `erd-render::audio`.
 pub const WIRE_AUDIO_CHANNELS: usize = 2;
@@ -476,15 +479,25 @@ mod tests {
     #[test]
     fn stereo_48k_float_passes_through() {
         let source = SourceAudioFormat::default();
-        let pcm: Vec<u8> = [0.25_f32, -0.5].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let pcm: Vec<u8> = [0.25_f32, -0.5]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
         let wire = convert_to_wire_audio(&pcm, &source);
         assert_eq!(read_f32_le(&wire), vec![0.25, -0.5]);
     }
 
     #[test]
     fn mono_is_duplicated_and_s16_converted() {
-        let source = SourceAudioFormat { channels: 1, is_float: false, ..Default::default() };
-        let pcm: Vec<u8> = [16384_i16, -16384].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let source = SourceAudioFormat {
+            channels: 1,
+            is_float: false,
+            ..Default::default()
+        };
+        let pcm: Vec<u8> = [16384_i16, -16384]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
         let wire = convert_to_wire_audio(&pcm, &source);
         let out = read_f32_le(&wire);
         // Interleaved stereo: [L0, R0, L1, R1] with L == R == mono sample.
@@ -495,7 +508,10 @@ mod tests {
 
     #[test]
     fn multichannel_keeps_front_pair_and_partial_frames_are_dropped() {
-        let source = SourceAudioFormat { channels: 6, ..Default::default() };
+        let source = SourceAudioFormat {
+            channels: 6,
+            ..Default::default()
+        };
         let frame: Vec<u8> = [0.1_f32, 0.9, 0.0, 0.0, 0.0, 0.0]
             .iter()
             .flat_map(|s| s.to_le_bytes())
@@ -508,7 +524,10 @@ mod tests {
 
     #[test]
     fn resampling_scales_frame_count_toward_48k() {
-        let source = SourceAudioFormat { sample_rate: 24_000, ..Default::default() };
+        let source = SourceAudioFormat {
+            sample_rate: 24_000,
+            ..Default::default()
+        };
         // Two stereo frames: (0,0) then (1,1).
         let pcm: Vec<u8> = [0.0_f32, 0.0, 1.0, 1.0]
             .iter()

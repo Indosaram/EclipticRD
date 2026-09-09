@@ -55,6 +55,9 @@ pub(crate) struct ReceiverStats {
 }
 
 impl ReceiverStats {
+    pub(crate) fn set_trace(&mut self, trace: crate::ReceiverTrace) {
+        self.loss.trace = trace;
+    }
     pub(crate) fn observe_datagram(&mut self, sequence: u32, bytes: usize, now: Instant) {
         self.datagrams = self.datagrams.saturating_add(1);
         self.bytes = self.bytes.saturating_add(bytes as u64);
@@ -184,6 +187,7 @@ struct Position {
 /// counters, determines missing positions. Every operation is O(hard window).
 #[derive(Default)]
 struct PacketLoss {
+    trace: crate::ReceiverTrace,
     highest: Option<u32>,
     pending: VecDeque<Position>,
     finalized: VecDeque<(Instant, u64, u64)>,
@@ -205,12 +209,35 @@ impl PacketLoss {
             if behind < self.pending.len() {
                 let index = self.pending.len() - 1 - behind;
                 self.pending[index].received = true;
+            } else {
+                let mut record =
+                    crate::ReceiverTraceRecord::new(crate::ReceiverTraceEvent::LateOutsidePending);
+                record.sequence = Some(sequence);
+                self.trace.record(now, record);
             }
             return;
         }
         let distance = sequence.wrapping_sub(highest) as usize;
         let overflow = (self.pending.len() + distance).saturating_sub(RECEIVER_TELEMETRY_CAPACITY);
         let old = overflow.min(self.pending.len());
+        if distance > 1 {
+            let mut record =
+                crate::ReceiverTraceRecord::new(crate::ReceiverTraceEvent::GapDiscovered);
+            record.sequence = Some(highest.wrapping_add(1));
+            record.count = (distance - 1) as u64;
+            self.trace.record(now, record);
+        }
+        let first = highest
+            .wrapping_sub(self.pending.len() as u32)
+            .wrapping_add(1);
+        for (index, position) in self.pending.iter().take(old).enumerate() {
+            if !position.received {
+                let mut record =
+                    crate::ReceiverTraceRecord::new(crate::ReceiverTraceEvent::GapEvicted);
+                record.sequence = Some(first.wrapping_add(index as u32));
+                self.trace.record(now, record);
+            }
+        }
         let missing = self
             .pending
             .drain(..old)
@@ -218,6 +245,12 @@ impl PacketLoss {
             .count() as u64;
         // A huge gap evicts its unmaterialized prefix arithmetically, not per packet.
         let skipped = overflow - old;
+        if skipped > 0 {
+            let mut record = crate::ReceiverTraceRecord::new(crate::ReceiverTraceEvent::GapEvicted);
+            record.sequence = Some(highest.wrapping_add(1));
+            record.count = skipped as u64;
+            self.trace.record(now, record);
+        }
         self.record_finalized(now, overflow as u64, missing + skipped as u64);
         let retained = distance - skipped;
         for index in 0..retained {
@@ -239,6 +272,16 @@ impl PacketLoss {
             }
             let at = position.observed_at + RECEIVER_REORDER_GRACE;
             let missing = u64::from(!position.received);
+            if missing != 0 {
+                let mut record =
+                    crate::ReceiverTraceRecord::new(crate::ReceiverTraceEvent::GapGrace);
+                record.sequence = self.highest.map(|highest| {
+                    highest
+                        .wrapping_sub(self.pending.len() as u32)
+                        .wrapping_add(1)
+                });
+                self.trace.record(at, record);
+            }
             self.pending.pop_front();
             // Reads after idle use the actual deadline, not a fresh snapshot timestamp.
             self.record_finalized(at, 1, missing);
@@ -282,6 +325,41 @@ impl PacketLoss {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    include!("receiver_trace_tests.rs");
+
+    #[test]
+    fn receiver_trace_retains_first_fixed_capacity_and_counts_overflow() {
+        use crate::{
+            ReceiverTrace, ReceiverTraceEvent, ReceiverTraceRecord, RECEIVER_TRACE_CAPACITY,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let trace = ReceiverTrace::at_path(dir.path().join("trace.json"));
+        let now = Instant::now();
+        for sequence in 0..RECEIVER_TRACE_CAPACITY + 3 {
+            let mut record = ReceiverTraceRecord::new(ReceiverTraceEvent::Authenticated);
+            record.sequence = Some(sequence as u32);
+            record.kind = Some(3);
+            record.bytes = 123;
+            record.frame = Some(42);
+            trace.record(now, record);
+        }
+        let snapshot = trace.snapshot().unwrap().unwrap();
+        assert_eq!(snapshot.records.len(), RECEIVER_TRACE_CAPACITY);
+        assert_eq!(snapshot.overflow, 3);
+        assert_eq!(snapshot.records[0].sequence, Some(0));
+        assert_eq!(snapshot.records.last().unwrap().sequence, Some(65535));
+        assert_eq!(snapshot.records[0].frame, Some(42));
+        assert_eq!(snapshot.records[0].bytes, 123);
+        assert_eq!(snapshot.records[0].kind, Some(3));
+        assert!(!dir.path().join("trace.json").exists());
+        trace.write(&crate::ReceiverSnapshot::default()).unwrap();
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("trace.json")).unwrap()).unwrap();
+        assert_eq!(value[0]["overflow"], 3);
+        assert_eq!(value[0]["records"].as_array().unwrap().len(), 65536);
+        assert!(ReceiverTrace::default().snapshot().unwrap().is_none());
+    }
 
     fn host(frame_id: u32) -> TimestampStats {
         TimestampStats {

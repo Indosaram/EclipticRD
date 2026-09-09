@@ -78,6 +78,8 @@ pub const PAIRING_WINDOW: Duration = Duration::from_secs(300);
 /// ```
 pub use erd_proto::{TimestampStats, TIMESTAMP_STATS_MAGIC};
 const SWIFT_REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
+#[path = "host_trace.rs"]
+mod host_trace;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairingRecord {
@@ -1062,11 +1064,7 @@ struct WindowsMediaSource {
 }
 
 #[cfg(target_os = "windows")]
-#[derive(Clone)]
-struct WindowsRawFrame {
-    nv12: Arc<Vec<u8>>,
-    captured_at: Instant,
-}
+use crate::windows_logic::freshness::RawFrame as WindowsRawFrame;
 
 #[cfg(target_os = "windows")]
 mod display_power {
@@ -1133,6 +1131,18 @@ impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
     type Output = VideoFrame;
     type Error = String;
 
+    fn selected(&mut self, frame: &WindowsRawFrame) {
+        if let Some(trace) = host_trace::enabled() {
+            trace.record(host_trace::Record {
+                event: 19,
+                frame: frame.capture_id,
+                value: trace.time(frame.published_at),
+                repeat: frame.repeat,
+                ..Default::default()
+            });
+        }
+    }
+
     fn force_keyframe(&mut self) {
         self.0.force_key_frame();
     }
@@ -1145,6 +1155,27 @@ impl native_pipeline::Encoder<WindowsRawFrame> for WindowsSessionEncoder {
     }
 
     fn encode(&mut self, frame: WindowsRawFrame) -> Result<Vec<VideoFrame>, String> {
+        if let Some(trace) = host_trace::enabled() {
+            let (content, residence) = frame.ages(Instant::now());
+            for (event, value) in [
+                (14, trace.time(frame.captured_at)),
+                (15, u64::try_from(content.as_micros()).unwrap_or(u64::MAX)),
+                (16, u64::try_from(residence.as_micros()).unwrap_or(u64::MAX)),
+                (17, trace.time(frame.published_at)),
+                (
+                    18,
+                    u64::try_from(frame.conversion.as_micros()).unwrap_or(u64::MAX),
+                ),
+            ] {
+                trace.record(host_trace::Record {
+                    event,
+                    frame: frame.capture_id,
+                    value,
+                    repeat: frame.repeat,
+                    ..Default::default()
+                });
+            }
+        }
         self.0
             .encode_nv12(&frame.nv12, frame.captured_at)
             .map(|frames| {
@@ -1198,13 +1229,29 @@ impl MediaSource for WindowsMediaSource {
                 // Share the immutable NV12 allocation with the keepalive cache.
                 // Repeats retain the real original capture instant.
                 let mut last_frame: Option<WindowsRawFrame> = None;
+                let mut capture_id = 0_u64;
                 let mut last_emit = Instant::now();
                 let mut jiggle_flip = false;
                 let mut last_jiggle = Instant::now() - Duration::from_millis(700);
                 while !handoff.is_stopped() {
                     let started = Instant::now();
+                    if let Some(trace) = host_trace::enabled() {
+                        trace.record(host_trace::Record {
+                            event: 9,
+                            frame: capture_id + 1,
+                            ..Default::default()
+                        });
+                    }
                     match capture.acquire_next_frame(Duration::from_millis(33)) {
                         Ok(frame) => {
+                            if let Some(trace) = host_trace::enabled() {
+                                trace.record(host_trace::Record {
+                                    event: 10,
+                                    frame: capture_id + 1,
+                                    value: trace.time(started),
+                                    ..Default::default()
+                                });
+                            }
                             if frame.pointer_visible {
                                 let (px, py) = if let Some(pos) = frame.pointer_position {
                                     pos
@@ -1246,11 +1293,31 @@ impl MediaSource for WindowsMediaSource {
                                     return;
                                 }
                             };
+                            capture_id += 1;
+                            let published_at = Instant::now();
                             let raw = WindowsRawFrame {
                                 nv12: Arc::new(nv12),
                                 captured_at,
+                                published_at,
+                                capture_id,
+                                repeat: false,
+                                conversion: published_at.saturating_duration_since(captured_at),
                             };
                             last_frame = Some(raw.clone());
+                            if let Some(trace) = host_trace::enabled() {
+                                trace.record(host_trace::Record {
+                                    event: 11,
+                                    frame: capture_id,
+                                    value: trace.time(captured_at),
+                                    ..Default::default()
+                                });
+                                trace.record(host_trace::Record {
+                                    event: 12,
+                                    frame: capture_id,
+                                    value: trace.time(published_at),
+                                    ..Default::default()
+                                });
+                            }
                             last_emit = started;
                             if !handoff.publish(raw) {
                                 break;
@@ -1278,16 +1345,24 @@ impl MediaSource for WindowsMediaSource {
                                 jiggle_flip = !jiggle_flip;
                                 cursor_jiggle::nudge(jiggle_flip);
                             }
-                            let keepalive_interval = if first_keyframe_emitted.load(Ordering::Relaxed)
-                            {
-                                Duration::from_millis(500)
-                            } else {
-                                Duration::from_millis(33)
-                            };
+                            let keepalive_interval =
+                                if first_keyframe_emitted.load(Ordering::Relaxed) {
+                                    Duration::from_millis(500)
+                                } else {
+                                    Duration::from_millis(33)
+                                };
                             if last_emit.elapsed() >= keepalive_interval {
                                 if let Some(frame) = &last_frame {
                                     last_emit = started;
-                                    if !handoff.publish(frame.clone()) {
+                                    if let Some(trace) = host_trace::enabled() {
+                                        trace.record(host_trace::Record {
+                                            event: 13,
+                                            frame: frame.capture_id,
+                                            value: trace.time(frame.captured_at),
+                                            ..Default::default()
+                                        });
+                                    }
+                                    if !handoff.publish(frame.repeated(Instant::now())) {
                                         break;
                                     }
                                 }
@@ -2010,6 +2085,8 @@ impl HostServer {
             .map_err(|error| SessionError::Io(error))?;
         #[cfg(all(target_os = "linux", test))]
         let mut input = tests::admission_input(self)?;
+        // Establish the diagnostic clock before any session-local timestamps.
+        let _trace = host_trace::enabled();
         let session_origin = Instant::now();
         info!(identity = negotiated_identity, peer = %tcp_peer, "TLS-PSK session established");
         let mut last_pong = Instant::now();
@@ -2052,6 +2129,9 @@ impl HostServer {
                             let media_source = self.media_source.clone();
                             let handle = thread::spawn(move || {
                                 let mut sender = UdpSender::default();
+                                sender.trace = host_trace::enabled().cloned();
+                                sender.trace_session =
+                                    sender.trace.as_ref().map_or(0, |t| t.time(session_origin));
                                 info!(%peer, "Starting UDP sender thread");
                                 loop {
                                     if !matches!(srx.try_recv(), Err(mpsc::TryRecvError::Empty)) {
@@ -2442,10 +2522,8 @@ impl HostServer {
                                             }
                                             #[cfg(target_os = "linux")]
                                             {
-                                                clipboard.apply_remote_text(
-                                                    &update.text,
-                                                    Instant::now(),
-                                                )
+                                                clipboard
+                                                    .apply_remote_text(&update.text, Instant::now())
                                             }
                                         };
                                         if let Err(error) = applied {
@@ -2481,6 +2559,11 @@ impl HostServer {
             media.stop();
         }
         state = SessionState::Closed;
+        if let Some(trace) = host_trace::enabled() {
+            if let Err(error) = trace.dump() {
+                warn!(%error, "Host diagnostic dump failed");
+            }
+        }
         debug!(?state, "session closed");
         result
     }
@@ -2519,6 +2602,9 @@ impl HostServer {
 
 #[derive(Default)]
 struct UdpSender {
+    trace: Option<Arc<host_trace::Trace>>,
+    trace_session: u64,
+    trace_keyframe: bool,
     sequence: u32,
     frame_id: u32,
     audio_frame_id: u32,
@@ -2535,13 +2621,73 @@ impl UdpSender {
         packet_type: PacketType,
         payload: &[u8],
     ) -> Result<(), SessionError> {
+        self.send_selected_packet(cipher, packet_type, payload, |bytes| {
+            socket.send_to(bytes, peer)
+        })
+    }
+
+    fn send_selected_packet(
+        &mut self,
+        cipher: &mut DatagramCipher,
+        packet_type: PacketType,
+        payload: &[u8],
+        send: impl FnOnce(&[u8]) -> io::Result<usize>,
+    ) -> Result<(), SessionError> {
         self.sequence = self.sequence.wrapping_add(1);
         let header = PacketHeader::new(packet_type, self.sequence, unix_ms_u32(), 0);
         let header = header.to_bytes();
         self.datagram.clear();
         self.datagram.extend_from_slice(&header);
         cipher.seal_into(payload, &header, &mut self.datagram)?;
-        socket.send_to(&self.datagram, peer)?;
+        let observation = self.trace.as_ref().map(|trace| {
+            let frame = match packet_type {
+                PacketType::FrameHeader | PacketType::FrameChunk | PacketType::AudioFrame => {
+                    payload
+                        .get(..4)
+                        .map(|bytes| {
+                            u64::from(u32::from_le_bytes(bytes.try_into().expect("four bytes")))
+                        })
+                        .unwrap_or(0)
+                }
+                PacketType::Ping => {
+                    TimestampStats::decode(payload).map_or(0, |stats| u64::from(stats.frame_id))
+                }
+                _ => 0,
+            };
+            let record = host_trace::Record {
+                session: self.trace_session,
+                sequence: self.sequence,
+                kind: packet_type as u8,
+                size: self.datagram.len(),
+                frame,
+                event: 1,
+                keyframe: self.trace_keyframe
+                    && matches!(
+                        packet_type,
+                        PacketType::FrameHeader | PacketType::FrameChunk | PacketType::Ping
+                    ),
+                ..Default::default()
+            };
+            trace.record(record);
+            record
+        });
+        let result = send(&self.datagram);
+        if let (Some(trace), Some(mut record)) = (&self.trace, observation) {
+            match &result {
+                Ok(size) => {
+                    record.event = 2;
+                    record.value = u64::try_from(*size).unwrap_or(u64::MAX);
+                }
+                Err(error) => {
+                    record.event = 3;
+                    record.value = error
+                        .raw_os_error()
+                        .map_or(0, |code| u64::from(code.unsigned_abs()));
+                }
+            }
+            trace.record(record);
+        }
+        result?;
         Ok(())
     }
 
@@ -2558,6 +2704,17 @@ impl UdpSender {
     ) -> Result<(), SessionError> {
         self.frame_id = self.frame_id.wrapping_add(1);
         let frame_id = self.frame_id;
+        self.trace_keyframe = frame.is_key_frame;
+        if let Some(trace) = &self.trace {
+            trace.record(host_trace::Record {
+                session: self.trace_session,
+                event: 20,
+                frame: u64::from(frame_id),
+                value: trace.time(frame.capture_at),
+                keyframe: frame.is_key_frame,
+                ..Default::default()
+            });
+        }
         let chunk_count = frame.data.len().div_ceil(MAX_VIDEO_CHUNK_BYTES);
         let header = FrameHeader {
             frame_id,
@@ -2728,13 +2885,17 @@ fn monotonic_us(origin: Instant, value: Instant) -> u64 {
 mod tests {
     use super::*;
     use erd_proto::{AudioFragment, FrameChunk};
+    mod sender_trace {
+        include!("sender_trace_tests.rs");
+    }
 
     #[test]
     fn bind_synthetic_does_not_start_mdns_advertisement() {
         let directory = tempdir().unwrap();
         let (consent, _) = mpsc::channel();
         let mut config = test_config(
-            PairingStore::new(directory.path().join("keys.json")), consent,
+            PairingStore::new(directory.path().join("keys.json")),
+            consent,
         );
         config.tcp_addr = "127.0.0.1:0".parse().unwrap();
         config.udp_addr = "127.0.0.1:0".parse().unwrap();
@@ -2747,7 +2908,8 @@ mod tests {
         let directory = tempdir().unwrap();
         let (consent, _) = mpsc::channel();
         let mut config = test_config(
-            PairingStore::new(directory.path().join("keys.json")), consent,
+            PairingStore::new(directory.path().join("keys.json")),
+            consent,
         );
         config.tcp_addr = "127.0.0.1:0".parse().unwrap();
         config.udp_addr = "127.0.0.1:0".parse().unwrap();
@@ -3811,7 +3973,10 @@ mod tests {
         let pong = tcp.read_frame().unwrap();
         let (header, payload) = decode_tcp_packet(&pong);
         assert_eq!(header.packet_type, PacketType::Control);
-        assert_eq!(ControlMessage::decode(payload).unwrap(), ControlMessage::Pong);
+        assert_eq!(
+            ControlMessage::decode(payload).unwrap(),
+            ControlMessage::Pong
+        );
 
         // Then: host applied only positive bitrates to media encoder in exact order.
         assert_eq!(*bitrates.lock().unwrap(), vec![4_000_000, 15_000_000]);
@@ -3844,8 +4009,7 @@ mod tests {
         let tcp_addr = server.tcp_addr().unwrap();
         let server_thread = thread::spawn(move || server.serve_n(1).unwrap());
 
-        let client =
-            TlsPskClient::new(PskIdentity::pairing("config-test", &key).unwrap()).unwrap();
+        let client = TlsPskClient::new(PskIdentity::pairing("config-test", &key).unwrap()).unwrap();
         let mut tcp = client.connect(tcp_addr).unwrap();
         let handshake = Handshake {
             name: "scripted-client".into(),

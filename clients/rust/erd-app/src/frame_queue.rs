@@ -12,6 +12,7 @@ pub type QueuedFrame = (crate::AssembledFrame, Instant);
 pub struct FrameQueue {
     state: std::sync::Mutex<FrameQueueState>,
     ready: std::sync::Condvar,
+    trace: crate::ReceiverTrace,
 }
 
 struct FrameQueueState {
@@ -23,6 +24,10 @@ struct FrameQueueState {
 
 impl FrameQueue {
     pub fn new() -> Self {
+        Self::with_receiver_trace(crate::ReceiverTrace::default())
+    }
+
+    pub fn with_receiver_trace(trace: crate::ReceiverTrace) -> Self {
         Self {
             state: std::sync::Mutex::new(FrameQueueState {
                 frames: std::collections::VecDeque::with_capacity(FRAME_QUEUE_CAPACITY),
@@ -31,6 +36,7 @@ impl FrameQueue {
                 stopped: false,
             }),
             ready: std::sync::Condvar::new(),
+            trace,
         }
     }
 
@@ -45,11 +51,17 @@ impl FrameQueue {
         }
         let key = frame.0.header.is_key_frame;
         let id = frame.0.header.frame_id;
+        let now = Instant::now();
+        let mut record = crate::ReceiverTraceRecord::new(crate::ReceiverTraceEvent::QueueAdmission);
+        record.frame = Some(id);
+        record.bytes = frame.0.data.len() as u64;
         let mut discontinuity = false;
         if let Some(last) = state.last_frame_id {
             let advance = id.wrapping_sub(last);
             // Half-range serial ordering rejects late frames across u32 wrap.
             if advance == 0 || advance >= (1 << 31) {
+                record.event = crate::ReceiverTraceEvent::QueueLate;
+                self.trace.record(now, record);
                 return Ok(false);
             }
             discontinuity = advance != 1;
@@ -57,14 +69,30 @@ impl FrameQueue {
         state.last_frame_id = Some(id);
         let mut request_keyframe = false;
         if discontinuity || state.frames.len() == FRAME_QUEUE_CAPACITY {
+            record.event = if discontinuity {
+                crate::ReceiverTraceEvent::QueueDiscontinuity
+            } else {
+                crate::ReceiverTraceEvent::QueueOverflow
+            };
+            record.count = state.frames.len() as u64;
+            record.result = i32::from(!state.recovering && !key);
+            self.trace.record(now, record);
             // Dropping a reference invalidates the entire pending chain.
             state.frames.clear();
             request_keyframe = !state.recovering && !key;
             state.recovering = true;
         }
         if state.recovering && !key {
+            record.event = crate::ReceiverTraceEvent::QueueDependent;
+            self.trace.record(now, record);
             return Ok(request_keyframe);
         }
+        record.event = if state.recovering {
+            crate::ReceiverTraceEvent::QueueRecovered
+        } else {
+            crate::ReceiverTraceEvent::QueueAdmission
+        };
+        self.trace.record(now, record);
         state.recovering = false;
         state.frames.push_back(frame);
         self.ready.notify_one();
@@ -109,12 +137,19 @@ impl FrameQueue {
             .iter()
             .position(|frame| frame.0.header.is_key_frame)
         {
+            let mut record =
+                crate::ReceiverTraceRecord::new(crate::ReceiverTraceEvent::DecodeFailed);
+            record.count = key as u64;
+            self.trace.record(Instant::now(), record);
             state.frames.drain(..key);
             state.recovering = false;
             return Ok(false);
         }
         state.frames.clear();
         let request = !state.recovering;
+        let mut record = crate::ReceiverTraceRecord::new(crate::ReceiverTraceEvent::DecodeFailed);
+        record.result = i32::from(request);
+        self.trace.record(Instant::now(), record);
         state.recovering = true;
         Ok(request)
     }
@@ -171,6 +206,34 @@ mod tests {
             },
             Instant::now(),
         )
+    }
+
+    #[test]
+    fn receiver_trace_attributes_queue_overload_and_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let trace = crate::ReceiverTrace::at_path(dir.path().join("trace.json"));
+        let queue = FrameQueue::with_receiver_trace(trace.clone());
+        for id in 0..6 {
+            queue.push(frame(id, false)).unwrap();
+        }
+        queue.push(frame(6, true)).unwrap();
+        let records = trace.snapshot().unwrap().unwrap().records;
+        assert!(records
+            .iter()
+            .any(|r| r.event == crate::ReceiverTraceEvent::QueueOverflow
+                && r.frame == Some(4)
+                && r.count == 4
+                && r.result == 1));
+        assert!(records
+            .iter()
+            .any(|r| r.event == crate::ReceiverTraceEvent::QueueRecovered && r.frame == Some(6)));
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| r.event == crate::ReceiverTraceEvent::QueueDependent)
+                .count(),
+            2
+        );
     }
 
     #[test]

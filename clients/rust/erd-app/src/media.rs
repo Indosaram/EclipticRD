@@ -45,6 +45,7 @@ pub enum MediaAssemblyError {
 
 #[derive(Debug, Default)]
 pub struct FrameAssembler {
+    trace: crate::ReceiverTrace,
     frames: HashMap<u32, FrameAssembly>,
     orphans: HashMap<u32, OrphanAssembly>,
     expected_frame_id: Option<u32>,
@@ -54,6 +55,9 @@ pub struct FrameAssembler {
 }
 
 impl FrameAssembler {
+    pub fn set_receiver_trace(&mut self, trace: crate::ReceiverTrace) {
+        self.trace = trace;
+    }
     pub fn push_header(
         &mut self,
         header: FrameHeader,
@@ -66,13 +70,28 @@ impl FrameAssembler {
             || header.total_size == 0
             || header.total_size > MAX_FRAME_BYTES
         {
+            Self::trace_frame(
+                &self.trace,
+                now,
+                header.frame_id,
+                crate::ReceiverTraceEvent::AssemblyInvalid,
+            );
             return Err(MediaAssemblyError::InvalidHeader);
         }
         self.expire(now);
         self.track_loss(header.frame_id, now);
         if header.is_key_frame {
             self.frames.retain(|frame_id, assembly| {
-                *frame_id >= header.frame_id || Self::complete(assembly)
+                let keep = *frame_id >= header.frame_id || Self::complete(assembly);
+                if !keep {
+                    Self::trace_frame(
+                        &self.trace,
+                        now,
+                        *frame_id,
+                        crate::ReceiverTraceEvent::AssemblyKeyframe,
+                    );
+                }
+                keep
             });
         }
         let (chunks, started) = self.orphans.remove(&header.frame_id).map_or_else(
@@ -91,7 +110,7 @@ impl FrameAssembler {
             timestamp_ms,
         };
         self.frames.insert(frame_id, assembly);
-        let completed = self.finish_if_complete(frame_id)?;
+        let completed = self.finish_if_complete(frame_id, now)?;
         if self.frames.len() > MAX_INCOMPLETE_FRAMES {
             let oldest = self
                 .frames
@@ -100,6 +119,12 @@ impl FrameAssembler {
                 .map(|(&id, _)| id)
                 .expect("over-capacity frame map is nonempty");
             self.frames.remove(&oldest);
+            Self::trace_frame(
+                &self.trace,
+                now,
+                oldest,
+                crate::ReceiverTraceEvent::AssemblyCapacity,
+            );
         }
         Ok(completed)
     }
@@ -113,16 +138,28 @@ impl FrameAssembler {
         self.expire(now);
         if let Some(assembly) = self.frames.get_mut(&chunk.frame_id) {
             if chunk.chunk_index >= assembly.header.total_chunks {
+                Self::trace_frame(
+                    &self.trace,
+                    now,
+                    chunk.frame_id,
+                    crate::ReceiverTraceEvent::AssemblyInvalid,
+                );
                 return Err(MediaAssemblyError::InvalidChunkIndex);
             }
             assembly
                 .chunks
                 .entry(chunk.chunk_index)
                 .or_insert(chunk.data);
-            return self.finish_if_complete(chunk.frame_id);
+            return self.finish_if_complete(chunk.frame_id, now);
         }
 
         if self.orphans.len() >= MAX_ORPHAN_FRAMES && !self.orphans.contains_key(&chunk.frame_id) {
+            Self::trace_frame(
+                &self.trace,
+                now,
+                chunk.frame_id,
+                crate::ReceiverTraceEvent::AssemblyCapacity,
+            );
             return Ok(None);
         }
         let orphan = self
@@ -134,6 +171,12 @@ impl FrameAssembler {
             });
         if orphan.chunks.len() >= MAX_CHUNKS_PER_FRAME as usize {
             self.orphans.remove(&chunk.frame_id);
+            Self::trace_frame(
+                &self.trace,
+                now,
+                chunk.frame_id,
+                crate::ReceiverTraceEvent::AssemblyCapacity,
+            );
             return Ok(None);
         }
         orphan.chunks.entry(chunk.chunk_index).or_insert(chunk.data);
@@ -173,6 +216,7 @@ impl FrameAssembler {
     fn finish_if_complete(
         &mut self,
         frame_id: u32,
+        now: Instant,
     ) -> Result<Option<AssembledFrame>, MediaAssemblyError> {
         let Some(assembly) = self.frames.get(&frame_id) else {
             return Ok(None);
@@ -191,9 +235,21 @@ impl FrameAssembler {
             );
         }
         if data.len() != assembly.header.total_size as usize {
+            Self::trace_frame(
+                &self.trace,
+                now,
+                frame_id,
+                crate::ReceiverTraceEvent::AssemblyInvalid,
+            );
             return Err(MediaAssemblyError::SizeMismatch);
         }
         self.completed_frames += 1;
+        Self::trace_frame(
+            &self.trace,
+            now,
+            frame_id,
+            crate::ReceiverTraceEvent::AssemblyComplete,
+        );
         self.completed_started_at = Some(assembly.started);
         Ok(Some(AssembledFrame {
             header: assembly.header,
@@ -207,11 +263,41 @@ impl FrameAssembler {
     }
 
     fn expire(&mut self, now: Instant) {
-        self.frames.retain(|_, assembly| {
-            now.saturating_duration_since(assembly.started) < ASSEMBLY_TIMEOUT
+        self.frames.retain(|id, assembly| {
+            let keep = now.saturating_duration_since(assembly.started) < ASSEMBLY_TIMEOUT;
+            if !keep {
+                Self::trace_frame(
+                    &self.trace,
+                    now,
+                    *id,
+                    crate::ReceiverTraceEvent::AssemblyTimeout,
+                );
+            }
+            keep
         });
-        self.orphans
-            .retain(|_, orphan| now.saturating_duration_since(orphan.started) < ASSEMBLY_TIMEOUT);
+        self.orphans.retain(|id, orphan| {
+            let keep = now.saturating_duration_since(orphan.started) < ASSEMBLY_TIMEOUT;
+            if !keep {
+                Self::trace_frame(
+                    &self.trace,
+                    now,
+                    *id,
+                    crate::ReceiverTraceEvent::AssemblyTimeout,
+                );
+            }
+            keep
+        });
+    }
+
+    fn trace_frame(
+        trace: &crate::ReceiverTrace,
+        now: Instant,
+        id: u32,
+        event: crate::ReceiverTraceEvent,
+    ) {
+        let mut record = crate::ReceiverTraceRecord::new(event);
+        record.frame = Some(id);
+        trace.record(now, record);
     }
 
     fn track_loss(&mut self, frame_id: u32, now: Instant) {

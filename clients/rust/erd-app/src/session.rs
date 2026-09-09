@@ -28,6 +28,10 @@ use crate::{
 #[path = "tcp_write_tests.rs"]
 mod tcp_write_tests;
 
+#[path = "receiver_trace.rs"]
+mod receiver_trace;
+pub use receiver_trace::*;
+
 pub const DEFAULT_TCP_PORT: u16 = 19_730;
 pub const DEFAULT_UDP_PORT: u16 = 19_731;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -167,6 +171,7 @@ pub struct ClientSession {
     udp: Arc<Mutex<Option<Arc<UdpTransport>>>>,
     udp_send: Arc<Mutex<Option<DatagramCipher>>>,
     udp_receive: Arc<Mutex<Option<DatagramCipher>>>,
+    trace: ReceiverTrace,
     #[cfg(test)]
     tcp_wait: Arc<Mutex<Option<mpsc::Sender<()>>>>,
     #[cfg(test)]
@@ -188,6 +193,9 @@ impl ClientSession {
             udp: Arc::new(Mutex::new(None)),
             udp_send: Arc::new(Mutex::new(None)),
             udp_receive: Arc::new(Mutex::new(None)),
+            trace: std::env::var_os("ERD_RECEIVER_TRACE_PATH")
+                .map(|path| ReceiverTrace::at_path(path.into()))
+                .unwrap_or_default(),
             #[cfg(test)]
             tcp_wait: Arc::new(Mutex::new(None)),
             #[cfg(test)]
@@ -197,6 +205,15 @@ impl ClientSession {
 
     pub fn state(&self) -> Result<SessionState, SessionError> {
         Ok(self.state.lock().map_err(|_| SessionError::Poisoned)?.state)
+    }
+
+    pub fn receiver_trace(&self) -> ReceiverTrace {
+        self.trace.clone()
+    }
+
+    /// Configure before connecting; clones made later share this endpoint trace.
+    pub fn set_receiver_trace(&mut self, trace: ReceiverTrace) {
+        self.trace = trace;
     }
 
     /// Returns bounded receiver observations at the current client monotonic time.
@@ -533,6 +550,21 @@ impl ClientSession {
     }
 
     pub fn receive_udp_event(&self) -> Result<SessionEvent, SessionError> {
+        self.receive_udp_event_clock(None)
+    }
+
+    /// Real socket/authentication ingress with an explicit receive clock for replay tests.
+    pub fn receive_udp_event_at(
+        &self,
+        at: std::time::Instant,
+    ) -> Result<SessionEvent, SessionError> {
+        self.receive_udp_event_clock(Some(at))
+    }
+
+    fn receive_udp_event_clock(
+        &self,
+        at: Option<std::time::Instant>,
+    ) -> Result<SessionEvent, SessionError> {
         let udp = {
             let socket_guard = self.udp.lock().map_err(|_| SessionError::Poisoned)?;
             socket_guard
@@ -540,22 +572,78 @@ impl ClientSession {
                 .cloned()
                 .ok_or(SessionError::NotReady)?
         };
-        let (datagram, count) = udp.receive()?;
-        let received_at = std::time::Instant::now();
+        let (datagram, count) = match udp.receive() {
+            Ok(received) => received,
+            Err(error) => {
+                let mut record = ReceiverTraceRecord::new(ReceiverTraceEvent::ReceiveError);
+                record.result = match &error {
+                    SessionError::Io(error) => error.raw_os_error().unwrap_or(-1),
+                    _ => -1,
+                };
+                self.trace.record(std::time::Instant::now(), record);
+                return Err(error);
+            }
+        };
+        let received_at = at.unwrap_or_else(std::time::Instant::now);
+        let mut record = ReceiverTraceRecord::new(ReceiverTraceEvent::Receive);
+        record.bytes = count as u64;
+        if let Some(bytes) = datagram[..count].get(..PacketHeader::SIZE) {
+            if let Ok(header) = PacketHeader::decode(bytes) {
+                record.sequence = Some(header.sequence);
+                record.kind = Some(header.packet_type as u8);
+            }
+        }
+        self.trace.record(received_at, record);
         let mut cipher_guard = self
             .udp_receive
             .lock()
             .map_err(|_| SessionError::Poisoned)?;
-        let (header, payload) = cipher_guard
+        let opened = cipher_guard
             .as_mut()
             .ok_or(SessionError::NotReady)?
-            .open_datagram(&datagram[..count])?;
+            .open_datagram(&datagram[..count]);
+        let (header, payload) = match opened {
+            Ok(packet) => packet,
+            Err(error) => {
+                record.event = ReceiverTraceEvent::AuthRejected;
+                record.result = match error {
+                    DatagramError::Authentication => 1,
+                    DatagramError::Replay => 2,
+                    DatagramError::Truncated => 3,
+                    DatagramError::WrongDirection => 4,
+                    DatagramError::InvalidHeader(_) => 5,
+                    DatagramError::InvalidMasterKey => 6,
+                    DatagramError::InvalidSessionSalt => 7,
+                    DatagramError::CounterExhausted => 8,
+                };
+                self.trace.record(received_at, record);
+                return Err(error.into());
+            }
+        };
+        record.event = ReceiverTraceEvent::Authenticated;
+        record.frame = if self.trace.enabled() {
+            match header.packet_type {
+                PacketType::FrameHeader => FrameHeader::decode(&payload).ok().map(|h| h.frame_id),
+                PacketType::FrameChunk => payload
+                    .get(..4)
+                    .and_then(|bytes| bytes.try_into().ok())
+                    .map(u32::from_le_bytes),
+                PacketType::Ping => erd_proto::TimestampStats::decode(&payload).map(|s| s.frame_id),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        self.trace.record(received_at, record);
         // Keep this cipher generation pinned until the authenticated observation
         // is consumed; a new handshake cannot install its cipher in between.
         self.handle_packet(header, payload, Some((received_at, count)))
     }
 
     pub fn disconnect(&self) -> Result<(), SessionError> {
+        let trace_result = self
+            .receiver_snapshot()
+            .and_then(|snapshot| self.trace.write(&snapshot).map_err(SessionError::Io));
         {
             let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
             state.state = SessionState::Disconnected;
@@ -583,7 +671,7 @@ impl ClientSession {
             .udp_receive
             .lock()
             .map_err(|_| SessionError::Poisoned)? = None;
-        Ok(())
+        trace_result
     }
 
     #[cfg(test)]
@@ -635,7 +723,10 @@ impl ClientSession {
         psk: PskIdentity,
         next_state: SessionState,
     ) -> Result<(), SessionError> {
-        let owner = self.tcp_runtime.lock().map_err(|_| SessionError::Poisoned)?;
+        let owner = self
+            .tcp_runtime
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?;
         if owner.is_some() {
             return Err(SessionError::TcpRuntimeAlreadyRunning);
         }
@@ -646,6 +737,16 @@ impl ClientSession {
             state.receiver = crate::receiver_stats::ReceiverStats::default();
         }
         let address = resolve_one((&*self.config.host, self.config.tcp_port))?;
+        self.state
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?
+            .receiver
+            .set_trace(self.trace.clone());
+        self.state
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?
+            .frames
+            .set_receiver_trace(self.trace.clone());
         let tcp = std::net::TcpStream::connect_timeout(&address, self.config.connect_timeout)?;
         tcp.set_read_timeout(Some(self.config.connect_timeout))?;
         tcp.set_write_timeout(Some(self.config.connect_timeout))?;
@@ -660,6 +761,7 @@ impl ClientSession {
     fn begin_handshake(&self, pairing: PairingRecord) -> Result<ReadySession, SessionError> {
         let mut salt = [0_u8; 16];
         OsRng.fill_bytes(&mut salt);
+        self.trace.begin_session(salt);
         let handshake = Handshake {
             name: self.config.client_name.clone(),
             width: 0,
@@ -711,7 +813,18 @@ impl ClientSession {
         } else {
             "0.0.0.0:0"
         })?;
-        let _ = rustix::net::sockopt::set_socket_recv_buffer_size(&udp, 4 * 1024 * 1024);
+        let receive_buffer =
+            rustix::net::sockopt::set_socket_recv_buffer_size(&udp, 4 * 1024 * 1024);
+        let mut record = ReceiverTraceRecord::new(ReceiverTraceEvent::SocketBuffer);
+        record.count = 4 * 1024 * 1024;
+        record.result = receive_buffer.err().map_or(0, |error| error.raw_os_error());
+        match rustix::net::sockopt::socket_recv_buffer_size(&udp) {
+            Ok(bytes) => record.bytes = bytes as u64,
+            Err(error) => {
+                record.sequence = Some(error.raw_os_error() as u32);
+            }
+        }
+        self.trace.record(std::time::Instant::now(), record);
         let _ = rustix::net::sockopt::set_socket_send_buffer_size(&udp, 4 * 1024 * 1024);
         udp.connect(udp_address)?;
         udp.set_read_timeout(Some(HEARTBEAT_INTERVAL * 3))?;
@@ -752,7 +865,10 @@ impl ClientSession {
     }
 
     fn send_packet(&self, packet_type: PacketType, payload: &[u8]) -> Result<(), SessionError> {
-        let owner = self.tcp_runtime.lock().map_err(|_| SessionError::Poisoned)?;
+        let owner = self
+            .tcp_runtime
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?;
         let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
         let sequence = state.next_tcp_sequence.wrapping_add(1);
         let header = PacketHeader::new(packet_type, sequence, current_unix_ms() as u32, 0);
