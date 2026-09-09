@@ -25,8 +25,6 @@ use evdev::{
     InputEvent, KeyCode, RelativeAxisCode, UinputAbsSetup,
 };
 
-const ABSOLUTE_AXIS_MAX: i32 = 65_535;
-
 /// Target output position and dimensions in compositor/global logical pixels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OutputGeometry {
@@ -65,13 +63,6 @@ pub fn map_normalized_to_output(
         (i64::from(geometry.x) + x.round() as i64).max(0) as u32,
         (i64::from(geometry.y) + y.round() as i64).max(0) as u32,
     )
-}
-
-fn scale_to_uinput(value: u32, extent: u32) -> i32 {
-    if extent <= 1 {
-        return 0;
-    }
-    ((u64::from(value.min(extent - 1)) * ABSOLUTE_AXIS_MAX as u64) / u64::from(extent - 1)) as i32
 }
 
 /// Maps the v3/macOS virtual-key convention to Linux evdev keys.

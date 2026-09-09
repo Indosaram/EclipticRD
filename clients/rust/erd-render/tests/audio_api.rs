@@ -70,11 +70,12 @@ fn native_public_api_retains_cpal_types_and_entry_points() {
     let _: fn(AudioQueue) -> Result<CpalAudioOutput, AudioError> = CpalAudioOutput::start;
     let _: fn(AudioQueue, Option<&AudioOutputDevice>) -> Result<CpalAudioOutput, AudioError> =
         CpalAudioOutput::start_on_device;
-    let _: fn(
+    type StartWithEventsFn = fn(
         AudioQueue,
         Option<&AudioOutputDevice>,
         SyncSender<AudioOutputEvent>,
-    ) -> Result<CpalAudioOutput, AudioError> = CpalAudioOutput::start_with_events;
+    ) -> Result<CpalAudioOutput, AudioError>;
+    let _: StartWithEventsFn = CpalAudioOutput::start_with_events;
     let _: fn(&AudioOutputDevice) -> Result<String, AudioError> = AudioOutputDevice::name;
     let _: fn(&AudioOutputDevice) -> Result<bool, AudioError> = AudioOutputDevice::supports_pcm;
     let _: fn(&CpalAudioOutput) -> &AudioQueue = CpalAudioOutput::queue;

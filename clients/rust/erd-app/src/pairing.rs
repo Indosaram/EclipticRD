@@ -240,7 +240,7 @@ impl PairingStore {
                     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
                 })
                 .ok_or(PairingStoreError::NoApplicationDataDirectory)?;
-            return Ok(base.join("EclipticRD").join("pairing-keys.json"));
+            Ok(base.join("EclipticRD").join("pairing-keys.json"))
         }
     }
 
@@ -280,7 +280,7 @@ impl PairingStore {
             StoreBackend::Ephemeral(records) => {
                 let guard = records
                     .lock()
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "ephemeral store poisoned"))?;
+                    .map_err(|_| io::Error::other("ephemeral store poisoned"))?;
                 Ok(guard.clone())
             }
         }
@@ -320,7 +320,7 @@ impl PairingStore {
             StoreBackend::Ephemeral(records) => {
                 let mut guard = records
                     .lock()
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "ephemeral store poisoned"))?;
+                    .map_err(|_| io::Error::other("ephemeral store poisoned"))?;
                 guard.retain(|existing| existing.id != record.id);
                 guard.push(record);
                 Ok(())
@@ -340,7 +340,7 @@ impl PairingStore {
             StoreBackend::Ephemeral(records) => {
                 let mut guard = records
                     .lock()
-                    .map_err(|_| io::Error::new(io::ErrorKind::Other, "ephemeral store poisoned"))?;
+                    .map_err(|_| io::Error::other("ephemeral store poisoned"))?;
                 guard.retain(|record| record.id != id);
                 Ok(())
             }

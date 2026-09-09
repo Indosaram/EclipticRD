@@ -86,11 +86,11 @@ async fn owned_session(shutdown: Shutdown) {
                     PacketType::InputEvent => {
                         events.push(InputEvent::decode(body).unwrap().event_type)
                     }
-                    PacketType::Control => {
-                        if ControlMessage::decode(body).unwrap() == ControlMessage::Disconnect {
-                            disconnected = true;
-                            break;
-                        }
+                    PacketType::Control
+                        if ControlMessage::decode(body).unwrap() == ControlMessage::Disconnect =>
+                    {
+                        disconnected = true;
+                        break;
                     }
                     _ => {}
                 }

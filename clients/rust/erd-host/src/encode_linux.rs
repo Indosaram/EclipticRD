@@ -257,12 +257,12 @@ impl LinuxVideoEncoder {
             for y in 0..height {
                 let s_row = &bgra[y * stride..y * stride + width * 4];
                 let dy_row = &mut dst_y[y * y_stride..y * y_stride + width];
-                for x in 0..width {
+                for (x, dst_pixel) in dy_row.iter_mut().enumerate() {
                     let p = x * 4;
                     let b = s_row[p] as i32;
                     let g = s_row[p + 1] as i32;
                     let r = s_row[p + 2] as i32;
-                    dy_row[x] = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
+                    *dst_pixel = (((66 * r + 129 * g + 25 * b + 128) >> 8) + 16).clamp(0, 255) as u8;
                 }
             }
 
@@ -563,10 +563,7 @@ fn append_unique_parameter_sets(
     frame_nalus: &[&[u8]],
 ) -> Result<(), EncodeError> {
     for parameter_set in parameter_sets {
-        if !frame_nalus
-            .iter()
-            .any(|nalu| *nalu == parameter_set.as_slice())
-        {
+        if !frame_nalus.contains(&parameter_set.as_slice()) {
             append_avcc_nalu(output, parameter_set)?;
         }
     }
@@ -645,7 +642,7 @@ fn extract_parameter_sets(codec: VideoCodec, nalus: &[&[u8]]) -> Vec<Vec<u8>> {
                 nalu.len() >= 2
                     && matches!(
                         nalu.first().map(|byte| (byte >> 1) & 0x3f),
-                        Some(32 | 33 | 34)
+                        Some(32..=34)
                     )
             }
         })

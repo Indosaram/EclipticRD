@@ -1123,7 +1123,7 @@ pub mod commands {
             *media_lock = Some(media_thread);
         }
 
-        start_clipboard_monitor(&state, &session);
+        start_clipboard_monitor(state, &session);
 
         Ok(ConnectResponse {
             pairing_id: ready_session.pairing.id,
