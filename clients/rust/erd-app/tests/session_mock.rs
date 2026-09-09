@@ -303,6 +303,18 @@ fn stalled_consumer_retains_latest_clipboard_and_terminal_error() {
                 ControlMessage::Pong
             );
         }
+        let mut reader = stream.ssl_stream().get_ref().try_clone().unwrap();
+        reader
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        stream
+            .ssl_stream()
+            .get_ref()
+            .shutdown(std::net::Shutdown::Write)
+            .unwrap();
+        let mut probe = [0_u8; 1];
+        let read_result = std::io::Read::read(&mut reader, &mut probe);
+        assert_eq!(read_result.unwrap(), 0);
         done_tx.send(()).unwrap();
     });
     let session = ClientSession::new(config).unwrap();
@@ -317,6 +329,7 @@ fn stalled_consumer_retains_latest_clipboard_and_terminal_error() {
     let mut runtime = session.spawn_tcp_runtime().unwrap();
     done_rx.recv_timeout(Duration::from_secs(10)).unwrap();
     server.join().unwrap();
+    runtime.stop().unwrap();
     let mut events = Vec::new();
     loop {
         let event = runtime
@@ -329,12 +342,15 @@ fn stalled_consumer_retains_latest_clipboard_and_terminal_error() {
             break;
         }
     }
-    runtime.stop().unwrap();
     session.disconnect().unwrap();
     assert!(events.len() <= 3, "retained {} events", events.len());
     assert!(events
         .iter()
         .any(|event| matches!(event, Ok(erd_app::SessionEvent::Clipboard(text)) if text == "127")));
+    assert!(
+        events.iter().any(|event| event.is_err()),
+        "terminal error must be retained"
+    );
     assert!(matches!(
         runtime.events().try_recv(),
         Err(mpsc::TryRecvError::Disconnected)
