@@ -5,8 +5,9 @@
 <h1 align="center">EclipticRD</h1>
 
 <p align="center">
-  Self-hosted remote desktop in Rust.<br>
-  Native capture and encoding, encrypted streaming, Tauri clients, and an automation API.
+  <strong>Agent-first remote desktop for automation.</strong><br>
+  CLI with stdio MCP and HTTP API. Rust host with native capture/encoding, encrypted streaming.<br>
+  Desktop and iOS clients. Performance tuned, not guaranteed.
 </p>
 
 <p align="center">
@@ -22,6 +23,65 @@ audio, and presents a computer library and in-session controls.
 The project is under active development. Windows and Hyprland host streams have
 been exercised with the macOS release CLI/API. This is not a blanket claim of
 production readiness, complete platform support, or a guaranteed latency figure.
+
+## Run with an agent
+
+Start the host inside the desktop session you want to share:
+
+```sh
+erd-host --pin generate
+```
+
+Pair from the agent computer, approve at the host, and let the client save
+the record. Replace `HOST` and `PIN` with the actual values:
+
+```sh
+mkdir -p "$HOME/.config/eclipticrd"
+erd-client --host HOST --pin PIN \
+  --pairing-store "$HOME/.config/eclipticrd/pairings.json" \
+  --frames 10 --timeout-secs 60
+jq -r '.[] | [.id, .name] | @tsv' "$HOME/.config/eclipticrd/pairings.json"
+```
+
+Use the saved ID and the same private store to register MCP:
+
+```sh
+# Claude Code, project scope
+claude mcp add --transport stdio --scope project eclipticrd \
+  -- /absolute/path/to/erd-client --host HOST --pairing-id PAIRING-ID \
+    --pairing-store /absolute/path/to/pairings.json --mcp
+
+# Codex
+codex mcp add eclipticrd \
+  -- /absolute/path/to/erd-client --host HOST --pairing-id PAIRING-ID \
+    --pairing-store /absolute/path/to/pairings.json --mcp
+```
+
+Install [`skills/eclipticrd-remote-control/SKILL.md`](skills/eclipticrd-remote-control/SKILL.md)
+into your project's `.claude/skills/eclipticrd-remote-control/` (Claude Code) or
+`.agents/skills/eclipticrd-remote-control/` (Codex). Clients without a skill
+loader can receive that file as task context; tools must still be registered.
+
+Ask the agent to **inspect a screenshot, move the pointer, inspect again, and
+release input**. Ten MCP tools cover screenshots, screen geometry, pointer
+movement/click/drag/scroll, keys, hotkeys, text, and release. MCP uses
+newline-delimited JSON-RPC on stdin/stdout; diagnostic logs go to stderr.
+Closing stdin ends the session.
+
+For HTTP automation, use `--agent-server 19735` instead of `--mcp`:
+
+```sh
+erd-client --host HOST --pairing-id PAIRING-ID \
+  --pairing-store /absolute/path/to/pairings.json --agent-server 19735
+```
+
+The loopback API exposes `/api/v1/health`, `/api/v1/screen/info`,
+`/api/v1/screen/screenshot`, `/api/v1/input/action`, and
+`/api/v1/session/disconnect`. Agent modes have no default overall timeout;
+`--timeout-secs` sets an explicit limit.
+
+See the [complete setup guide](docs/agent-setup.md) for skill installation,
+Claude Desktop JSON, Codex TOML, exact HTTP requests, pairing, and limitations.
 
 ## What is implemented
 
@@ -170,26 +230,31 @@ cargo run --manifest-path clients/rust/Cargo.toml --locked \
   -p erd-net --bin erd-discover -- --timeout-secs 3
 ```
 
-## Automation API
+## Performance and verification limits
 
-Start the headless client with `--agent-server 19735` in addition to its host
-and pairing arguments. The API binds to loopback; it is not a separately
-authenticated public network service.
+Performance is the second priority after reliable agent operation. The transport
+uses bounded decode queues, keyframe recovery, and native capture/encode paths.
+The Windows encoder reselects the latest raw frame after blocked control work;
+repeated static content retains its original capture time while diagnostics
+separate content age from time spent waiting for encoding.
 
-```sh
-curl http://127.0.0.1:19735/api/v1/health
-curl http://127.0.0.1:19735/api/v1/screen/info
+Receiver sequence gaps are not automatically network loss. Optional bounded
+endpoint traces distinguish send failures, authenticated arrivals, late
+packets, assembly failures, and queue recovery. Historical high-loss Linux
+measurements have not established one reproducible network cause; do not infer
+that diagnostic instrumentation eliminates packet loss.
 
-curl -X POST http://127.0.0.1:19735/api/v1/input/action \
-  -H 'Content-Type: application/json' \
-  -d '{"action":"mouse_move","x":0.5,"y":0.5,"normalized":true}'
+Decode time excludes capture, encoding, network transit, assembly, and display
+presentation. A static repeated frame's old capture timestamp is also not proof
+that a newly captured frame waited that long in a queue. No screenshot or
+end-to-end latency guarantee is made.
 
-curl -X POST http://127.0.0.1:19735/api/v1/session/disconnect
-```
-
-`GET /api/v1/screen/screenshot?format=png` returns JSON with dimensions and a
-base64-encoded image, not a raw PNG response. The `--mcp` CLI option exposes the
-stdio MCP interface instead of the HTTP surface.
+See the [agent-first verification report](docs/agent-first-verification-20260909.md)
+for current test results, native MCP/API checks, and unresolved performance
+measurements, and [deployment evidence](docs/release-deployment-20260909.md)
+for the earlier deployed release.
+Native GUI/audio playback and full on-device iOS session QA remain incomplete;
+CLI/API stream verification does not substitute for those checks.
 
 ## Architecture
 
@@ -215,7 +280,7 @@ Client                        v
 | `tauri-shell` | Desktop application |
 | `ios-shell` | iOS application and native integration |
 
-## Tests and current limits
+## Build and test
 
 ```sh
 cargo test --manifest-path clients/rust/Cargo.toml --locked \
@@ -227,26 +292,11 @@ bun test clients/rust/tauri-shell/ui/connection-state.test.mjs \
 
 node --test clients/rust/tauri-shell/ui/performance.test.mjs \
   clients/rust/tauri-shell/ui/session-overlay.test.mjs
-
-# Requires Bun 1.4 with WebView support.
-bun test clients/rust/tauri-shell/tests/frontend-page.test.mjs
 ```
 
-The September 9 deployment passed the non-iOS Rust workspace tests and 71 desktop
-UI tests. The macOS release CLI decoded 170 Linux frames and 78 Windows frames,
-with screenshot, input and clean-disconnect API checks.
-
-There are still material limits:
-
-- The Linux Tailscale sample reported about 29.5% receiver loss.
-- Windows host-ready-to-encode p95 was about 946 ms in that sample.
-- Direct Windows LAN connectivity was not verified in that run.
-- Native GUI visual checks and actual audio playback were not separately verified.
-- Full physical-iPhone streaming/input/audio QA is unfinished.
-
-See [deployment evidence and rollback details](docs/release-deployment-20260909.md)
-for the exact scope and measurements. A passing CLI smoke test is not a substitute
-for native GUI or latency validation.
+The September 9 deployment passed Rust workspace tests and desktop UI checks.
+The macOS release CLI decoded frames from Linux and Windows hosts with screenshot,
+input and disconnect API verification. See [deployment evidence](docs/release-deployment-20260909.md).
 
 ## License
 
