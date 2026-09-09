@@ -87,13 +87,16 @@ impl WindowsInputInjector {
             | InputEventType::RightMouseDown
             | InputEventType::RightMouseUp
             | InputEventType::MiddleMouseDown
-            | InputEventType::MiddleMouseUp => {
+            | InputEventType::MiddleMouseUp
+            | InputEventType::PenMove
+            | InputEventType::PenDown
+            | InputEventType::PenUp => {
                 let (x, y) =
                     normalize_absolute_pointer(event.x, event.y, self.target, self.desktop);
                 let mut flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
                 flags |= match event.event_type {
-                    InputEventType::LeftMouseDown => MOUSEEVENTF_LEFTDOWN,
-                    InputEventType::LeftMouseUp => MOUSEEVENTF_LEFTUP,
+                    InputEventType::LeftMouseDown | InputEventType::PenDown => MOUSEEVENTF_LEFTDOWN,
+                    InputEventType::LeftMouseUp | InputEventType::PenUp => MOUSEEVENTF_LEFTUP,
                     InputEventType::RightMouseDown => MOUSEEVENTF_RIGHTDOWN,
                     InputEventType::RightMouseUp => MOUSEEVENTF_RIGHTUP,
                     InputEventType::MiddleMouseDown => MOUSEEVENTF_MIDDLEDOWN,
@@ -102,6 +105,9 @@ impl WindowsInputInjector {
                 };
                 send_inputs(&[mouse_input(x, y, 0, flags)])
             }
+            InputEventType::GamepadAxis
+            | InputEventType::GamepadButtonDown
+            | InputEventType::GamepadButtonUp => Ok(()),
             InputEventType::RelativeMove => {
                 let dx = event.scroll_dx.round() as i32;
                 let dy = event.scroll_dy.round() as i32;

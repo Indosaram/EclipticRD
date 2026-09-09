@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#262c38"/>
+      <stop offset="50%" stop-color="#1e222e"/>
+      <stop offset="100%" stop-color="#141722"/>
+    </linearGradient>
+    <filter id="macos-shadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="16" stdDeviation="20" flood-color="#000000" flood-opacity="0.45"/>
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity="0.3"/>
+    </filter>
+    
+    <clipPath id="bottom-cross-clip">
+      <rect x="300" y="350" width="45" height="90"/>
+    </clipPath>
+
+    <mask id="ellipse-mask">
+      <rect x="0" y="0" width="645" height="645" fill="white"/>
+      <circle cx="438.5" cy="324.4" r="39.5" fill="black"/>
+      <path d="
+        M 210 263
+        C 215 260 223 260 228 263
+        C 238 273 248 290 256 314
+        C 260 324 255 337 244 337
+        L 194 337
+        C 183 337 178 324 182 314
+        C 190 290 200 273 210 263
+        Z
+      " fill="black"/>
+      <rect x="295.5" y="210" width="53" height="80" fill="black"/>
+    </mask>
+
+    <mask id="phone-mask">
+      <rect x="0" y="0" width="645" height="645" fill="white"/>
+      <g clip-path="url(#bottom-cross-clip)">
+        <ellipse cx="320.6" cy="321.4" rx="169.1" ry="68.2" transform="rotate(-24.57 320.6 321.4)" stroke="black" stroke-width="53" fill="none"/>
+      </g>
+    </mask>
+  </defs>
+
+  
+
+  <g id="artwork" transform="translate(3.0164, 1.7464) scale(1.587597)">
+    <!-- Desktop Monitor -->
+    <path d="M 333 165 L 526 165 A 29 29 0 0 1 555 194 L 555 411 A 29 29 0 0 1 526 440 L 333 440" 
+          stroke="#ffffff" stroke-width="22" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+
+    <g id="stand" fill="#ffffff">
+      <polygon points="403,440 424,440 429,466 403,466" />
+      <path d="M 333 466 L 472 466 A 11 11 0 0 1 472 488 L 333 488 Z" />
+    </g>
+
+    <!-- Red Orbital Ellipse -->
+    <g id="orbital-ellipse" stroke="#FD6758" stroke-width="22" fill="none" mask="url(#ellipse-mask)">
+      <ellipse cx="320.6" cy="321.4" rx="169.1" ry="68.2" transform="rotate(-24.57 320.6 321.4)" />
+    </g>
+
+    <!-- Smartphone with Notch -->
+    <g id="phone" mask="url(#phone-mask)">
+      <path fill="#ffffff" fill-rule="evenodd" d="
+        M 127 118
+        L 293 118
+        A 40 40 0 0 1 333 158
+        L 333 485
+        A 40 40 0 0 1 293 525
+        L 127 525
+        A 40 40 0 0 1 87 485
+        L 87 158
+        A 40 40 0 0 1 127 118
+        Z
+        M 132 140
+        A 18 18 0 0 0 109 158
+        L 109 485
+        A 18 18 0 0 0 127 503
+        L 293 503
+        A 18 18 0 0 0 311 485
+        L 311 158
+        A 18 18 0 0 0 293 140
+        L 260 140
+        C 255 140 252 158 245 158
+        L 175 158
+        C 168 158 165 140 160 140
+        Z
+      "/>
+    </g>
+
+    <!-- Coral Red Nodes -->
+    <circle cx="438.5" cy="324.4" r="25" fill="#FD6758"/>
+
+    <path d="
+      M 212 276
+      C 216 273 222 273 226 276
+      C 234 285 242 299 246 312
+      C 248 318 245 324 238 324
+      L 200 324
+      C 193 324 190 318 192 312
+      C 196 299 204 285 212 276
+      Z
+    " fill="#FD6758"/>
+  </g>
+</svg>

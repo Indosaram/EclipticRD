@@ -1,6 +1,70 @@
 import { test, expect } from 'bun:test';
 import { openPage, hosts } from './page-harness.mjs';
 
+test('audio controls drive native commands and expose device failure', async () => {
+  const page = await openPage();
+  const status = { active:true, volume:1, muted:false, device_id:null, consumed_samples:960,
+    devices:[{id:'output-1',name:'<Speakers>',supported:true},{id:'output-2',name:'Unavailable',supported:true}], error:null };
+  try {
+    await page.inventory();
+    await page.evaluate(`fixture.command('connect', () => connectToHost('audio.test','Audio'))`);
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase==='waiting-video', () => fixture.settle('connect',null))`);
+    await page.evaluate(`fixture.command('poll_frame_raw', () => { fixture.tickPromise=fixture.tick(); })`);
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase==='streaming', () => fixture.settle('poll_frame_raw',fixture.frame()))`);
+    await page.evaluate(`fixture.tickPromise`);
+    expect(await page.evaluate(`!!document.getElementById('audio-volume') && !!document.getElementById('btn-audio-mute') && !!document.getElementById('audio-device')`)).toBe(true);
+    await page.evaluate(`fixture.command('list_audio_devices', () => document.getElementById('btn-expand').click())`);
+    await page.evaluate(`fixture.until(() => !document.getElementById('audio-volume').disabled, () => fixture.settle('list_audio_devices',${JSON.stringify(status)}))`);
+    expect(await page.evaluate(`document.getElementById('audio-device').options[1].textContent`)).toBe('<Speakers>');
+    const volume = await page.evaluate(`fixture.command('set_audio_volume', () => { const control=document.getElementById('audio-volume'); control.focus(); control.value='25'; control.dispatchEvent(new Event('change',{bubbles:true})); })`);
+    expect(volume.args).toEqual({volume:0.25});
+    expect(await page.evaluate(`document.getElementById('audio-volume').disabled`)).toBe(true);
+    await page.evaluate(`fixture.until(() => !document.getElementById('audio-volume').disabled, () => fixture.settle('set_audio_volume',${JSON.stringify({...status,volume:0.25})}))`);
+    const mute = await page.evaluate(`fixture.command('set_audio_muted', () => document.getElementById('btn-audio-mute').click())`);
+    expect(mute.args).toEqual({muted:true});
+    await page.evaluate(`fixture.until(() => document.getElementById('btn-audio-mute').getAttribute('aria-pressed')==='true', () => fixture.settle('set_audio_muted',${JSON.stringify({...status,volume:0.25,muted:true})}))`);
+    await page.evaluate(`(() => { const control=document.getElementById('audio-volume'); control.dispatchEvent(new KeyboardEvent('keydown',{key:'a',keyCode:65,bubbles:true})); control.dispatchEvent(new KeyboardEvent('keyup',{key:'a',keyCode:65,bubbles:true})); })()`);
+    expect(await page.evaluate(`fixture.calls.filter(c=>c.cmd==='send_input').length`)).toBe(0);
+    const device = await page.evaluate(`fixture.command('set_audio_device', () => { document.getElementById('audio-device').value='output-2'; document.getElementById('btn-audio-apply').click(); })`);
+    expect(device.args).toEqual({deviceId:'output-2'});
+    await page.evaluate(`fixture.until(() => !document.getElementById('audio-error').hidden, () => fixture.settle('set_audio_device','device removed <detail>',true))`);
+    expect(await page.evaluate(`document.getElementById('audio-error').textContent`)).toContain('device removed <detail>');
+    expect(await page.evaluate(`document.querySelector('#audio-error detail')`)).toBeNull();
+    // Subscribe to the refresh before triggering it; a late response cannot
+    // rewrite controls after teardown or leak its error into another session.
+    await page.evaluate(`fixture.command('audio_status', () => { fixture.audioRefresh=refreshAudioStatus(); })`);
+    await page.evaluate(`fixture.command('disconnect', () => { fixture.stop=doDisconnect(); })`);
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase==='idle', () => fixture.settle('disconnect',null))`);
+    await page.evaluate(`(() => { fixture.settle('audio_status',${JSON.stringify({...status, error:'old callback error'})}); return fixture.audioRefresh; })()`);
+    expect(await page.evaluate(`document.getElementById('audio-volume').disabled`)).toBe(true);
+    expect(await page.evaluate(`document.getElementById('audio-error').textContent.includes('old callback error')`)).toBe(false);
+  } finally { await page.close(); }
+}, 20000);
+
+test('audio startup failure is recoverable and compact controls stay viewport bounded', async () => {
+  const page = await openPage({width:900,height:650});
+  const failed = {active:false,volume:1,muted:false,device_id:'output-2',devices:[],consumed_samples:0,error:'Preferred output removed'};
+  try {
+    await page.inventory();
+    await page.evaluate(`fixture.command('connect', () => connectToHost('audio.test','Audio'))`);
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase==='waiting-video', () => fixture.settle('connect',null))`);
+    await page.evaluate(`fixture.command('poll_frame_raw', () => { fixture.tickPromise=fixture.tick(); })`);
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase==='streaming', () => fixture.settle('poll_frame_raw',fixture.frame()))`);
+    await page.evaluate(`fixture.tickPromise`);
+    await page.evaluate(`fixture.command('audio_status', () => { fixture.audioRefresh=refreshAudioStatus(); })`);
+    await page.evaluate(`fixture.until(() => !document.getElementById('session-error').hidden, () => fixture.settle('audio_status',${JSON.stringify(failed)}))`);
+    expect(await page.evaluate(`document.getElementById('session-error-text').textContent`)).toBe(failed.error);
+    expect(await page.evaluate(`document.getElementById('launcher-panel').hidden`)).toBe(true);
+    await page.evaluate(`fixture.command('list_audio_devices', () => document.getElementById('btn-expand').click())`);
+    await page.evaluate(`fixture.until(() => !document.getElementById('audio-volume').disabled, () => fixture.settle('list_audio_devices',${JSON.stringify(failed)}))`);
+    expect(await page.evaluate(`(() => { const panel=document.getElementById('launcher-panel'),r=panel.getBoundingClientRect();return r.top>=0 && r.bottom<=innerHeight && panel.scrollHeight>panel.clientHeight && getComputedStyle(panel).overflowY==='auto'; })()`)).toBe(true);
+    const selected = await page.evaluate(`fixture.command('set_audio_device', () => { document.getElementById('audio-device').value=''; document.getElementById('btn-audio-apply').click(); })`);
+    expect(selected.args).toEqual({deviceId:null});
+    await page.evaluate(`fixture.until(() => !document.getElementById('audio-volume').disabled && document.getElementById('audio-error').hidden, () => fixture.settle('set_audio_device',${JSON.stringify({...failed,active:true,device_id:null,error:null})}))`);
+    expect(await page.evaluate(`document.getElementById('session-error').hidden`)).toBe(true);
+  } finally { await page.close(); }
+}, 20000);
+
 test('failed held release still releases remaining keys and does not poison later sessions', async () => {
   const page = await openPage();
   try {
@@ -184,4 +248,63 @@ test('C1 refresh failure/retry, empty inventory, unpaired prefill and no bridge'
   try {
     expect(await unavailable.evaluate(`({state:document.getElementById('library-status').dataset.state,disabled:document.getElementById('btn-direct-connect').disabled,cards:document.querySelectorAll('.host-card').length})`)).toEqual({state:'unavailable',disabled:true,cards:0});
   } finally { await unavailable.close(); }
+}, 20000);
+
+test('C3 middle button, extra button rejection, focus-loss release and relative pointer in live session', async () => {
+  const page = await openPage();
+  try {
+    await page.inventory();
+    await page.evaluate(`fixture.command('connect', () => document.querySelector('[data-action="connect"]').click())`);
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase==='waiting-video', () => fixture.settle('connect', null))`);
+    await page.evaluate(`fixture.command('poll_frame_raw', () => { fixture.tickPromise=fixture.tick(); })`);
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase==='streaming', () => fixture.settle('poll_frame_raw', fixture.frame()))`);
+    await page.evaluate(`fixture.tickPromise`);
+
+    // 1. Middle mousedown/up produces MiddleMouseDown and MiddleMouseUp in order
+    const middleDown = await page.evaluate(`fixture.command('send_input', () => {
+      document.getElementById('viewport').dispatchEvent(new MouseEvent('mousedown', { button: 1, clientX: 300, clientY: 200, bubbles: true }));
+    })`);
+    expect(middleDown.args.event.event_type).toBe('MiddleMouseDown');
+    await page.evaluate(`fixture.settle('send_input', null)`);
+
+    const middleUp = await page.evaluate(`fixture.command('send_input', () => {
+      window.dispatchEvent(new MouseEvent('mouseup', { button: 1, clientX: 300, clientY: 200, bubbles: true }));
+    })`);
+    expect(middleUp.args.event.event_type).toBe('MiddleMouseUp');
+    await page.evaluate(`fixture.settle('send_input', null)`);
+
+    // 2. Unsupported extra buttons (button 3, 4) must never map left or produce events
+    const callsBeforeExtra = await page.evaluate(`fixture.calls.filter(c => c.cmd === 'send_input').length`);
+    await page.evaluate(`document.getElementById('viewport').dispatchEvent(new MouseEvent('mousedown', { button: 3, clientX: 300, clientY: 200, bubbles: true }))`);
+    await page.evaluate(`window.dispatchEvent(new MouseEvent('mouseup', { button: 3, clientX: 300, clientY: 200, bubbles: true }))`);
+    const callsAfterExtra = await page.evaluate(`fixture.calls.filter(c => c.cmd === 'send_input').length`);
+    expect(callsAfterExtra).toBe(callsBeforeExtra);
+
+    // 3. Focus-loss release of all held buttons: hold left + middle, then blur window
+    await page.evaluate(`fixture.command('send_input', () => {
+      document.getElementById('viewport').dispatchEvent(new MouseEvent('mousedown', { button: 0, clientX: 300, clientY: 200, bubbles: true }));
+    })`);
+    await page.evaluate(`fixture.settle('send_input', null)`);
+    await page.evaluate(`fixture.command('send_input', () => {
+      document.getElementById('viewport').dispatchEvent(new MouseEvent('mousedown', { button: 1, clientX: 300, clientY: 200, bubbles: true }));
+    })`);
+    await page.evaluate(`fixture.settle('send_input', null)`);
+
+    const releaseFirst = await page.evaluate(`fixture.command('send_input', () => {
+      window.dispatchEvent(new Event('blur'));
+    })`);
+    expect(['LeftMouseUp', 'MiddleMouseUp']).toContain(releaseFirst.args.event.event_type);
+    const releaseSecond = await page.evaluate(`fixture.command('send_input', () => fixture.settle('send_input', null))`);
+    expect(['LeftMouseUp', 'MiddleMouseUp']).toContain(releaseSecond.args.event.event_type);
+    expect(releaseSecond.args.event.event_type).not.toBe(releaseFirst.args.event.event_type);
+    await page.evaluate(`fixture.settle('send_input', null)`);
+
+    // 4. Pointer lock control availability in real webview
+    const hasLockBtn = await page.evaluate(`!!document.getElementById('btn-pointer-lock') && !document.getElementById('btn-pointer-lock').hidden`);
+    expect(hasLockBtn).toBe(true);
+
+    // 5. Clean disconnect
+    await page.evaluate(`fixture.command('disconnect', () => { fixture.stop = doDisconnect(); })`);
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase === 'idle', () => fixture.settle('disconnect', null))`);
+  } finally { await page.close(); }
 }, 20000);

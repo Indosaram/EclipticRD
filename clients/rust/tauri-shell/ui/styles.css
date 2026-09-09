@@ -333,6 +333,22 @@ button[data-action="favorite"][aria-pressed="true"] { color: var(--accent); bord
   pointer-events: none;
   container-type: inline-size;
 }
+.overlay-fab {
+  pointer-events: auto;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-overlay);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text);
+  cursor: pointer;
+}
+.overlay-fab:hover { background: var(--card-hover); }
+#session-overlay .launcher-bar.collapsed { display: none; }
 .launcher-bar, .launcher-panel { background: var(--card-bg); border-radius: var(--radius-panel); box-shadow: var(--shadow-overlay); pointer-events: auto; }
 .launcher-bar {
   width: 100%;

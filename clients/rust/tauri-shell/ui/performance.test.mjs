@@ -194,3 +194,38 @@ test('TCP terminal cleanup exposes join failure without losing terminal detail',
   assert.equal(h.run('isConnected'), false);
   assert.equal(h.raf.size, 0);
 });
+
+test('relative move motion accumulates deltas and flushes on RAF', async () => {
+  const h = harness(); h.run('isConnected = true');
+  h.run('sendRelativePointerEvent({ movementX: 5, movementY: -3, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false })');
+  h.run('sendRelativePointerEvent({ movementX: 10, movementY: 2, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false })');
+  assert.equal(h.raf.size, 1);
+  await h.tick();
+  const inputs = h.inputs();
+  assert.equal(inputs.length, 1);
+  assert.equal(inputs[0].event_type, 'RelativeMove');
+  assert.equal(inputs[0].scroll_dx, 15);
+  assert.equal(inputs[0].scroll_dy, -1);
+  assert.equal(h.raf.size, 0);
+});
+
+test('button down flushes preceding coalesced relative move first', () => {
+  const h = harness(); h.run('isConnected = true');
+  h.run('sendRelativePointerEvent({ movementX: 8, movementY: 4, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false })');
+  h.run("sendPointerEvent('MiddleMouseDown', { clientX: 50, clientY: 50, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false })");
+  assert.deepEqual(
+    h.inputs().slice(-2).map(e => [e.event_type, e.scroll_dx, e.scroll_dy]),
+    [['RelativeMove', 8, 4], ['MiddleMouseDown', 0, 0]]
+  );
+  assert.equal(h.raf.size, 0);
+});
+
+test('middle mouse down and up emit MiddleMouseDown and MiddleMouseUp in order', () => {
+  const h = harness(); h.run('isConnected = true');
+  h.run("sendPointerEvent('MiddleMouseDown', { clientX: 40, clientY: 60 })");
+  h.run("sendPointerEvent('MiddleMouseUp', { clientX: 40, clientY: 60 })");
+  assert.deepEqual(
+    h.inputs().slice(-2).map(e => e.event_type),
+    ['MiddleMouseDown', 'MiddleMouseUp']
+  );
+});

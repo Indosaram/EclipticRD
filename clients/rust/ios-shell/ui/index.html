@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>EclipticRD</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+  <main id="view-connect">
+    <div class="connect-card">
+      <div class="brand-header">
+        <div class="brand-icon">E</div>
+        <div class="brand-title">EclipticRD</div>
+      </div>
+
+      <div id="bridge-warning" class="bridge-warning" hidden>
+        Mobile connection controls are unavailable in this browser.
+      </div>
+
+      <div id="alert-banner" class="alert-banner" hidden>
+        <span id="alert-text"></span>
+        <button id="btn-dismiss-alert" type="button" class="btn-icon" aria-label="Dismiss alert">✕</button>
+      </div>
+
+      <section id="section-discovery" class="discovery-section" aria-label="Discovered Nearby Hosts">
+        <div class="discovery-header">
+          <span class="discovery-title">Nearby Hosts</span>
+          <button id="btn-refresh-discovery" type="button" class="btn-refresh" aria-label="Refresh discovered hosts">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+            </svg>
+          </button>
+        </div>
+
+        <div id="discovery-loading" class="discovery-loading" hidden>
+          <div class="pulse-dot"></div>
+          <span>Scanning local network…</span>
+        </div>
+
+        <div id="discovery-error" class="discovery-error" hidden>
+          <span id="discovery-error-text"></span>
+        </div>
+
+        <div id="discovery-hosts-list" class="discovery-hosts-list" role="list"></div>
+
+        <div id="discovery-empty" class="discovery-empty" hidden>
+          No nearby EclipticRD hosts found on this network. Connect by direct address below.
+        </div>
+      </section>
+
+      <div class="divider-direct"><span>or connect directly</span></div>
+
+      <form id="connect-form" class="connect-form" novalidate>
+        <div class="field">
+          <label for="connect-host">Host Address</label>
+          <input id="connect-host" type="text" placeholder="192.168.1.50" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" required>
+          <span id="host-error" class="field-error"></span>
+        </div>
+
+        <div class="field">
+          <label for="connect-pin">Pairing PIN (optional)</label>
+          <input id="connect-pin" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" placeholder="8 digits for initial pairing" autocomplete="off">
+          <span id="pin-error" class="field-error"></span>
+        </div>
+
+        <button id="btn-connect-submit" type="submit" class="btn-primary">Connect</button>
+      </form>
+    </div>
+  </main>
+
+  <section id="view-session" hidden>
+    <canvas id="screen-canvas" aria-label="Remote desktop stream; touch to interact"></canvas>
+    <div id="remote-cursor" class="remote-cursor" aria-hidden="true"></div>
+
+    <div id="modal-connecting" class="modal-overlay" role="dialog" aria-modal="true" hidden>
+      <div class="connecting-card">
+        <div class="spinner" aria-hidden="true"></div>
+        <div id="modal-status-text" role="status">Connecting...</div>
+        <p id="modal-host-name"></p>
+        <button id="btn-cancel-connect" type="button" class="btn-danger">Cancel</button>
+      </div>
+    </div>
+
+    <aside id="overlay-pill" aria-label="Session Controls">
+      <button id="btn-overlay-trigger" type="button" class="overlay-trigger" aria-expanded="false" aria-controls="overlay-bar" aria-label="Toggle Session Menu">
+        <div id="status-dot" class="status-dot"></div>
+      </button>
+      <div id="overlay-bar" class="overlay-bar collapsed">
+        <button id="btn-toggle-touch-mode" type="button" class="overlay-btn">
+          <span id="touch-mode-label">Direct</span>
+        </button>
+        <button id="btn-toggle-mute" type="button" class="overlay-btn" aria-pressed="false">Mute</button>
+        <button id="btn-summon-keyboard" type="button" class="overlay-btn icon-only" aria-label="Summon Keyboard">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M7 16h10"/></svg>
+        </button>
+        <button id="btn-toggle-stats" type="button" class="overlay-btn icon-only" aria-label="Show Stats">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="M18 20V10M12 20V4M6 20v-6"/></svg>
+        </button>
+        <button id="btn-session-disconnect" type="button" class="overlay-btn btn-danger">Disconnect</button>
+      </div>
+    </aside>
+
+    <nav id="accessory-bar" aria-label="Virtual Accessory Keys">
+      <button type="button" class="key-btn" data-key="Escape">Esc</button>
+      <button type="button" class="key-btn" data-key="Tab">Tab</button>
+      <button type="button" class="key-btn" data-key="ArrowLeft">←</button>
+      <button type="button" class="key-btn" data-key="ArrowDown">↓</button>
+      <button type="button" class="key-btn" data-key="ArrowUp">↑</button>
+      <button type="button" class="key-btn" data-key="ArrowRight">→</button>
+      <button type="button" class="key-btn" data-modifier="SHIFT" aria-pressed="false">Shift</button>
+      <button type="button" class="key-btn" data-modifier="CONTROL" aria-pressed="false">Ctrl</button>
+      <button type="button" class="key-btn" data-modifier="OPTION" aria-pressed="false">Opt</button>
+      <button type="button" class="key-btn" data-modifier="COMMAND" aria-pressed="false">⌘</button>
+    </nav>
+
+    <div id="stats-sheet" class="stats-sheet" role="region" aria-label="Session Performance Details" hidden>
+      <div class="sheet-header">
+        <h2>Session Details</h2>
+        <button id="btn-close-stats" type="button" class="btn-icon" aria-label="Close stats">✕</button>
+      </div>
+      <dl class="stats-grid">
+        <dt>State</dt>
+        <dd id="stat-state">—</dd>
+        <dt>Host</dt>
+        <dd id="stat-host">—</dd>
+        <dt>Rendered FPS</dt>
+        <dd id="stat-fps">—</dd>
+        <dt>Stream Resolution</dt>
+        <dd id="stat-resolution">—</dd>
+        <dt>Frames Received</dt>
+        <dd id="stat-frames-recv">—</dd>
+        <dt>Frames Decoded</dt>
+        <dd id="stat-frames-decoded">—</dd>
+        <dt>Audio Packets</dt>
+        <dd id="stat-audio-packets">—</dd>
+        <dt>Audio Samples Played</dt>
+        <dd id="stat-audio-samples">—</dd>
+      </dl>
+    </div>
+
+    <input id="soft-keyboard-proxy" type="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" aria-hidden="true" tabindex="-1">
+  </section>
+
+  <script src="frame-parser.js"></script>
+  <script src="touch-coords.js"></script>
+  <script src="keyboard-mapper.js"></script>
+  <script src="connection-state.js"></script>
+  <script src="input-queue.js"></script>
+  <script src="video-renderer.js"></script>
+  <script src="lifecycle.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

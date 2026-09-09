@@ -262,6 +262,46 @@ fn input_event_supports_agent_control_types() {
         InputEventType::try_from(14).unwrap(),
         InputEventType::RelativeMove
     );
+    assert_eq!(
+        InputEventType::try_from(15).unwrap(),
+        InputEventType::GamepadAxis
+    );
+    assert_eq!(
+        InputEventType::try_from(16).unwrap(),
+        InputEventType::GamepadButtonDown
+    );
+    assert_eq!(
+        InputEventType::try_from(17).unwrap(),
+        InputEventType::GamepadButtonUp
+    );
+    assert_eq!(
+        InputEventType::try_from(18).unwrap(),
+        InputEventType::PenMove
+    );
+    assert_eq!(
+        InputEventType::try_from(19).unwrap(),
+        InputEventType::PenDown
+    );
+    assert_eq!(
+        InputEventType::try_from(20).unwrap(),
+        InputEventType::PenUp
+    );
+
+    // Pen helpers
+    let pen = InputEvent::pen_down(0.5, 0.5, 0.8, 15.0, -10.0);
+    assert_eq!(pen.event_type, InputEventType::PenDown);
+    assert_eq!(pen.scroll_dx, 0.8);
+    assert_eq!(pen.scroll_dy, 15.0);
+    assert_round_trip(&pen);
+
+    // Gamepad helpers
+    let gp_axis = InputEvent::gamepad_axis(0, 1, 0.5, -0.5);
+    assert_eq!(gp_axis.event_type, InputEventType::GamepadAxis);
+    assert_round_trip(&gp_axis);
+
+    let gp_btn = InputEvent::gamepad_button(1, 4, true);
+    assert_eq!(gp_btn.event_type, InputEventType::GamepadButtonDown);
+    assert_round_trip(&gp_btn);
 }
 
 #[test]
@@ -751,3 +791,64 @@ truncation_test!(
         data: Vec::new()
     }
 );
+truncation_test!(
+    truncated_color_metadata,
+    ColorMetadata,
+    ColorMetadata {
+        range: ColorRange::Full,
+        matrix: ColorMatrix::Bt2020,
+        chroma: ChromaSubsampling::Yuv444,
+    }
+);
+
+#[test]
+fn color_metadata_round_trips_and_rejects_unknown_enums() {
+    let meta = ColorMetadata {
+        range: ColorRange::Full,
+        matrix: ColorMatrix::Bt709,
+        chroma: ChromaSubsampling::Yuv444,
+    };
+    assert_round_trip(&meta);
+
+    let default_meta = ColorMetadata::default();
+    assert_round_trip(&default_meta);
+    assert_eq!(default_meta.range, ColorRange::Limited);
+    assert_eq!(default_meta.matrix, ColorMatrix::Bt709);
+    assert_eq!(default_meta.chroma, ChromaSubsampling::Yuv420);
+
+    assert!(matches!(
+        ColorMetadata::decode(&[2, 0, 0]),
+        Err(CodecError::UnknownColorRange(2))
+    ));
+    assert!(matches!(
+        ColorMetadata::decode(&[0, 5, 0]),
+        Err(CodecError::UnknownColorMatrix(5))
+    ));
+    assert!(matches!(
+        ColorMetadata::decode(&[0, 0, 9]),
+        Err(CodecError::UnknownChromaSubsampling(9))
+    ));
+}
+
+#[test]
+fn capabilities_color_444_round_trip() {
+    let caps = Capabilities::STREAM_CONFIGURATION
+        | Capabilities::CLIPBOARD_SYNC
+        | Capabilities::TEXT_CLIPBOARD_SYNC
+        | Capabilities::COLOR_444
+        | Capabilities::COLOR_HDR
+        | Capabilities::GAMEPAD
+        | Capabilities::PEN_INPUT;
+    assert!(caps.contains(Capabilities::COLOR_444));
+    assert!(caps.contains(Capabilities::COLOR_HDR));
+    assert!(caps.contains(Capabilities::GAMEPAD));
+    assert!(caps.contains(Capabilities::PEN_INPUT));
+
+    let handshake = sample_handshake(caps);
+    assert_round_trip(&handshake);
+    let decoded = Handshake::decode(&handshake.encode().unwrap()).unwrap();
+    assert!(decoded.capabilities.contains(Capabilities::COLOR_444));
+    assert!(decoded.capabilities.contains(Capabilities::COLOR_HDR));
+    assert!(decoded.capabilities.contains(Capabilities::GAMEPAD));
+    assert!(decoded.capabilities.contains(Capabilities::PEN_INPUT));
+}

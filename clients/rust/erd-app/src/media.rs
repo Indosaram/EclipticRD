@@ -8,6 +8,8 @@ use erd_proto::{CursorUpdate, FrameChunk, FrameHeader, MAX_CHUNKS_PER_FRAME, MAX
 use thiserror::Error;
 
 const MAX_ORPHAN_FRAMES: usize = 16;
+const MAX_INCOMPLETE_FRAMES: usize = 16;
+const MAX_LOSS_SAMPLES: usize = 4096;
 const ASSEMBLY_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +50,7 @@ pub struct FrameAssembler {
     expected_frame_id: Option<u32>,
     recent_loss: VecDeque<(Instant, u64, u64)>,
     completed_frames: u64,
+    completed_started_at: Option<Instant>,
 }
 
 impl FrameAssembler {
@@ -57,6 +60,7 @@ impl FrameAssembler {
         timestamp_ms: u32,
         now: Instant,
     ) -> Result<Option<AssembledFrame>, MediaAssemblyError> {
+        self.completed_started_at = None;
         if header.total_chunks == 0
             || header.total_chunks > MAX_CHUNKS_PER_FRAME
             || header.total_size == 0
@@ -71,19 +75,33 @@ impl FrameAssembler {
                 *frame_id >= header.frame_id || Self::complete(assembly)
             });
         }
-        let chunks = self
-            .orphans
-            .remove(&header.frame_id)
-            .map_or_else(BTreeMap::new, |orphan| orphan.chunks);
+        let (chunks, started) = self.orphans.remove(&header.frame_id).map_or_else(
+            || (BTreeMap::new(), now),
+            |orphan| (orphan.chunks, orphan.started),
+        );
         let frame_id = header.frame_id;
+        let started = self
+            .frames
+            .get(&frame_id)
+            .map_or(started, |assembly| assembly.started.min(started));
         let assembly = FrameAssembly {
             header,
             chunks,
-            started: now,
+            started,
             timestamp_ms,
         };
         self.frames.insert(frame_id, assembly);
-        self.finish_if_complete(frame_id)
+        let completed = self.finish_if_complete(frame_id)?;
+        if self.frames.len() > MAX_INCOMPLETE_FRAMES {
+            let oldest = self
+                .frames
+                .iter()
+                .min_by_key(|(id, assembly)| (assembly.started, **id))
+                .map(|(&id, _)| id)
+                .expect("over-capacity frame map is nonempty");
+            self.frames.remove(&oldest);
+        }
+        Ok(completed)
     }
 
     pub fn push_chunk(
@@ -91,6 +109,7 @@ impl FrameAssembler {
         chunk: FrameChunk,
         now: Instant,
     ) -> Result<Option<AssembledFrame>, MediaAssemblyError> {
+        self.completed_started_at = None;
         self.expire(now);
         if let Some(assembly) = self.frames.get_mut(&chunk.frame_id) {
             if chunk.chunk_index >= assembly.header.total_chunks {
@@ -138,12 +157,17 @@ impl FrameAssembler {
         self.completed_frames
     }
 
+    pub(crate) fn take_completed_started_at(&mut self) -> Option<Instant> {
+        self.completed_started_at.take()
+    }
+
     pub fn clear(&mut self) {
         self.frames.clear();
         self.orphans.clear();
         self.expected_frame_id = None;
         self.recent_loss.clear();
         self.completed_frames = 0;
+        self.completed_started_at = None;
     }
 
     fn finish_if_complete(
@@ -170,6 +194,7 @@ impl FrameAssembler {
             return Err(MediaAssemblyError::SizeMismatch);
         }
         self.completed_frames += 1;
+        self.completed_started_at = Some(assembly.started);
         Ok(Some(AssembledFrame {
             header: assembly.header,
             data,
@@ -204,9 +229,11 @@ impl FrameAssembler {
     }
 
     fn trim_loss(&mut self, now: Instant) {
-        while self.recent_loss.front().is_some_and(|(timestamp, _, _)| {
-            now.saturating_duration_since(*timestamp) > Duration::from_secs(5)
-        }) {
+        while self.recent_loss.len() > MAX_LOSS_SAMPLES
+            || self.recent_loss.front().is_some_and(|(timestamp, _, _)| {
+                now.saturating_duration_since(*timestamp) > Duration::from_secs(5)
+            })
+        {
             self.recent_loss.pop_front();
         }
     }
@@ -234,5 +261,238 @@ impl CursorState {
         self.x = update.x.clamp(0.0, 1.0);
         self.y = update.y.clamp(0.0, 1.0);
         self.cursor_type = update.cursor_type;
+    }
+}
+
+#[cfg(test)]
+mod receiver_timing_tests {
+    use super::*;
+
+    fn header() -> FrameHeader {
+        FrameHeader {
+            frame_id: 1,
+            width: 1,
+            height: 1,
+            is_key_frame: false,
+            total_chunks: 2,
+            total_size: 2,
+        }
+    }
+
+    fn chunk(index: u16) -> FrameChunk {
+        FrameChunk {
+            frame_id: 1,
+            chunk_index: index,
+            data: vec![index as u8],
+        }
+    }
+
+    #[test]
+    fn frame_retention_bounds_header_bursts() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        for frame_id in 0..8192 {
+            frames
+                .push_header(
+                    FrameHeader {
+                        frame_id,
+                        ..header()
+                    },
+                    42,
+                    now + Duration::from_nanos(frame_id.into()),
+                )
+                .unwrap();
+        }
+        eprintln!(
+            "8192 incomplete headers retain {} frames and {} loss samples",
+            frames.frames.len(),
+            frames.recent_loss.len()
+        );
+        assert!(
+            frames.frames.len() <= 16,
+            "incomplete frame state is unbounded"
+        );
+        assert!(
+            frames.recent_loss.len() <= 4096,
+            "header loss telemetry state is unbounded"
+        );
+        assert!(!frames.frames.contains_key(&0));
+        assert!(frames.frames.contains_key(&8191));
+        for index in 0..2 {
+            let completed = frames
+                .push_chunk(
+                    FrameChunk {
+                        frame_id: 8191,
+                        ..chunk(index)
+                    },
+                    now + Duration::from_millis(1),
+                )
+                .unwrap();
+            if index == 1 {
+                assert_eq!(completed.unwrap().data, [0, 1]);
+            } else {
+                assert!(completed.is_none());
+            }
+        }
+        frames.expire(now + ASSEMBLY_TIMEOUT + Duration::from_millis(1));
+        assert!(frames.frames.is_empty());
+    }
+
+    #[test]
+    fn frame_retention_duplicate_and_invalid_headers_preserve_other_frames() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        for frame_id in 0..16 {
+            frames
+                .push_header(
+                    FrameHeader {
+                        frame_id,
+                        ..header()
+                    },
+                    42,
+                    now + Duration::from_nanos(frame_id.into()),
+                )
+                .unwrap();
+        }
+        frames
+            .push_header(
+                FrameHeader {
+                    frame_id: 15,
+                    ..header()
+                },
+                99,
+                now + Duration::from_millis(1),
+            )
+            .unwrap();
+        assert!(frames
+            .push_header(
+                FrameHeader {
+                    frame_id: 16,
+                    total_chunks: 0,
+                    ..header()
+                },
+                99,
+                now + Duration::from_millis(1),
+            )
+            .is_err());
+        assert_eq!(frames.frames.len(), 16);
+        assert!(frames.frames.contains_key(&0));
+        assert_eq!(frames.frames[&15].timestamp_ms, 99);
+    }
+
+    #[test]
+    fn frame_retention_complete_orphans_preserve_pending_frames() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        for frame_id in 0..16 {
+            frames
+                .push_header(
+                    FrameHeader {
+                        frame_id,
+                        ..header()
+                    },
+                    42,
+                    now,
+                )
+                .unwrap();
+        }
+        for index in 0..2 {
+            frames
+                .push_chunk(
+                    FrameChunk {
+                        frame_id: 100,
+                        ..chunk(index)
+                    },
+                    now,
+                )
+                .unwrap();
+        }
+        let completed = frames
+            .push_header(
+                FrameHeader {
+                    frame_id: 100,
+                    ..header()
+                },
+                42,
+                now,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.data, [0, 1]);
+        assert_eq!(frames.frames.len(), 16);
+        assert!(frames.frames.contains_key(&0));
+    }
+
+    #[test]
+    fn receiver_assembly_keeps_first_orphan_and_one_shot_completion_start() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        frames.push_chunk(chunk(1), now).unwrap();
+        frames
+            .push_chunk(chunk(1), now + Duration::from_millis(10))
+            .unwrap();
+        frames
+            .push_header(header(), 42, now + Duration::from_millis(20))
+            .unwrap();
+        assert_eq!(frames.take_completed_started_at(), None);
+        let frame = frames
+            .push_chunk(chunk(0), now + Duration::from_millis(30))
+            .unwrap()
+            .unwrap();
+        assert_eq!(frame.data, [0, 1]);
+        assert_eq!(frames.take_completed_started_at(), Some(now));
+        assert_eq!(frames.take_completed_started_at(), None);
+    }
+
+    #[test]
+    fn receiver_header_completion_and_failed_completion_do_not_leak_timing() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        frames.push_chunk(chunk(0), now).unwrap();
+        frames
+            .push_chunk(chunk(1), now + Duration::from_millis(10))
+            .unwrap();
+        assert!(frames
+            .push_header(header(), 42, now + Duration::from_millis(20))
+            .unwrap()
+            .is_some());
+        assert_eq!(frames.take_completed_started_at(), Some(now));
+        frames.push_header(header(), 42, now).unwrap();
+        frames.push_chunk(chunk(0), now).unwrap();
+        let mut invalid = chunk(1);
+        invalid.data.clear();
+        assert_eq!(
+            frames.push_chunk(invalid, now),
+            Err(MediaAssemblyError::SizeMismatch)
+        );
+        assert_eq!(frames.take_completed_started_at(), None);
+        frames.clear();
+        assert_eq!(frames.take_completed_started_at(), None);
+    }
+
+    #[test]
+    fn receiver_timing_does_not_change_legacy_header_gap_loss() {
+        let now = Instant::now();
+        let mut frames = FrameAssembler::default();
+        for frame_id in [1, 3, 2, 3] {
+            frames
+                .push_header(
+                    FrameHeader {
+                        frame_id,
+                        ..header()
+                    },
+                    42,
+                    now,
+                )
+                .unwrap();
+        }
+        // Legacy frame-header inference counts the gap immediately and duplicates
+        // in its denominator. Packet telemetry must not silently retune ABR.
+        assert_eq!(frames.loss_ratio(now), 1.0 / 5.0);
+        assert_eq!(frames.loss_ratio(now + Duration::from_secs(5)), 1.0 / 5.0);
+        assert_eq!(
+            frames.loss_ratio(now + Duration::from_secs(5) + Duration::from_nanos(1)),
+            0.0
+        );
     }
 }

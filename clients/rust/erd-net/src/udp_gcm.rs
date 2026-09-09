@@ -56,6 +56,8 @@ struct ReplayWindow {
     highest_received: u64,
     received_any: bool,
     blocks: HashMap<u64, u64>,
+    #[cfg(test)]
+    prune_visits: usize,
 }
 
 impl ReplayWindow {
@@ -79,6 +81,10 @@ impl ReplayWindow {
         let mask = 1_u64 << (counter % 64);
         *self.blocks.entry(block).or_default() |= mask;
 
+        let previous_oldest_block = self
+            .highest_received
+            .saturating_sub(REPLAY_WINDOW_SIZE.saturating_sub(1))
+            / 64;
         if !self.received_any || counter > self.highest_received {
             self.highest_received = counter;
             self.received_any = true;
@@ -88,7 +94,15 @@ impl ReplayWindow {
             .highest_received
             .saturating_sub(REPLAY_WINDOW_SIZE.saturating_sub(1));
         let oldest_block = oldest_counter / 64;
-        self.blocks.retain(|block, _| *block >= oldest_block);
+        if oldest_block > previous_oldest_block {
+            self.blocks.retain(|block, _| {
+                #[cfg(test)]
+                {
+                    self.prune_visits += 1;
+                }
+                *block >= oldest_block
+            });
+        }
     }
 }
 
@@ -242,7 +256,7 @@ pub(crate) fn hkdf_sha256(ikm: &[u8], salt: &[u8], info: &[u8], length: usize) -
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use erd_proto::{PacketType, WireCodec};
 
     use super::*;
@@ -404,51 +418,7 @@ mod tests {
         assert_eq!(header.encode().unwrap().len(), PacketHeader::SIZE);
     }
 
-    use std::alloc::{GlobalAlloc, Layout, System};
-    use std::cell::Cell;
-
-    struct TrackingAlloc;
-    thread_local! {
-        static ALLOC_COUNT: Cell<Option<usize>> = const { Cell::new(None) };
-    }
-
-    // SAFETY: forwards every allocation and deallocation unchanged to System.
-    // The allocation-free, thread-local counter never accesses allocated memory.
-    unsafe impl GlobalAlloc for TrackingAlloc {
-        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-            ALLOC_COUNT.with(|count| {
-                if let Some(value) = count.get() {
-                    count.set(Some(value + 1));
-                }
-            });
-            // SAFETY: GlobalAlloc's caller provides the valid layout.
-            unsafe { System.alloc(layout) }
-        }
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-            // SAFETY: pointer and layout are forwarded to their original allocator.
-            unsafe { System.dealloc(ptr, layout) }
-        }
-    }
-
-    #[global_allocator]
-    static GLOBAL: TrackingAlloc = TrackingAlloc;
-
-    fn allocations<T>(operation: impl FnOnce() -> T) -> (T, usize) {
-        struct Reset;
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                ALLOC_COUNT.with(|count| count.set(None));
-            }
-        }
-        ALLOC_COUNT.with(|count| {
-            assert_eq!(count.replace(Some(0)), None);
-        });
-        let reset = Reset;
-        let result = operation();
-        let count = ALLOC_COUNT.with(|count| count.get().unwrap());
-        drop(reset);
-        (result, count)
-    }
+    pub(crate) use crate::test_alloc::allocations;
 
     #[test]
     fn seal_uses_one_allocation() {
@@ -456,6 +426,76 @@ mod tests {
         let (sealed, count) = allocations(|| sender.seal(b"payload", AAD).unwrap());
         assert_eq!(sealed.len(), 7 + NONCE_SIZE + TAG_SIZE);
         assert_eq!(count, 1, "seal must allocate only its returned buffer");
+    }
+
+    #[test]
+    fn media_decode_rejects_oversized_video_before_copy() {
+        use erd_proto::{CodecError, FrameChunk, MAX_VIDEO_CHUNK_BYTES};
+
+        let input = vec![0; FrameChunk::HEADER_SIZE + MAX_VIDEO_CHUNK_BYTES + 1];
+        let (result, count) = allocations(|| FrameChunk::decode(&input));
+        assert!(matches!(
+            result,
+            Err(CodecError::LengthLimit { field: "video chunk data", actual, max })
+                if actual == MAX_VIDEO_CHUNK_BYTES + 1 && max == MAX_VIDEO_CHUNK_BYTES
+        ));
+        assert_eq!(
+            FrameChunk::decode(&input[..input.len() - 1])
+                .unwrap()
+                .data
+                .len(),
+            MAX_VIDEO_CHUNK_BYTES
+        );
+        assert!(FrameChunk::decode(&input[..FrameChunk::HEADER_SIZE])
+            .unwrap()
+            .data
+            .is_empty());
+        eprintln!("rejected oversized video allocations: {count}");
+        assert_eq!(count, 0, "invalid video must be rejected before ownership");
+    }
+
+    #[test]
+    fn media_decode_rejects_oversized_audio_before_copy() {
+        use erd_proto::{AudioFragment, AudioFragmentHeader, CodecError, MAX_AUDIO_FRAGMENT_BYTES};
+
+        let mut input = vec![0; AudioFragmentHeader::SIZE + MAX_AUDIO_FRAGMENT_BYTES + 1];
+        input[6..8].copy_from_slice(&1_u16.to_le_bytes());
+        let (result, count) = allocations(|| AudioFragment::decode(&input));
+        assert!(matches!(
+            result,
+            Err(CodecError::LengthLimit { field: "audio fragment data", actual, max })
+                if actual == MAX_AUDIO_FRAGMENT_BYTES + 1 && max == MAX_AUDIO_FRAGMENT_BYTES
+        ));
+        assert_eq!(
+            AudioFragment::decode(&input[..input.len() - 1])
+                .unwrap()
+                .data
+                .len(),
+            MAX_AUDIO_FRAGMENT_BYTES
+        );
+        assert!(AudioFragment::decode(&input[..AudioFragmentHeader::SIZE])
+            .unwrap()
+            .data
+            .is_empty());
+        eprintln!("rejected oversized audio allocations: {count}");
+        assert_eq!(count, 0, "invalid audio must be rejected before ownership");
+    }
+
+    #[test]
+    fn media_decode_rejects_invalid_audio_header_before_copy() {
+        use erd_proto::{AudioFragment, AudioFragmentHeader, CodecError, MAX_AUDIO_FRAGMENT_BYTES};
+
+        let input = vec![0; AudioFragmentHeader::SIZE + MAX_AUDIO_FRAGMENT_BYTES + 1];
+        let (result, count) = allocations(|| AudioFragment::decode(&input));
+        assert!(matches!(
+            result,
+            Err(CodecError::InvalidValue {
+                field: "audio fragment count",
+                value: 0,
+            })
+        ));
+        eprintln!("rejected invalid audio header allocations: {count}");
+        assert_eq!(count, 0, "invalid header must be rejected before ownership");
     }
 
     #[test]
@@ -568,6 +608,34 @@ mod tests {
             receiver.open(&edge, AAD),
             Err(DatagramError::Replay)
         ));
+    }
+
+    #[test]
+    fn replay_prunes_only_when_window_block_advances() {
+        let mut window = ReplayWindow::default();
+        for counter in 0..REPLAY_WINDOW_SIZE {
+            window.record(counter);
+        }
+        window.prune_visits = 0;
+        for counter in REPLAY_WINDOW_SIZE..2 * REPLAY_WINDOW_SIZE {
+            assert!(window.can_accept(counter));
+            window.record(counter);
+            assert!(!window.can_accept(counter));
+        }
+        // The window spans at most 65 blocks and advances 64 block
+        // boundaries over these 4096 packets. Other packets cannot
+        // evict a block and must not rescan the map.
+        let maximum_visits = 65 * 64;
+        eprintln!(
+            "replay prune visits for 4096 packets: {}; maximum: {maximum_visits}",
+            window.prune_visits
+        );
+        assert!(
+            window.prune_visits <= maximum_visits,
+            "replay pruning rescans blocks without an eviction boundary"
+        );
+        assert!(window.blocks.len() <= 65);
+        assert!(!window.can_accept(0));
     }
 
     #[test]

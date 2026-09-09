@@ -1,0 +1,50 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "EclipticRD",
+  "version": "0.1.0",
+  "identifier": "com.eclipticrd.ios",
+  "build": {
+    "frontendDist": "./ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "title": "EclipticRD",
+        "resizable": true
+      }
+    ]
+  },
+  "bundle": {
+    "active": true,
+    "iOS": {
+      "infoPlist": "Info.plist",
+      "frameworks": [
+        "AudioToolbox",
+        "AVFoundation",
+        "CloudKit",
+        "CoreAudio",
+        "CoreData",
+        "CoreFoundation",
+        "CoreGraphics",
+        "CoreImage",
+        "CoreLocation",
+        "CoreMedia",
+        "CoreText",
+        "CoreVideo",
+        "Foundation",
+        "Metal",
+        "MetalKit",
+        "QuartzCore",
+        "Security",
+        "UIKit",
+        "UserNotifications",
+        "VideoToolbox",
+        "WebKit"
+      ]
+    }
+  }
+}

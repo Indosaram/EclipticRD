@@ -14,7 +14,8 @@ use erd_app::{
     agent_input::ScreenInfo,
     agent_server::{AgentServer, AgentServerBackend},
     mcp_server::run_mcp_stdio,
-    ClientSession, LatencyRecorder, PairingRecord, PairingStore, SessionConfig, SessionEvent,
+    ClientSession, LatencyRecorder, PairingRecord, PairingStore, ReceiverSnapshot, SessionConfig,
+    SessionEvent,
 };
 use erd_decode::HevcDecoder;
 use erd_proto::{Capabilities, ControlMessage, InputEvent, InputEventType, Modifiers};
@@ -70,7 +71,7 @@ struct Cli {
     #[arg(long)]
     frames: Option<u64>,
 
-    /// Path to write JSON latency statistics upon completion.
+    /// Path to write legacy decode-latency statistics and a receiver snapshot.
     #[arg(long)]
     stats_json: Option<PathBuf>,
 
@@ -157,12 +158,21 @@ fn store_latest_frame(
     }
 }
 
-const FRAME_QUEUE_CAPACITY: usize = 4;
-type QueuedFrame = (erd_app::AssembledFrame, Instant);
+use erd_app::frame_queue::FrameQueue;
+#[cfg(test)]
+use erd_app::frame_queue::{QueuedFrame, FRAME_QUEUE_CAPACITY};
 
 #[cfg(test)]
 #[path = "erd_client/continuity_codec_tests.rs"]
 mod continuity_codec_tests;
+
+#[cfg(test)]
+#[path = "erd_client/recovery_characterization.rs"]
+mod recovery_characterization;
+
+#[cfg(test)]
+#[path = "erd_client/receiver_telemetry_tests.rs"]
+mod receiver_telemetry_tests;
 
 #[cfg(test)]
 mod continuity_tests {
@@ -277,102 +287,6 @@ mod continuity_tests {
                 id
             );
         }
-    }
-}
-
-struct FrameQueue {
-    state: std::sync::Mutex<FrameQueueState>,
-    ready: std::sync::Condvar,
-}
-
-struct FrameQueueState {
-    frames: std::collections::VecDeque<QueuedFrame>,
-    last_frame_id: Option<u32>,
-    recovering: bool,
-    stopped: bool,
-}
-
-impl FrameQueue {
-    fn new() -> Self {
-        Self {
-            state: std::sync::Mutex::new(FrameQueueState {
-                frames: std::collections::VecDeque::with_capacity(FRAME_QUEUE_CAPACITY),
-                last_frame_id: None,
-                recovering: false,
-                stopped: false,
-            }),
-            ready: std::sync::Condvar::new(),
-        }
-    }
-
-    fn push(&self, frame: QueuedFrame) -> Result<bool> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("frame queue poisoned"))?;
-        if state.stopped {
-            bail!("frame queue stopped");
-        }
-        let key = frame.0.header.is_key_frame;
-        let id = frame.0.header.frame_id;
-        let mut discontinuity = false;
-        if let Some(last) = state.last_frame_id {
-            let advance = id.wrapping_sub(last);
-            // Half-range serial ordering rejects late frames across u32 wrap.
-            if advance == 0 || advance >= (1 << 31) {
-                return Ok(false);
-            }
-            discontinuity = advance != 1;
-        }
-        state.last_frame_id = Some(id);
-        let mut request_keyframe = false;
-        if discontinuity || state.frames.len() == FRAME_QUEUE_CAPACITY {
-            // Dropping a reference invalidates the entire pending chain.
-            state.frames.clear();
-            request_keyframe = !state.recovering && !key;
-            state.recovering = true;
-        }
-        if state.recovering && !key {
-            return Ok(request_keyframe);
-        }
-        state.recovering = false;
-        state.frames.push_back(frame);
-        self.ready.notify_one();
-        Ok(request_keyframe)
-    }
-
-    fn recv_timeout(
-        &self,
-        timeout: Duration,
-    ) -> std::result::Result<QueuedFrame, mpsc::RecvTimeoutError> {
-        let state = self
-            .state
-            .lock()
-            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)?;
-        let (mut state, _) = self
-            .ready
-            .wait_timeout_while(state, timeout, |state| {
-                state.frames.is_empty() && !state.stopped
-            })
-            .map_err(|_| mpsc::RecvTimeoutError::Disconnected)?;
-        if state.stopped {
-            return Err(mpsc::RecvTimeoutError::Disconnected);
-        }
-        state
-            .frames
-            .pop_front()
-            .ok_or(mpsc::RecvTimeoutError::Timeout)
-    }
-
-    fn stop(&self) -> Result<()> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("frame queue poisoned"))?;
-        state.stopped = true;
-        state.frames.clear();
-        self.ready.notify_all();
-        Ok(())
     }
 }
 
@@ -653,6 +567,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
     let udp_receiver_handle = std::thread::Builder::new()
         .name("erd-client-udp-receiver".into())
         .spawn(move || {
+            let mut receive_result = Ok(());
             while r_udp.load(Ordering::Relaxed) {
                 match session_udp.receive_udp_event() {
                     Ok(SessionEvent::Frame(assembled_frame)) => {
@@ -687,13 +602,20 @@ fn run_client(mut cli: Cli) -> Result<()> {
                             }
                         }
                         warn!(%err, "UDP receiver stopped");
+                        receive_result =
+                            Err(anyhow::Error::new(err).context("UDP receiver failed"));
                         break;
                     }
                 }
             }
             if let Err(error) = frame_tx.stop() {
                 error!(%error, "failed to close media queue");
+                receive_result = match receive_result {
+                    Ok(()) => Err(error),
+                    Err(previous) => Err(previous.context(error)),
+                };
             }
+            receive_result
         })
         .context("failed to spawn UDP receiver thread");
 
@@ -737,6 +659,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
             Ok((assembled_frame, receive_ts)) => {
                 let is_key = assembled_frame.header.is_key_frame;
                 let data = &assembled_frame.data;
+                let mut decode_failed = false;
                 if decoder.is_none() {
                     match HevcDecoder::from_keyframe_auto(data) {
                         Ok((codec_kind, dec)) => {
@@ -744,6 +667,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
                             decoder = Some(dec);
                         }
                         Err(err) => {
+                            decode_failed = true;
                             info!(%err, is_key, size = data.len(), "frame not usable for keyframe decoder init");
                         }
                     }
@@ -769,15 +693,35 @@ fn run_client(mut cli: Cli) -> Result<()> {
                             }
                         }
                         Err(err) => {
+                            decode_failed = true;
                             debug!(%err, is_key, size = data.len(), "Frame decode error");
                         }
                     }
                 }
 
-                let present_ts = Instant::now();
+                if decode_failed {
+                    decoder = None;
+                    match frame_rx.decode_failed() {
+                        Ok(true) => {
+                            if let Err(error) =
+                                session.send_control(ControlMessage::RequestKeyFrame)
+                            {
+                                warn!(%error, "decode recovery keyframe request failed");
+                            }
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            error!(%error, "decode recovery queue failed");
+                            break;
+                        }
+                    }
+                }
+
+                let decode_end = Instant::now();
                 if decoded_any {
-                    // Record latency sample: receive/capture -> decode -> present
-                    latency_recorder.record_sample(Some(receive_ts), decode_start, present_ts);
+                    // Legacy interval: post-assembly queue entry through decode
+                    // and optional agent-frame storage, not display presentation.
+                    latency_recorder.record_sample(Some(receive_ts), decode_start, decode_end);
                     if decoded_frames <= 10
                         || decoded_frames % 20 == 0
                         || decoded_frames >= target_frames
@@ -806,12 +750,16 @@ fn run_client(mut cli: Cli) -> Result<()> {
         decoded_frames,
         target_frames, "Cleaning up session transport..."
     );
-    let transport_result = teardown(&session, &mut tcp_runtime);
+    // The UDP reader has a bounded read timeout. Join it before freezing the
+    // snapshot so no in-flight authenticated observation is lost to disconnect.
     let udp_result = udp_receiver_handle.and_then(|handle| {
         handle
             .join()
             .map_err(|_| anyhow::anyhow!("UDP receiver panicked"))
+            .and_then(|result| result)
     });
+    let receiver_result = session.receiver_snapshot();
+    let transport_result = teardown(&session, &mut tcp_runtime);
     let agent_result = if let Some(handle) = agent_server_handle {
         handle
             .join()
@@ -820,7 +768,16 @@ fn run_client(mut cli: Cli) -> Result<()> {
     } else {
         Ok(())
     };
-    // Finish every cleanup before propagating errors, retaining secondary
+    // Export even when transport cleanup failed, but never substitute an empty
+    // snapshot for a failed acquisition. All teardown precedes fallible file I/O.
+    let stats_result = receiver_result
+        .context("failed to snapshot receiver statistics")
+        .and_then(|receiver| stats_json(&latency_recorder, &receiver))
+        .and_then(|json| {
+            info!(stats = %json, "Headless decode and receiver statistics summary");
+            write_stats_file(cli.stats_json.as_deref(), &json)
+        });
+    // Finish every cleanup/export before propagating errors, retaining secondary
     // failures as context instead of losing them behind the first `?`.
     let mut cleanup_result = Ok(());
     for result in [
@@ -829,6 +786,7 @@ fn run_client(mut cli: Cli) -> Result<()> {
         transport_result,
         udp_result,
         agent_result,
+        stats_result,
     ] {
         if let Err(error) = result {
             cleanup_result = match cleanup_result {
@@ -838,11 +796,6 @@ fn run_client(mut cli: Cli) -> Result<()> {
         }
     }
     cleanup_result?;
-
-    let stats_json = latency_recorder.stats_json();
-    info!(stats = %stats_json, "Latency statistics summary");
-
-    write_stats_file(cli.stats_json.as_deref(), &latency_recorder)?;
 
     if !reached_target && start_time.elapsed() >= timeout {
         bail!("timeout expired before decoding requested frames (got {decoded_frames}/{target_frames})");
@@ -892,11 +845,29 @@ fn teardown(session: &ClientSession, tcp_runtime: &mut erd_app::SessionRuntime) 
     Ok(())
 }
 
-fn write_stats_file(path: Option<&std::path::Path>, recorder: &LatencyRecorder) -> Result<()> {
+fn stats_json(recorder: &LatencyRecorder, receiver: &ReceiverSnapshot) -> Result<String> {
+    #[derive(serde::Serialize)]
+    struct Stats<'a> {
+        #[serde(flatten)]
+        legacy: erd_app::LatencyStats,
+        receiver_snapshot: &'a ReceiverSnapshot,
+    }
+    serde_json::to_string(&Stats {
+        legacy: recorder.stats(),
+        receiver_snapshot: receiver,
+    })
+    .context("failed to serialize CLI statistics")
+}
+
+fn write_stats_file(path: Option<&std::path::Path>, json: &str) -> Result<()> {
     if let Some(stats_path) = path {
-        let json = recorder.stats_json();
-        if let Some(parent) = stats_path.parent() {
-            let _ = fs::create_dir_all(parent);
+        if let Some(parent) = stats_path
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create stats directory {}", parent.display())
+            })?;
         }
         fs::write(stats_path, json.as_bytes())
             .with_context(|| format!("failed to write stats JSON to {}", stats_path.display()))?;

@@ -9,13 +9,14 @@ rust-version.workspace = true
 skip = true
 
 [build-dependencies]
-tauri-build = { version = "2", default-features = false }
+tauri-build = { version = "2", default-features = false , features = [] }
 
 [dependencies]
 erd-app = { path = "../erd-app" }
 erd-decode = { path = "../erd-decode", features = ["ffmpeg"] }
 erd-net = { path = "../erd-net" }
 erd-proto = { path = "../erd-proto" }
+erd-render = { path = "../erd-render" }
 tauri = { version = "2", default-features = false, features = ["wry"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 tokio.workspace = true

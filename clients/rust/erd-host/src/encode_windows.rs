@@ -209,6 +209,7 @@ pub struct MediaFoundationEncoder {
     codec: VideoCodec,
     frame_index: u64,
     force_keyframe: bool,
+    first_keyframe_emitted: bool,
     parameter_sets: Vec<Vec<u8>>,
     pending_inputs: PendingInputs,
     // Rust drops fields in declaration order: all COM objects precede runtime.
@@ -305,6 +306,7 @@ impl MediaFoundationEncoder {
             codec,
             frame_index: 0,
             force_keyframe: true,
+            first_keyframe_emitted: false,
             parameter_sets,
             pending_inputs: PendingInputs::default(),
         })
@@ -354,20 +356,32 @@ impl MediaFoundationEncoder {
     }
 
     /// Applies protocol ABR messages immediately when the selected MFT exposes
-    /// dynamic bitrate control. Mutating a detached media type is not a fallback:
-    /// it does not reconfigure the running transform.
+    /// dynamic bitrate control. MFTs without runtime control are rebuilt at the
+    /// new target; the fresh encoder forces a keyframe so the client stays
+    /// decodable across the switch.
     pub fn update_bitrate(&mut self, bitrate: u32) -> Result<(), EncodeError> {
         if bitrate == 0 {
             return Err(EncodeError::InvalidConfiguration);
         }
-        let api = self
-            .codec_api
-            .as_ref()
-            .ok_or(EncodeError::BitrateControlUnavailable)?;
-        let value = VARIANT::from(bitrate);
-        // SAFETY: the API and UI4 variant live through the synchronous call.
-        unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value)? };
-        self.config.bitrate = bitrate;
+        if bitrate == self.config.bitrate {
+            return Ok(());
+        }
+        if let Some(api) = &self.codec_api {
+            let value = VARIANT::from(bitrate);
+            // SAFETY: the API and UI4 variant live through the synchronous call.
+            match unsafe { api.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &value) } {
+                Ok(()) => {
+                    self.config.bitrate = bitrate;
+                    return Ok(());
+                }
+                Err(error) => {
+                    tracing::warn!(%error, bitrate, "runtime bitrate control rejected; rebuilding encoder");
+                }
+            }
+        }
+        let mut config = self.config;
+        config.bitrate = bitrate;
+        *self = MediaFoundationEncoder::new(config)?;
         Ok(())
     }
 
@@ -437,15 +451,18 @@ impl MediaFoundationEncoder {
             .pending_inputs
             .take(timestamp_hns)
             .ok_or(EncodeError::UnknownOutputTimestamp(timestamp_hns))?;
-        let is_key_frame = unsafe {
+        let sample_clean_point = unsafe {
             sample
                 .GetUINT32(&MFSampleExtension_CleanPoint)
                 .unwrap_or_default()
                 != 0
         };
+        let is_key_frame = sample_clean_point || !self.first_keyframe_emitted;
         let bytes = sample_bytes(&sample)?;
         let mut nalus = parse_access_unit(&bytes)?;
         if is_key_frame {
+            self.force_keyframe = false;
+            self.first_keyframe_emitted = true;
             let fresh = parameter_sets(&nalus, self.codec);
             if !fresh.is_empty() {
                 self.parameter_sets = fresh;
@@ -487,7 +504,7 @@ impl SynchronousTransform for MediaFoundationEncoder {
     type Error = EncodeError;
 
     fn process_input(&mut self, input: &PreparedInput) -> Result<(), EncodeError> {
-        if input.force_keyframe {
+        if input.force_keyframe || !self.first_keyframe_emitted {
             if let Some(api) = &self.codec_api {
                 let value = VARIANT::from(1_u32);
                 // SAFETY: keyframe is VT_UI4; reapply on the SAME rejected input.
@@ -499,7 +516,6 @@ impl SynchronousTransform for MediaFoundationEncoder {
         self.pending_inputs
             .accept(input.timestamp_hns, input.metadata);
         self.frame_index += 1;
-        self.force_keyframe = false;
         Ok(())
     }
 

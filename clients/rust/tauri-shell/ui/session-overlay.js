@@ -28,6 +28,25 @@
   const REMOTE_TARGET_IDS = new Set(['viewport', 'screen-canvas']);
 
   /**
+   * Normalizes mouse button names/indices to supported wire variants.
+   * Unsupported extra buttons (e.g. 3, 4, back, forward) return null
+   * and must never map to left click.
+   */
+  function normalizeMouseButton(button) {
+    if (button === 'left' || button === 0) return 'left';
+    if (button === 'middle' || button === 1) return 'middle';
+    if (button === 'right' || button === 2) return 'right';
+    return null;
+  }
+
+  function buttonUpType(button) {
+    if (button === 'left') return 'LeftMouseUp';
+    if (button === 'middle') return 'MiddleMouseUp';
+    if (button === 'right') return 'RightMouseUp';
+    return null;
+  }
+
+  /**
    * True when a DOM element is part of the remote video surface (i.e. its
    * keyboard events should be forwarded to the host). Everything else —
    * overlay buttons, the launcher panel, the connecting modal, dashboard
@@ -56,11 +75,7 @@
    */
   function createHeldInputTracker() {
     const heldKeys = new Map(); // keyCode -> modifiers captured at press time
-    const heldButtons = new Set(); // 'left' | 'right'
-
-    function buttonUpType(button) {
-      return button === 'right' ? 'RightMouseUp' : 'LeftMouseUp';
-    }
+    const heldButtons = new Set(); // 'left' | 'middle' | 'right'
 
     return {
       keyDown(keyCode, modifiers) {
@@ -73,13 +88,16 @@
         return heldKeys.has(keyCode);
       },
       mouseDown(button) {
-        heldButtons.add(button === 'right' ? 'right' : 'left');
+        const norm = normalizeMouseButton(button);
+        if (norm) heldButtons.add(norm);
       },
       mouseUp(button) {
-        heldButtons.delete(button === 'right' ? 'right' : 'left');
+        const norm = normalizeMouseButton(button);
+        if (norm) heldButtons.delete(norm);
       },
       isButtonDown(button) {
-        return heldButtons.has(button === 'right' ? 'right' : 'left');
+        const norm = normalizeMouseButton(button);
+        return norm ? heldButtons.has(norm) : false;
       },
       get size() {
         return heldKeys.size + heldButtons.size;
@@ -92,13 +110,16 @@
       releaseEvents(x, y, viewWidth, viewHeight) {
         const events = [];
         for (const button of heldButtons) {
-          events.push({
-            event_type: buttonUpType(button),
-            x: x,
-            y: y,
-            view_width: viewWidth,
-            view_height: viewHeight,
-          });
+          const upType = buttonUpType(button);
+          if (upType) {
+            events.push({
+              event_type: upType,
+              x: x,
+              y: y,
+              view_width: viewWidth,
+              view_height: viewHeight,
+            });
+          }
         }
         for (const entry of heldKeys) {
           events.push({
@@ -122,10 +143,15 @@
     const options = initial || {};
     let expanded = !!options.expanded;
     let fullscreenActive = !!options.fullscreenActive;
+    let pointerLockActive = !!options.pointerLockActive;
     const listeners = new Set();
 
     function emit() {
-      const snapshot = { expanded: expanded, fullscreenActive: fullscreenActive };
+      const snapshot = {
+        expanded: expanded,
+        fullscreenActive: fullscreenActive,
+        pointerLockActive: pointerLockActive,
+      };
       for (const listener of listeners) {
         listener(snapshot);
       }
@@ -153,6 +179,16 @@
           emit();
         }
       },
+      getPointerLockActive() {
+        return pointerLockActive;
+      },
+      setPointerLockActive(value) {
+        const next = !!value;
+        if (next !== pointerLockActive) {
+          pointerLockActive = next;
+          emit();
+        }
+      },
       subscribe(listener) {
         listeners.add(listener);
         return function unsubscribe() {
@@ -167,5 +203,7 @@
     shouldForwardKeyboardEvent: shouldForwardKeyboardEvent,
     createHeldInputTracker: createHeldInputTracker,
     createOverlayState: createOverlayState,
+    normalizeMouseButton: normalizeMouseButton,
+    buttonUpType: buttonUpType,
   };
 });

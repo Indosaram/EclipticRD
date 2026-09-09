@@ -7,7 +7,7 @@ pub const NAL_LENGTH_BYTES: usize = 4;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardwareAcceleration {
     Software,
-    #[cfg(feature = "videotoolbox")]
+    #[cfg(any(feature = "videotoolbox", feature = "ios-videotoolbox"))]
     VideoToolbox,
     #[cfg(feature = "d3d11va")]
     D3d11va,
@@ -35,6 +35,12 @@ pub enum DecodeError {
     Ffmpeg(String),
     #[error("decoded frame has unsupported dimensions or format")]
     UnsupportedFrame,
+    #[error("VideoToolbox support is disabled")]
+    VideoToolboxDisabled,
+    #[error("VideoToolbox initialization failed: {0}")]
+    VideoToolboxInit(String),
+    #[error("VideoToolbox decoder failed: {0}")]
+    VideoToolbox(String),
 }
 
 /// Parses one access unit containing 4-byte big-endian length-prefixed HEVC NALUs.
@@ -187,8 +193,8 @@ mod ffmpeg_impl {
     use ffmpeg_next as ffmpeg;
 
     use super::{
-        hevc_parameter_set_blob, prepare_annex_b, to_annex_b, DecodeError, HardwareAcceleration,
-        Nv12Frame,
+        hevc_parameter_set_blob, parse_length_prefixed_nalus, to_annex_b, DecodeError,
+        HardwareAcceleration, Nv12Frame,
     };
 
     pub struct HevcDecoder {
@@ -289,8 +295,16 @@ mod ffmpeg_impl {
             access_unit: &[u8],
             timestamp_ms: i64,
         ) -> Result<Vec<Nv12Frame>, DecodeError> {
-            let annex_b = prepare_annex_b(access_unit)?;
-            let mut packet = ffmpeg::Packet::copy(&annex_b);
+            let nalus = parse_length_prefixed_nalus(access_unit)?;
+            let mut packet = ffmpeg::Packet::new(access_unit.len());
+            let output = packet.data_mut().expect("nonempty packet has storage");
+            let mut offset = 0;
+            for nalu in nalus {
+                output[offset..offset + 4].copy_from_slice(&[0, 0, 0, 1]);
+                offset += 4;
+                output[offset..offset + nalu.data.len()].copy_from_slice(nalu.data);
+                offset += nalu.data.len();
+            }
             packet.set_pts(Some(timestamp_ms));
             packet.set_dts(Some(timestamp_ms));
             self.decoder
@@ -488,13 +502,61 @@ mod ffmpeg_impl {
 #[cfg(feature = "ffmpeg")]
 pub use ffmpeg_impl::ExportedHevcDecoder as HevcDecoder;
 
-#[cfg(not(feature = "ffmpeg"))]
+#[cfg(all(
+    not(feature = "ffmpeg"),
+    feature = "ios-videotoolbox",
+    any(target_os = "ios", target_os = "macos")
+))]
+mod vt;
+
+#[cfg(all(
+    not(feature = "ffmpeg"),
+    feature = "ios-videotoolbox",
+    any(target_os = "ios", target_os = "macos")
+))]
+pub use vt::HevcDecoder;
+
+#[cfg(all(
+    not(feature = "ffmpeg"),
+    not(all(feature = "ios-videotoolbox", any(target_os = "ios", target_os = "macos")))
+))]
 pub struct HevcDecoder;
 
-#[cfg(not(feature = "ffmpeg"))]
+#[cfg(all(
+    not(feature = "ffmpeg"),
+    not(all(feature = "ios-videotoolbox", any(target_os = "ios", target_os = "macos")))
+))]
 impl HevcDecoder {
     pub fn new(_extradata: &[u8]) -> Result<Self, DecodeError> {
         Err(DecodeError::FfmpegDisabled)
+    }
+
+    pub fn new_h264(_extradata: &[u8]) -> Result<Self, DecodeError> {
+        Err(DecodeError::FfmpegDisabled)
+    }
+
+    pub fn from_keyframe(_keyframe: &[u8]) -> Result<Self, DecodeError> {
+        Err(DecodeError::FfmpegDisabled)
+    }
+
+    pub fn from_keyframe_auto(_keyframe: &[u8]) -> Result<(CodecKind, Self), DecodeError> {
+        Err(DecodeError::FfmpegDisabled)
+    }
+
+    pub fn decode(
+        &mut self,
+        _access_unit: &[u8],
+        _timestamp_ms: i64,
+    ) -> Result<Vec<Nv12Frame>, DecodeError> {
+        Err(DecodeError::FfmpegDisabled)
+    }
+
+    pub fn flush(&mut self) -> Result<Vec<Nv12Frame>, DecodeError> {
+        Err(DecodeError::FfmpegDisabled)
+    }
+
+    pub fn acceleration(&self) -> HardwareAcceleration {
+        HardwareAcceleration::Software
     }
 }
 
@@ -502,12 +564,39 @@ impl HevcDecoder {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "ffmpeg")]
+    #[test]
+    fn decoder_packet_avoids_intermediate_payload_copy() {
+        let access_unit: Vec<_> = include_str!("../tests/fixtures/black_16x16.hevc.hex")
+            .split_whitespace()
+            .map(|byte| u8::from_str_radix(byte, 16).unwrap())
+            .collect();
+        let mut decoder = HevcDecoder::new(&access_unit).unwrap();
+        assert_eq!(decoder.decode(&access_unit, 1).unwrap().len(), 1);
+        let (frames, count) =
+            crate::test_alloc::allocations(|| decoder.decode(&access_unit, 2).unwrap());
+        assert_eq!(frames.len(), 1);
+        let frame = &frames[0];
+        assert_eq!((frame.width, frame.height, frame.timestamp_ms), (16, 16, 2));
+        for row in frame.y_plane.chunks(frame.y_stride).take(16) {
+            assert_eq!(&row[..16], &[16; 16]);
+        }
+        for row in frame.uv_plane.chunks(frame.uv_stride).take(8) {
+            assert_eq!(&row[..16], &[128; 16]);
+        }
+        eprintln!("warm decoded 16x16 HEVC Rust allocations: {count}");
+        assert!(
+            count <= 4,
+            "decoded planes, output list and NAL metadata must not include a copied input Vec"
+        );
+    }
+
     #[test]
     fn annex_b_preserves_payloads_when_replacing_length_prefixes() {
         // Given multiple NALs, including an emulation-prevention sequence.
         let data = [0, 0, 0, 5, 64, 1, 0, 0, 3, 0, 0, 0, 2, 103, 2];
         let expected = [0, 0, 0, 1, 64, 1, 0, 0, 3, 0, 0, 0, 1, 103, 2];
-        // When the same strict preparation used by decode converts the NALs.
+        // When strict NAL normalization converts the access unit.
         let prepared = prepare_annex_b(&data).unwrap();
         // Then only the four-byte prefixes change; public normalization agrees.
         assert_eq!(prepared, expected);
@@ -583,4 +672,69 @@ mod tests {
         }
         assert_eq!(hevc_parameter_set_blob(&keyframe).unwrap(), keyframe);
     }
+
+    #[test]
+    fn h264_parameter_set_blob_extracts_sps_and_pps() {
+        let mut keyframe = Vec::new();
+        let sps = [0x67, 0x42, 0xc0, 0x0a];
+        keyframe.extend_from_slice(&(sps.len() as u32).to_be_bytes());
+        keyframe.extend_from_slice(&sps);
+        let pps = [0x68, 0xce, 0x3c, 0x80];
+        keyframe.extend_from_slice(&(pps.len() as u32).to_be_bytes());
+        keyframe.extend_from_slice(&pps);
+        let idr = [0x65, 0x88, 0x84, 0x00];
+        keyframe.extend_from_slice(&(idr.len() as u32).to_be_bytes());
+        keyframe.extend_from_slice(&idr);
+
+        let blob = h264_parameter_set_blob(&keyframe).unwrap();
+        let expected = {
+            let mut out = Vec::new();
+            out.extend_from_slice(&(sps.len() as u32).to_be_bytes());
+            out.extend_from_slice(&sps);
+            out.extend_from_slice(&(pps.len() as u32).to_be_bytes());
+            out.extend_from_slice(&pps);
+            out
+        };
+        assert_eq!(blob, expected);
+    }
+
+    #[test]
+    fn h264_parameter_set_blob_missing_parameter_fails() {
+        let mut keyframe = Vec::new();
+        let sps = [0x67, 0x42, 0xc0, 0x0a];
+        keyframe.extend_from_slice(&(sps.len() as u32).to_be_bytes());
+        keyframe.extend_from_slice(&sps);
+        assert!(matches!(
+            h264_parameter_set_blob(&keyframe),
+            Err(DecodeError::MissingParameterSets)
+        ));
+    }
+
+    #[test]
+    fn detect_codec_identifies_hevc_and_h264() {
+        let mut hevc_au = Vec::new();
+        let vps = [0x40, 0x01, 0x0c];
+        hevc_au.extend_from_slice(&(vps.len() as u32).to_be_bytes());
+        hevc_au.extend_from_slice(&vps);
+        assert_eq!(detect_codec(&hevc_au).unwrap(), CodecKind::Hevc);
+
+        let mut h264_au = Vec::new();
+        let sps = [0x67, 0x42, 0xc0];
+        h264_au.extend_from_slice(&(sps.len() as u32).to_be_bytes());
+        h264_au.extend_from_slice(&sps);
+        assert_eq!(detect_codec(&h264_au).unwrap(), CodecKind::H264);
+
+        let mut idr_au = Vec::new();
+        let idr = [0x65, 0x88];
+        idr_au.extend_from_slice(&(idr.len() as u32).to_be_bytes());
+        idr_au.extend_from_slice(&idr);
+        assert!(matches!(
+            detect_codec(&idr_au),
+            Err(DecodeError::MissingParameterSets)
+        ));
+    }
 }
+
+#[cfg(all(test, feature = "ffmpeg"))]
+#[path = "../../test-support/allocations.rs"]
+mod test_alloc;

@@ -190,7 +190,29 @@ impl InputInjector {
                 point,
                 CGMouseButton::Center,
             ),
-            InputEventType::Reset | InputEventType::RelativeMove => return Ok(None),
+            InputEventType::PenMove => CGEvent::new_mouse_event(
+                source()?,
+                CGEventType::MouseMoved,
+                point,
+                CGMouseButton::Left,
+            ),
+            InputEventType::PenDown => CGEvent::new_mouse_event(
+                source()?,
+                CGEventType::LeftMouseDown,
+                point,
+                CGMouseButton::Left,
+            ),
+            InputEventType::PenUp => CGEvent::new_mouse_event(
+                source()?,
+                CGEventType::LeftMouseUp,
+                point,
+                CGMouseButton::Left,
+            ),
+            InputEventType::Reset
+            | InputEventType::RelativeMove
+            | InputEventType::GamepadAxis
+            | InputEventType::GamepadButtonDown
+            | InputEventType::GamepadButtonUp => return Ok(None),
         }
         .map_err(|_| InputError::EventCreation)?;
         cg_event.set_flags(flags);

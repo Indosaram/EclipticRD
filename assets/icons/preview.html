@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>EclipticRD Unified Logo & App Icon System</title>
+  <style>
+    :root {
+      --bg: #0d0f12;
+      --card-bg: #14171d;
+      --border: rgba(255, 255, 255, 0.08);
+      --text: #f0f3f6;
+      --text-muted: #8a92a3;
+      --accent: #fd6758;
+      --accent-glow: rgba(253, 103, 88, 0.25);
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      padding: 40px 24px 80px;
+      line-height: 1.5;
+    }
+    header {
+      text-align: center;
+      max-width: 900px;
+      margin: 0 auto 48px;
+    }
+    .badge {
+      display: inline-block;
+      padding: 4px 12px;
+      background: var(--accent-glow);
+      color: var(--accent);
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      text-transform: uppercase;
+      margin-bottom: 12px;
+    }
+    h1 {
+      font-size: 36px;
+      font-weight: 800;
+      letter-spacing: -0.8px;
+      margin-bottom: 12px;
+    }
+    .subtitle {
+      color: var(--text-muted);
+      font-size: 16px;
+      max-width: 680px;
+      margin: 0 auto;
+    }
+    .section-title {
+      font-size: 22px;
+      font-weight: 700;
+      margin-bottom: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto 56px;
+    }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 32px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3);
+    }
+    
+    /* Comparison Grid */
+    .compare-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+      align-items: center;
+    }
+    .compare-item {
+      text-align: center;
+    }
+    .compare-item h3 {
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+    .compare-img {
+      max-width: 320px;
+      width: 100%;
+      height: auto;
+      border-radius: 24px;
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    /* Platform Mockup Tabs */
+    .platform-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 24px;
+    }
+    .platform-card {
+      background: #181c24;
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      text-align: center;
+    }
+    .platform-card h3 {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+    .platform-card p {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 20px;
+    }
+    .icon-preview-box {
+      background: #0e1014;
+      border-radius: 12px;
+      padding: 32px 16px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 200px;
+      margin-bottom: 16px;
+    }
+    .meta-list {
+      text-align: left;
+      font-size: 12px;
+      color: var(--text-muted);
+      border-top: 1px solid rgba(255, 255, 255, 0.06);
+      padding-top: 12px;
+    }
+    .meta-list li {
+      margin-bottom: 4px;
+      display: flex;
+      justify-content: space-between;
+    }
+    .meta-list span {
+      color: var(--text);
+      font-family: ui-monospace, monospace;
+    }
+
+    /* Resolutions bar */
+    .res-row {
+      display: flex;
+      gap: 24px;
+      align-items: flex-end;
+      justify-content: center;
+      padding: 32px 16px;
+      background: #0e1014;
+      border-radius: 12px;
+      overflow-x: auto;
+    }
+    .res-item {
+      text-align: center;
+    }
+    .res-item span {
+      display: block;
+      font-size: 11px;
+      font-family: ui-monospace, monospace;
+      color: var(--text-muted);
+      margin-top: 8px;
+    }
+
+    /* Color Chips */
+    .color-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+    }
+    .color-chip {
+      background: #181c24;
+      border-radius: 12px;
+      padding: 16px;
+      border: 1px solid var(--border);
+    }
+    .color-swatch {
+      width: 100%;
+      height: 48px;
+      border-radius: 8px;
+      margin-bottom: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+    }
+    .color-info h4 {
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+    .color-info p {
+      font-size: 12px;
+      font-family: ui-monospace, monospace;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="badge">Production Ready</div>
+    <h1>EclipticRD Unified Icon System</h1>
+    <p class="subtitle">
+      Mathematical vector reconstruction supporting <strong>iOS</strong>, <strong>macOS</strong>, <strong>Windows</strong>, <strong>Linux</strong>, and <strong>Tauri v2</strong>.
+    </p>
+  </header>
+
+  <!-- 1. Side by Side Comparison -->
+  <div class="container">
+    <div class="section-title">🔍 1:1 Visual Fidelity Comparison</div>
+    <div class="card">
+      <div class="compare-grid">
+        <div class="compare-item">
+          <h3>Original User Reference</h3>
+          <img src="../../clients/rust/tauri-shell/icons/candidates/user_uploaded_reference.png" class="compare-img" alt="Reference" />
+        </div>
+        <div class="compare-item">
+          <h3>Generated Master Icon (Vector / SVG)</h3>
+          <img src="master/eclipticrd-macos.svg" class="compare-img" alt="Generated Master" />
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 2. Platforms -->
+  <div class="container">
+    <div class="section-title">📱 Cross-Platform Matrix</div>
+    <div class="platform-grid">
+      
+      <!-- macOS -->
+      <div class="platform-card">
+        <h3>🍎 macOS</h3>
+        <p>Big Sur+ standard 824px squircle with subtle drop shadow</p>
+        <div class="icon-preview-box">
+          <img src="macos/AppIcon.iconset/icon_256x256.png" width="128" height="128" alt="macOS Icon" />
+        </div>
+        <ul class="meta-list">
+          <li>Format: <span>.icns / .iconset</span></li>
+          <li>Resolutions: <span>16px ~ 1024px @2x</span></li>
+          <li>File: <span>macos/icon.icns</span></li>
+        </ul>
+      </div>
+
+      <!-- iOS -->
+      <div class="platform-card">
+        <h3>📱 iOS / iPadOS</h3>
+        <p>Full-bleed 1024 master (24-bit RGB) & Asset Catalog</p>
+        <div class="icon-preview-box">
+          <img src="ios/AppIcon-1024.png" width="128" height="128" style="border-radius: 28px;" alt="iOS Icon" />
+        </div>
+        <ul class="meta-list">
+          <li>Format: <span>AppIcon.appiconset</span></li>
+          <li>Catalog: <span>15 PNGs + JSON</span></li>
+          <li>App Store: <span>ios/AppIcon-1024.png</span></li>
+        </ul>
+      </div>
+
+      <!-- Windows -->
+      <div class="platform-card">
+        <h3>🪟 Windows</h3>
+        <p>Multi-resolution ICO (7 embedded layers) & Tile PNGs</p>
+        <div class="icon-preview-box">
+          <img src="windows/icon_256x256.png" width="128" height="128" alt="Windows Icon" />
+        </div>
+        <ul class="meta-list">
+          <li>Format: <span>.ico (16~256px)</span></li>
+          <li>Tiles: <span>Square 44/71/150/310</span></li>
+          <li>File: <span>windows/icon.ico</span></li>
+        </ul>
+      </div>
+
+      <!-- Linux -->
+      <div class="platform-card">
+        <h3>🐧 Linux</h3>
+        <p>Freedesktop XDG Hicolor standard hierarchy & SVG</p>
+        <div class="icon-preview-box">
+          <img src="linux/hicolor/256x256/apps/eclipticrd.png" width="128" height="128" alt="Linux Icon" />
+        </div>
+        <ul class="meta-list">
+          <li>Format: <span>SVG & PNG</span></li>
+          <li>Resolutions: <span>16 ~ 1024 px</span></li>
+          <li>Desktop File: <span>linux/eclipticrd.desktop</span></li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- 3. Resolution Scales -->
+  <div class="container">
+    <div class="section-title">📐 Scale & Legibility Verification</div>
+    <div class="card">
+      <div class="res-row">
+        <div class="res-item"><img src="linux/hicolor/16x16/apps/eclipticrd.png" width="16" height="16" /><span>16px</span></div>
+        <div class="res-item"><img src="linux/hicolor/24x24/apps/eclipticrd.png" width="24" height="24" /><span>24px</span></div>
+        <div class="res-item"><img src="linux/hicolor/32x32/apps/eclipticrd.png" width="32" height="32" /><span>32px</span></div>
+        <div class="res-item"><img src="linux/hicolor/48x48/apps/eclipticrd.png" width="48" height="48" /><span>48px</span></div>
+        <div class="res-item"><img src="linux/hicolor/64x64/apps/eclipticrd.png" width="64" height="64" /><span>64px</span></div>
+        <div class="res-item"><img src="linux/hicolor/128x128/apps/eclipticrd.png" width="96" height="96" /><span>128px</span></div>
+        <div class="res-item"><img src="linux/hicolor/256x256/apps/eclipticrd.png" width="144" height="144" /><span>256px</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 4. Design Specs -->
+  <div class="container">
+    <div class="section-title">🎨 Verified Color Palette</div>
+    <div class="color-grid">
+      <div class="color-chip">
+        <div class="color-swatch" style="background: #FD6758;"></div>
+        <div class="color-info">
+          <h4>Coral Sync Red</h4>
+          <p>#FD6758 · rgb(253, 103, 88)</p>
+        </div>
+      </div>
+      <div class="color-chip">
+        <div class="color-swatch" style="background: #1E242E;"></div>
+        <div class="color-info">
+          <h4>Device Outline</h4>
+          <p>#1E242E · rgb(30, 36, 46)</p>
+        </div>
+      </div>
+      <div class="color-chip">
+        <div class="color-swatch" style="background: #E9EEF3;"></div>
+        <div class="color-info">
+          <h4>Icon Background</h4>
+          <p>#E9EEF3 · rgb(233, 238, 243)</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

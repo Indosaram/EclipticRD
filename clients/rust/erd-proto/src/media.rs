@@ -8,6 +8,49 @@ pub const MAX_FRAME_BYTES: u32 = 32 * 1024 * 1024;
 pub const MAX_VIDEO_CHUNK_BYTES: usize = 1382;
 pub const MAX_AUDIO_FRAGMENT_BYTES: usize = 1380;
 
+pub const TIMESTAMP_STATS_MAGIC: &[u8; 6] = b"ERDTS1";
+
+/// Legacy per-frame host timestamps, in host session-relative microseconds.
+///
+/// The 42-byte ERDTS1 payload uses little-endian fields. Decoding checks only
+/// length and magic; timestamp ordering is a consumer concern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TimestampStats {
+    pub frame_id: u32,
+    pub capture_us: u64,
+    pub encode_start_us: u64,
+    pub encode_end_us: u64,
+    pub send_us: u64,
+}
+
+impl TimestampStats {
+    pub const SIZE: usize = 6 + 4 + 8 * 4;
+
+    pub fn encode(self) -> Vec<u8> {
+        let mut output = Vec::with_capacity(Self::SIZE);
+        output.extend_from_slice(TIMESTAMP_STATS_MAGIC);
+        output.extend_from_slice(&self.frame_id.to_le_bytes());
+        output.extend_from_slice(&self.capture_us.to_le_bytes());
+        output.extend_from_slice(&self.encode_start_us.to_le_bytes());
+        output.extend_from_slice(&self.encode_end_us.to_le_bytes());
+        output.extend_from_slice(&self.send_us.to_le_bytes());
+        output
+    }
+
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() != Self::SIZE || &bytes[..6] != TIMESTAMP_STATS_MAGIC {
+            return None;
+        }
+        Some(Self {
+            frame_id: u32::from_le_bytes(bytes[6..10].try_into().ok()?),
+            capture_us: u64::from_le_bytes(bytes[10..18].try_into().ok()?),
+            encode_start_us: u64::from_le_bytes(bytes[18..26].try_into().ok()?),
+            encode_end_us: u64::from_le_bytes(bytes[26..34].try_into().ok()?),
+            send_us: u64::from_le_bytes(bytes[34..42].try_into().ok()?),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameHeader {
     pub frame_id: u32,
@@ -109,14 +152,19 @@ impl WireCodec for FrameChunk {
         let mut decoder = Decoder::new(input);
         let frame_id = decoder.u32("frame chunk ID")?;
         let chunk_index = decoder.u16("frame chunk index")?;
-        let data = decoder.take_remaining().to_vec();
-        let value = Self {
+        let data = decoder.take_remaining();
+        if data.len() > MAX_VIDEO_CHUNK_BYTES {
+            return Err(CodecError::LengthLimit {
+                field: "video chunk data",
+                actual: data.len(),
+                max: MAX_VIDEO_CHUNK_BYTES,
+            });
+        }
+        Ok(Self {
             frame_id,
             chunk_index,
-            data,
-        };
-        value.validate()?;
-        Ok(value)
+            data: data.to_vec(),
+        })
     }
 }
 
@@ -160,6 +208,15 @@ pub struct AudioFragmentHeader {
 impl AudioFragmentHeader {
     pub const SIZE: usize = 8;
 
+    pub fn to_bytes(&self) -> Result<[u8; Self::SIZE], CodecError> {
+        self.validate()?;
+        let mut output = [0; Self::SIZE];
+        output[..4].copy_from_slice(&self.frame_id.to_le_bytes());
+        output[4..6].copy_from_slice(&self.fragment_index.to_le_bytes());
+        output[6..8].copy_from_slice(&self.fragment_count.to_le_bytes());
+        Ok(output)
+    }
+
     fn validate(&self) -> Result<(), CodecError> {
         if self.fragment_count == 0 {
             return Err(CodecError::InvalidValue {
@@ -179,12 +236,7 @@ impl AudioFragmentHeader {
 
 impl WireCodec for AudioFragmentHeader {
     fn encode(&self) -> Result<Vec<u8>, CodecError> {
-        self.validate()?;
-        let mut output = Vec::with_capacity(Self::SIZE);
-        push_u32(&mut output, self.frame_id);
-        push_u16(&mut output, self.fragment_index);
-        push_u16(&mut output, self.fragment_count);
-        Ok(output)
+        Ok(self.to_bytes()?.to_vec())
     }
 
     fn decode(input: &[u8]) -> Result<Self, CodecError> {
@@ -236,9 +288,99 @@ impl WireCodec for AudioFragment {
             fragment_index: decoder.u16("audio fragment index")?,
             fragment_count: decoder.u16("audio fragment count")?,
         };
-        let data = decoder.take_remaining().to_vec();
-        let value = Self { header, data };
-        value.validate()?;
+        header.validate()?;
+        let data = decoder.take_remaining();
+        if data.len() > MAX_AUDIO_FRAGMENT_BYTES {
+            return Err(CodecError::LengthLimit {
+                field: "audio fragment data",
+                actual: data.len(),
+                max: MAX_AUDIO_FRAGMENT_BYTES,
+            });
+        }
+        Ok(Self {
+            header,
+            data: data.to_vec(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum ColorRange {
+    #[default]
+    Limited = 0,
+    Full = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum ColorMatrix {
+    #[default]
+    Bt709 = 0,
+    Bt601 = 1,
+    Bt2020 = 2,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum ChromaSubsampling {
+    #[default]
+    Yuv420 = 0,
+    Yuv444 = 1,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColorMetadata {
+    pub range: ColorRange,
+    pub matrix: ColorMatrix,
+    pub chroma: ChromaSubsampling,
+}
+
+impl ColorMetadata {
+    pub const SIZE: usize = 3;
+
+    pub fn encode_into(&self, output: &mut Vec<u8>) {
+        output.push(self.range as u8);
+        output.push(self.matrix as u8);
+        output.push(self.chroma as u8);
+    }
+
+    pub(crate) fn decode_from(decoder: &mut Decoder<'_>) -> Result<Self, CodecError> {
+        let range = match decoder.u8("color range")? {
+            0 => ColorRange::Limited,
+            1 => ColorRange::Full,
+            unknown => return Err(CodecError::UnknownColorRange(unknown)),
+        };
+        let matrix = match decoder.u8("color matrix")? {
+            0 => ColorMatrix::Bt709,
+            1 => ColorMatrix::Bt601,
+            2 => ColorMatrix::Bt2020,
+            unknown => return Err(CodecError::UnknownColorMatrix(unknown)),
+        };
+        let chroma = match decoder.u8("chroma subsampling")? {
+            0 => ChromaSubsampling::Yuv420,
+            1 => ChromaSubsampling::Yuv444,
+            unknown => return Err(CodecError::UnknownChromaSubsampling(unknown)),
+        };
+        Ok(Self {
+            range,
+            matrix,
+            chroma,
+        })
+    }
+}
+
+impl WireCodec for ColorMetadata {
+    fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        let mut output = Vec::with_capacity(Self::SIZE);
+        self.encode_into(&mut output);
+        Ok(output)
+    }
+
+    fn decode(input: &[u8]) -> Result<Self, CodecError> {
+        let mut decoder = Decoder::new(input);
+        let value = Self::decode_from(&mut decoder)?;
+        decoder.finish("color metadata")?;
         Ok(value)
     }
 }

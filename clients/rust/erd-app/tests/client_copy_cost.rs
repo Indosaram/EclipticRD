@@ -128,9 +128,11 @@ fn exact_owned_pixels_when_native_decoder_consumes_fixture() {
         "44612d07ac725f769cf6fbcecdacf3c08e3eb2e33d849331ec988b2ec0a7e32b"
     );
     println!("DECODE frames=16 owned_plane_bytes=24576 rust_counts={counts:?}");
+    // Direct FFmpeg packet writes remove one Rust allocation per access unit:
+    // 16 allocations and the fixture's 1266 compressed bytes from the baseline.
     assert_eq!(
         (counts.allocs, counts.reallocs, counts.bytes),
-        (81, 2, 34162)
+        (65, 2, 32896)
     );
 }
 

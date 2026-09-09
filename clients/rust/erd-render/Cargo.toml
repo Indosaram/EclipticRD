@@ -5,11 +5,15 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["cpal-output"]
+cpal-output = ["dep:cpal"]
+
 [dependencies]
-erd-proto = { path = "../erd-proto" }
-wgpu.workspace = true
-winit.workspace = true
-cpal.workspace = true
-anyhow.workspace = true
+cpal = { workspace = true, optional = true }
 thiserror.workspace = true
 tracing.workspace = true
+
+[[example]]
+name = "audio_output_smoke"
+required-features = ["cpal-output"]

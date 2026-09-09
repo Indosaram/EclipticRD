@@ -78,17 +78,21 @@ impl PacketHeader {
             flags,
         }
     }
+
+    pub fn to_bytes(&self) -> [u8; Self::SIZE] {
+        let mut output = [0; Self::SIZE];
+        output[..2].copy_from_slice(&MAGIC.to_le_bytes());
+        output[2] = self.packet_type as u8;
+        output[3..7].copy_from_slice(&self.sequence.to_le_bytes());
+        output[7..11].copy_from_slice(&self.timestamp_ms.to_le_bytes());
+        output[11] = self.flags;
+        output
+    }
 }
 
 impl WireCodec for PacketHeader {
     fn encode(&self) -> Result<Vec<u8>, CodecError> {
-        let mut output = Vec::with_capacity(Self::SIZE);
-        output.extend_from_slice(&MAGIC.to_le_bytes());
-        output.push(self.packet_type as u8);
-        output.extend_from_slice(&self.sequence.to_le_bytes());
-        output.extend_from_slice(&self.timestamp_ms.to_le_bytes());
-        output.push(self.flags);
-        Ok(output)
+        Ok(self.to_bytes().to_vec())
     }
 
     fn decode(input: &[u8]) -> Result<Self, CodecError> {

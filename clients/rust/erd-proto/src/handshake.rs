@@ -16,13 +16,25 @@ impl Capabilities {
     pub const STREAM_CONFIGURATION: Self = Self(1 << 0);
     pub const CLIPBOARD_SYNC: Self = Self(1 << 1);
     pub const TEXT_CLIPBOARD_SYNC: Self = Self(1 << 2);
+    pub const COLOR_444: Self = Self(1 << 3);
+    pub const COLOR_HDR: Self = Self(1 << 4);
+    pub const GAMEPAD: Self = Self(1 << 5);
+    pub const PEN_INPUT: Self = Self(1 << 6);
 
     pub const fn empty() -> Self {
         Self(0)
     }
 
     pub const fn all() -> Self {
-        Self(Self::STREAM_CONFIGURATION.0 | Self::CLIPBOARD_SYNC.0 | Self::TEXT_CLIPBOARD_SYNC.0)
+        Self(
+            Self::STREAM_CONFIGURATION.0
+                | Self::CLIPBOARD_SYNC.0
+                | Self::TEXT_CLIPBOARD_SYNC.0
+                | Self::COLOR_444.0
+                | Self::COLOR_HDR.0
+                | Self::GAMEPAD.0
+                | Self::PEN_INPUT.0,
+        )
     }
 
     pub const fn from_bits_retain(bits: u64) -> Self {

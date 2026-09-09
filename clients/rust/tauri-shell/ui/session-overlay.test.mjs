@@ -21,7 +21,15 @@ test('index.html ships the persistent session launcher markup', () => {
   assert.match(indexHtml, /id="session-overlay"[^>]*data-ui-scope/,
     'overlay root must be marked as a local UI scope so input never leaks to the host');
   assert.match(indexHtml, /class="[^"]*launcher-bar/,
-    'a compact always-visible launcher bar must exist above the video');
+    'a compact launcher bar must exist above the video');
+  // The bar collapsed into a toggle icon: it must start hidden and the
+  // toggle must declare what it controls.
+  assert.match(indexHtml, /class="launcher-bar collapsed" id="launcher-bar"/,
+    'launcher bar must start collapsed behind the toggle icon');
+  const toggle = indexHtml.match(/<button[^>]*id="btn-overlay-toggle"[^>]*>/);
+  assert.ok(toggle, 'overlay toggle icon must exist');
+  assert.match(toggle[0], /aria-expanded="false"/, 'overlay toggle must expose its state');
+  assert.match(toggle[0], /aria-controls="launcher-bar"/, 'overlay toggle must name its bar');
   // The old overlay hid itself behind opacity: 0.15 — that must never return.
   assert.doesNotMatch(indexHtml, /opacity:\s*0\.15/,
     'overlay must remain visible (no opacity-dimming regression)');
@@ -138,6 +146,52 @@ test('mouse button up only releases buttons that were pressed', () => {
   assert.deepEqual(t.releaseEvents(0, 0, 1280, 800), []);
 });
 
+test('held input tracker tracks middle button and emits MiddleMouseUp', () => {
+  const t = overlay.createHeldInputTracker();
+  t.mouseDown('middle');
+  assert.equal(t.isButtonDown('middle'), true);
+  assert.equal(t.isButtonDown('left'), false);
+  assert.equal(t.isButtonDown('right'), false);
+  const events = t.releaseEvents(100, 200, 1280, 800);
+  assert.equal(events.length, 1);
+  assert.deepEqual(events[0], {
+    event_type: 'MiddleMouseUp',
+    x: 100,
+    y: 200,
+    view_width: 1280,
+    view_height: 800,
+  });
+  assert.equal(t.size, 0);
+});
+
+test('unsupported extra buttons never map to left button', () => {
+  const t = overlay.createHeldInputTracker();
+  t.mouseDown(3);
+  t.mouseDown(4);
+  t.mouseDown('extra');
+  t.mouseDown('back');
+  assert.equal(t.isButtonDown('left'), false);
+  assert.equal(t.isButtonDown('middle'), false);
+  assert.equal(t.isButtonDown('right'), false);
+  assert.equal(t.size, 0);
+  assert.deepEqual(t.releaseEvents(0, 0, 1280, 800), []);
+});
+
+test('releaseEvents releases all held buttons in order', () => {
+  const t = overlay.createHeldInputTracker();
+  t.mouseDown('left');
+  t.mouseDown('middle');
+  t.mouseDown('right');
+  assert.equal(t.size, 3);
+  const events = t.releaseEvents(10, 20, 1280, 800);
+  assert.equal(events.length, 3);
+  assert.deepEqual(
+    events.map((e) => e.event_type),
+    ['LeftMouseUp', 'MiddleMouseUp', 'RightMouseUp']
+  );
+  assert.equal(t.size, 0);
+});
+
 // ---------------------------------------------------------------------------
 // 4. Overlay UI state: expand/collapse and fullscreen pressed-state must be
 //    observable state changes (driving aria-expanded / aria-pressed).
@@ -167,6 +221,23 @@ test('overlay state tracks fullscreen pressed-state', () => {
   assert.equal(s.getFullscreenActive(), true);
   s.setFullscreenActive(false);
   assert.equal(s.getFullscreenActive(), false);
+});
+
+test('overlay state tracks pointer lock active state', () => {
+  const s = overlay.createOverlayState();
+  assert.equal(typeof s.getPointerLockActive, 'function', 'getPointerLockActive must exist');
+  assert.equal(s.getPointerLockActive(), false);
+  s.setPointerLockActive(true);
+  assert.equal(s.getPointerLockActive(), true);
+  s.setPointerLockActive(false);
+  assert.equal(s.getPointerLockActive(), false);
+});
+
+test('index.html ships explicit user-accessible pointer lock control in launcher panel', () => {
+  assert.match(indexHtml, /id="btn-pointer-lock"/, 'pointer lock action must exist in index.html');
+  const lockMatch = indexHtml.match(/<button[^>]*id="btn-pointer-lock"[^>]*>/);
+  assert.ok(lockMatch, 'pointer lock button tag must exist');
+  assert.match(lockMatch[0], /aria-pressed="false"/, 'pointer lock toggle must expose pressed state');
 });
 
 // ---------------------------------------------------------------------------

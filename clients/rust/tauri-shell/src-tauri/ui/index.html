@@ -396,13 +396,23 @@
     }
     const computerIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><rect x="3" y="3" width="18" height="13" rx="2"/><path d="M8 21h8m-4-5v5"/></svg>';
     const favoriteIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"><path d="m12 3 3 6 7 1-5 5 1 7-6-3-6 3 1-7-5-5 7-1Z"/></svg>';
+    let lastRenderedGridFingerprint = '';
     function renderHostGrid(hosts) {
       const container = byId('host-grid');
-      const focused = document.activeElement;
-      const focusCard = focused.closest('[data-host-id]');
-      const focusAction = focused.dataset.action;
-      container.replaceChildren();
       const state = library.snapshot();
+      const currentFingerprint = JSON.stringify({
+        hosts: hosts.map(h => [h.id, h.name, h.ip, h.os, h.online, h.paired, h.tcp_port, h.udp_port]),
+        favorites: state.favoriteIps,
+      });
+      if (currentFingerprint === lastRenderedGridFingerprint && container.children.length > 0) {
+        return;
+      }
+      lastRenderedGridFingerprint = currentFingerprint;
+
+      const focused = document.activeElement;
+      const focusCard = focused && typeof focused.closest === 'function' ? focused.closest('[data-host-id]') : null;
+      const focusAction = focused && focused.dataset ? focused.dataset.action : null;
+      container.replaceChildren();
       for (const host of hosts) {
         const card = document.createElement('article'); card.className = 'host-card'; card.setAttribute('role', 'listitem');
         card.dataset.hostId = host.id; card.dataset.availability = host.online === true ? 'available' : 'offline';

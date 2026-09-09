@@ -218,6 +218,7 @@ pub enum AgentInputError {
     UnknownKey(String),
     EmptyHotkey,
     InvalidCoordinates { x: f32, y: f32 },
+    ActionTooLarge { max_events: usize },
 }
 
 impl fmt::Display for AgentInputError {
@@ -227,6 +228,9 @@ impl fmt::Display for AgentInputError {
             Self::EmptyHotkey => write!(f, "hotkey must contain at least one key"),
             Self::InvalidCoordinates { x, y } => {
                 write!(f, "invalid non-finite coordinates ({x}, {y})")
+            }
+            Self::ActionTooLarge { max_events } => {
+                write!(f, "action exceeds the {max_events}-event work limit")
             }
         }
     }
@@ -554,6 +558,20 @@ pub fn convert_agent_action_to_events(
     host_width: f32,
     host_height: f32,
 ) -> Result<Vec<InputEvent>, AgentInputError> {
+    const MAX_ACTION_EVENTS: usize = 4096;
+    let event_bound = match action {
+        AgentAction::Click { count, .. } => u64::from((*count).max(1)) * 2 + 1,
+        AgentAction::Drag { steps, .. } => u64::from((*steps).max(1)) + 3,
+        AgentAction::TypeText { text, .. } => {
+            text.chars().take(MAX_ACTION_EVENTS / 2 + 1).count() as u64 * 2
+        }
+        _ => 0,
+    };
+    if event_bound > MAX_ACTION_EVENTS as u64 {
+        return Err(AgentInputError::ActionTooLarge {
+            max_events: MAX_ACTION_EVENTS,
+        });
+    }
     let mut events = Vec::new();
 
     match action {
@@ -972,6 +990,95 @@ mod tests {
         )
         .unwrap();
         assert_eq!(events.len(), 4);
+    }
+
+    fn assert_action_budget_rejected(action: AgentAction) {
+        let mut tracker = InputStateTracker::default();
+        tracker.record_key_down(56, Modifiers::SHIFT);
+        let before_keys = tracker.active_keys.clone();
+        let before_buttons = tracker.active_buttons.clone();
+        let before_modifiers = tracker.active_modifiers;
+        let before_action_at = tracker.last_action_at;
+        let mut position = (0.25, 0.75);
+        let result =
+            convert_agent_action_to_events(&action, &mut tracker, &mut position, 800.0, 600.0);
+        eprintln!(
+            "over-budget action returned event count: {:?}",
+            result.as_ref().map(Vec::len)
+        );
+        assert!(
+            result.is_err(),
+            "oversized action must fail before expansion"
+        );
+        assert_eq!(position, (0.25, 0.75));
+        assert_eq!(tracker.active_keys, before_keys);
+        assert_eq!(tracker.active_buttons, before_buttons);
+        assert_eq!(tracker.active_modifiers, before_modifiers);
+        assert_eq!(tracker.last_action_at, before_action_at);
+    }
+
+    #[test]
+    fn action_budget_rejects_click_expansion() {
+        assert_action_budget_rejected(AgentAction::Click {
+            x: 200.0,
+            y: 150.0,
+            button: MouseButton::Left,
+            count: 2048,
+            normalized: false,
+        });
+    }
+
+    #[test]
+    fn action_budget_rejects_drag_expansion() {
+        assert_action_budget_rejected(AgentAction::Drag {
+            start_x: 100.0,
+            start_y: 100.0,
+            end_x: 700.0,
+            end_y: 500.0,
+            button: MouseButton::Left,
+            steps: 4094,
+            duration_ms: 400,
+            normalized: false,
+        });
+    }
+
+    #[test]
+    fn action_budget_rejects_text_expansion() {
+        assert_action_budget_rejected(AgentAction::TypeText {
+            text: "a".repeat(2049),
+            delay_ms: 0,
+            paste_mode: false,
+        });
+    }
+
+    #[test]
+    fn action_budget_accepts_maximum_text_and_drag() {
+        let mut tracker = InputStateTracker::default();
+        let mut position = (0.0, 0.0);
+        for action in [
+            AgentAction::TypeText {
+                text: "A".repeat(2048),
+                delay_ms: 0,
+                paste_mode: false,
+            },
+            AgentAction::Drag {
+                start_x: 0.0,
+                start_y: 0.0,
+                end_x: 799.0,
+                end_y: 599.0,
+                button: MouseButton::Left,
+                steps: 4093,
+                duration_ms: 400,
+                normalized: false,
+            },
+        ] {
+            assert_eq!(
+                convert_agent_action_to_events(&action, &mut tracker, &mut position, 800.0, 600.0,)
+                    .unwrap()
+                    .len(),
+                4096
+            );
+        }
     }
 
     #[test]

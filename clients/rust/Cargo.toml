@@ -6,8 +6,10 @@ members = [
     "erd-decode",
     "erd-render",
     "erd-app",
-    "erd-host",
-    "tauri-shell",
+   "erd-host",
+   "erd-mobile",
+   "tauri-shell",
+    "ios-shell",
 ]
 
 [workspace.package]

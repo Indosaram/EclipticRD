@@ -24,6 +24,10 @@ use crate::{
     PairingStore, PairingStoreError, PlatformClipboard,
 };
 
+#[cfg(test)]
+#[path = "tcp_write_tests.rs"]
+mod tcp_write_tests;
+
 pub const DEFAULT_TCP_PORT: u16 = 19_730;
 pub const DEFAULT_UDP_PORT: u16 = 19_731;
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -79,6 +83,7 @@ pub enum SessionEvent {
     Audio(Vec<u8>),
     Cursor(CursorState),
     Clipboard(String),
+    StreamConfig(ControlMessage),
     Ping,
     Ignored,
 }
@@ -106,6 +111,8 @@ pub enum SessionError {
     TcpRuntimePanicked(String),
     #[error("TCP runtime stopped")]
     TcpRuntimeStopped,
+    #[error("TCP runtime already owns the connection; stop it before reconnecting")]
+    TcpRuntimeAlreadyRunning,
     #[error("protocol error: {0}")]
     Protocol(#[from] erd_proto::CodecError),
     #[error("TLS transport error: {0}")]
@@ -126,6 +133,7 @@ struct SessionStateInner {
     server: Option<Handshake>,
     session_salt: Option<[u8; 16]>,
     frames: FrameAssembler,
+    receiver: crate::receiver_stats::ReceiverStats,
     audio: AudioFragmentReassembler,
     cursor: CursorState,
 }
@@ -140,6 +148,7 @@ impl Default for SessionStateInner {
             server: None,
             session_salt: None,
             frames: FrameAssembler::default(),
+            receiver: crate::receiver_stats::ReceiverStats::default(),
             audio: AudioFragmentReassembler::default(),
             cursor: CursorState::default(),
         }
@@ -153,11 +162,15 @@ pub struct ClientSession {
     store: PairingStore,
     state: Arc<Mutex<SessionStateInner>>,
     tcp: Arc<Mutex<Option<TlsPskStream<std::net::TcpStream>>>>,
+    // Lock before state/tcp when admitting sends or changing runtime ownership.
+    tcp_runtime: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
     udp: Arc<Mutex<Option<Arc<UdpTransport>>>>,
     udp_send: Arc<Mutex<Option<DatagramCipher>>>,
     udp_receive: Arc<Mutex<Option<DatagramCipher>>>,
     #[cfg(test)]
     tcp_wait: Arc<Mutex<Option<mpsc::Sender<()>>>>,
+    #[cfg(test)]
+    tcp_write_wait: Arc<Mutex<Option<mpsc::Sender<()>>>>,
 }
 
 impl ClientSession {
@@ -171,16 +184,38 @@ impl ClientSession {
             store,
             state: Arc::new(Mutex::new(SessionStateInner::default())),
             tcp: Arc::new(Mutex::new(None)),
+            tcp_runtime: Arc::new(Mutex::new(None)),
             udp: Arc::new(Mutex::new(None)),
             udp_send: Arc::new(Mutex::new(None)),
             udp_receive: Arc::new(Mutex::new(None)),
             #[cfg(test)]
             tcp_wait: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            tcp_write_wait: Arc::new(Mutex::new(None)),
         })
     }
 
     pub fn state(&self) -> Result<SessionState, SessionError> {
         Ok(self.state.lock().map_err(|_| SessionError::Poisoned)?.state)
+    }
+
+    /// Returns bounded receiver observations at the current client monotonic time.
+    pub fn receiver_snapshot(&self) -> Result<crate::ReceiverSnapshot, SessionError> {
+        self.receiver_snapshot_at(std::time::Instant::now())
+    }
+
+    /// Explicit-clock snapshot; use nondecreasing times on the receiving clock.
+    /// Reads finalize expired packet gaps, but never infer trailing traffic.
+    pub fn receiver_snapshot_at(
+        &self,
+        now: std::time::Instant,
+    ) -> Result<crate::ReceiverSnapshot, SessionError> {
+        Ok(self
+            .state
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?
+            .receiver
+            .snapshot(now))
     }
 
     pub fn pair_with_pin(&self, pin: &str) -> Result<ReadySession, SessionError> {
@@ -310,6 +345,19 @@ impl ClientSession {
         }))
     }
 
+    pub fn request_stream_config(
+        &self,
+        request_id: u32,
+        desired: erd_proto::StreamConfiguration,
+    ) -> Result<(), SessionError> {
+        self.send_control(ControlMessage::StreamConfigRequest(
+            erd_proto::StreamConfigurationRequest {
+                request_id,
+                desired,
+            },
+        ))
+    }
+
     pub fn apply_remote_clipboard<C: PlatformClipboard>(
         &self,
         clipboard: &C,
@@ -322,10 +370,13 @@ impl ClientSession {
 
     pub fn receive_tcp_event(&self) -> Result<SessionEvent, SessionError> {
         let (header, payload) = self.read_tcp_packet()?;
-        self.handle_packet(header, payload, false)
+        self.handle_packet(header, payload, None)
     }
 
-    /// Starts a background TCP control loop and exposes decoded session events.
+    /// Starts the sole TCP readiness owner. Sends admit ordered frames to a
+    /// bounded queue; saturation is reported as WouldBlock, never dropped.
+    /// Stopping closes TCP and cancels all pending frames. Reconnect only after
+    /// this runtime has stopped; a partial encrypted connection is not reusable.
     pub fn spawn_tcp_runtime(&self) -> Result<SessionRuntime, SessionError> {
         if self.state()? != SessionState::Ready {
             return Err(SessionError::NotReady);
@@ -333,6 +384,13 @@ impl ClientSession {
         let readiness_runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .build()?;
+        let mut owner = self
+            .tcp_runtime
+            .lock()
+            .map_err(|_| SessionError::Poisoned)?;
+        if owner.is_some() {
+            return Err(SessionError::TcpRuntimeAlreadyRunning);
+        }
         let readiness = {
             let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
             let socket = tcp
@@ -346,9 +404,17 @@ impl ClientSession {
                 let _entered = readiness_runtime.enter();
                 tokio::net::TcpStream::from_std(observer)
             };
-            socket.set_nonblocking(false)?;
-            registered?
+            match registered {
+                Ok(registered) => registered,
+                Err(error) => {
+                    socket.set_nonblocking(false)?;
+                    return Err(error.into());
+                }
+            }
         };
+        let wake = Arc::new(tokio::sync::Notify::new());
+        *owner = Some(wake.clone());
+        drop(owner);
         let session = self.clone();
         let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel();
         let event_rx = RuntimeEvents::default();
@@ -357,17 +423,33 @@ impl ClientSession {
             readiness_runtime.block_on(async { loop {
             if stop_rx.try_recv().is_ok() { break; }
             let mut interest = tokio::io::Interest::READABLE;
+            let mut progressed = false;
             let result = {
                 let mut tcp = session.tcp.lock().map_err(|_| SessionError::Poisoned);
                 match tcp.as_mut() {
                     Ok(tcp) => match tcp.as_mut() {
                         Some(stream) => {
-                            let result = stream.ssl_stream().get_ref().set_nonblocking(true)
-                                .map_err(SessionError::from).and_then(|()| stream.read_frame_step().map_err(SessionError::from));
-                            if stream.read_needs_write() { interest = tokio::io::Interest::WRITABLE; }
-                            match stream.ssl_stream().get_ref().set_nonblocking(false) {
-                                Ok(()) => result,
-                                Err(error) => Err(SessionError::Io(error)),
+                            let written = if stream.has_pending_frames() {
+                                match stream.write_frame_step() {
+                                    Ok(()) => { progressed = true; Ok(()) }
+                                    Err(TlsPskError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {
+                                        #[cfg(test)]
+                                        if let Some(wait) = session.tcp_write_wait.lock().unwrap().take() { wait.send(()).unwrap(); }
+                                        if !stream.write_needs_read() { interest |= tokio::io::Interest::WRITABLE; }
+                                        Ok(())
+                                    }
+                                    Err(error) => Err(SessionError::Tls(error)),
+                                }
+                            } else { Ok(()) };
+                            // Resume SSL_write WANT_READ with SSL_write, not SSL_read.
+                            if stream.has_pending_frames() && stream.write_needs_read() {
+                                written.and(Err(SessionError::Tls(TlsPskError::Io(io::ErrorKind::WouldBlock.into()))))
+                            } else {
+                                written.and_then(|()| {
+                                    let result = stream.read_frame_step().map_err(SessionError::from);
+                                    if stream.read_needs_write() { interest |= tokio::io::Interest::WRITABLE; }
+                                    result
+                                })
                             }
                         }
                         None => Err(SessionError::NotReady),
@@ -381,16 +463,18 @@ impl ClientSession {
                         Err(SessionError::Io(io::Error::from(io::ErrorKind::InvalidData)))
                     } else {
                         PacketHeader::decode(&frame[..PacketHeader::SIZE]).map_err(SessionError::from)
-                            .and_then(|header| session.handle_packet(header, frame[PacketHeader::SIZE..].to_vec(), false))
+                            .and_then(|header| session.handle_packet(header, frame[PacketHeader::SIZE..].to_vec(), None))
                     }
                 }
                 Ok(None) => continue,
                 Err(SessionError::Tls(TlsPskError::Io(error))) if error.kind() == io::ErrorKind::WouldBlock => {
+                    if progressed { continue; }
                     #[cfg(test)]
                     if let Some(wait) = session.tcp_wait.lock().unwrap().take() { wait.send(()).unwrap(); }
                     tokio::select! {
                         biased;
                         _ = &mut stop_rx => break,
+                        _ = wake.notified() => {},
                         ready = readiness.ready(interest) => {
                             if let Err(error) = ready { event_tx.push(Err(SessionError::Io(error))); break; }
                             let _: io::Result<()> = readiness.try_io(interest, || Err(io::ErrorKind::WouldBlock.into()));
@@ -406,17 +490,39 @@ impl ClientSession {
                 Ok(event) => {
                     event_tx.push(Ok(event));
                 }
-                Err(SessionError::Tls(TlsPskError::Io(error)))
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock
-                    ) => {}
                 Err(error) => {
                     event_tx.push(Err(error));
                     break;
                 }
             }
         }});
+            // Cancellation is terminal for this TCP generation. Drop the queue
+            // and socket together, never reset a partial stream to blocking mode.
+            let cleanup = (|| -> Result<(), SessionError> {
+                let mut owner = session
+                    .tcp_runtime
+                    .lock()
+                    .map_err(|_| SessionError::Poisoned)?;
+                let mut tcp = session.tcp.lock().map_err(|_| SessionError::Poisoned)?;
+                let result = tcp.take().map(|tcp| {
+                    tcp.ssl_stream()
+                        .get_ref()
+                        .shutdown(std::net::Shutdown::Both)
+                });
+                *owner = None;
+                if let Ok(mut state) = session.state.lock() {
+                    state.state = SessionState::Disconnected;
+                }
+                match result {
+                    Some(Err(error)) if error.kind() != io::ErrorKind::NotConnected => {
+                        Err(error.into())
+                    }
+                    _ => Ok(()),
+                }
+            })();
+            if let Err(error) = cleanup {
+                event_tx.push(Err(error));
+            }
             event_tx.close();
         });
         Ok(SessionRuntime {
@@ -435,6 +541,7 @@ impl ClientSession {
                 .ok_or(SessionError::NotReady)?
         };
         let (datagram, count) = udp.receive()?;
+        let received_at = std::time::Instant::now();
         let mut cipher_guard = self
             .udp_receive
             .lock()
@@ -443,9 +550,9 @@ impl ClientSession {
             .as_mut()
             .ok_or(SessionError::NotReady)?
             .open_datagram(&datagram[..count])?;
-        drop(cipher_guard);
-        drop(datagram);
-        self.handle_packet(header, payload, true)
+        // Keep this cipher generation pinned until the authenticated observation
+        // is consumed; a new handshake cannot install its cipher in between.
+        self.handle_packet(header, payload, Some((received_at, count)))
     }
 
     pub fn disconnect(&self) -> Result<(), SessionError> {
@@ -454,6 +561,7 @@ impl ClientSession {
             state.state = SessionState::Disconnected;
             state.frames.clear();
             state.audio.clear();
+            state.receiver = crate::receiver_stats::ReceiverStats::default();
         }
         if let Some(udp) = self.udp.lock().map_err(|_| SessionError::Poisoned)?.take() {
             udp.cancel.send_replace(true);
@@ -527,9 +635,15 @@ impl ClientSession {
         psk: PskIdentity,
         next_state: SessionState,
     ) -> Result<(), SessionError> {
+        let owner = self.tcp_runtime.lock().map_err(|_| SessionError::Poisoned)?;
+        if owner.is_some() {
+            return Err(SessionError::TcpRuntimeAlreadyRunning);
+        }
         {
             let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
             state.state = SessionState::Connecting;
+            state.frames.clear();
+            state.receiver = crate::receiver_stats::ReceiverStats::default();
         }
         let address = resolve_one((&*self.config.host, self.config.tcp_port))?;
         let tcp = std::net::TcpStream::connect_timeout(&address, self.config.connect_timeout)?;
@@ -638,18 +752,30 @@ impl ClientSession {
     }
 
     fn send_packet(&self, packet_type: PacketType, payload: &[u8]) -> Result<(), SessionError> {
-        let sequence = {
-            let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
-            state.next_tcp_sequence = state.next_tcp_sequence.wrapping_add(1);
-            state.next_tcp_sequence
-        };
+        let owner = self.tcp_runtime.lock().map_err(|_| SessionError::Poisoned)?;
+        let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
+        let sequence = state.next_tcp_sequence.wrapping_add(1);
         let header = PacketHeader::new(packet_type, sequence, current_unix_ms() as u32, 0);
         let mut packet = header.encode()?;
         packet.extend_from_slice(payload);
         let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
-        tcp.as_mut()
-            .ok_or(SessionError::NotReady)?
-            .write_frame(&packet)?;
+        let stream = tcp.as_mut().ok_or(SessionError::NotReady)?;
+        if let Some(wake) = owner.as_ref() {
+            stream.queue_frame(&packet)?;
+            // Preserve immediate delivery when writable (notably Disconnect
+            // immediately followed by stop). This never waits: the socket stays
+            // nonblocking and only retained, hard-bounded data is attempted.
+            let result = stream.flush_pending_frames();
+            wake.notify_one();
+            match result {
+                Ok(()) => {}
+                Err(TlsPskError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            stream.write_frame(&packet)?;
+        }
+        state.next_tcp_sequence = sequence;
         Ok(())
     }
 
@@ -673,25 +799,41 @@ impl ClientSession {
         &self,
         header: PacketHeader,
         payload: Vec<u8>,
-        from_udp: bool,
+        udp_observation: Option<(std::time::Instant, usize)>,
     ) -> Result<SessionEvent, SessionError> {
         let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
         if state.state != SessionState::Ready {
             return Err(SessionError::NotReady);
         }
+        let from_udp = udp_observation.is_some();
+        let received_at = if let Some((at, bytes)) = udp_observation {
+            // Only receive_udp_event supplies this after successful authentication.
+            // Count transport bytes even if the authenticated media payload is invalid.
+            state.receiver.observe_datagram(header.sequence, bytes, at);
+            at
+        } else {
+            std::time::Instant::now()
+        };
         match header.packet_type {
-            PacketType::FrameHeader if from_udp => Ok(state
-                .frames
-                .push_header(
-                    FrameHeader::decode(&payload)?,
-                    header.timestamp_ms,
-                    std::time::Instant::now(),
-                )?
-                .map_or(SessionEvent::Ignored, SessionEvent::Frame)),
-            PacketType::FrameChunk if from_udp => Ok(state
-                .frames
-                .push_chunk(FrameChunk::decode(&payload)?, std::time::Instant::now())?
-                .map_or(SessionEvent::Ignored, SessionEvent::Frame)),
+            PacketType::FrameHeader | PacketType::FrameChunk if from_udp => {
+                let frame = if header.packet_type == PacketType::FrameHeader {
+                    state.frames.push_header(
+                        FrameHeader::decode(&payload)?,
+                        header.timestamp_ms,
+                        received_at,
+                    )?
+                } else {
+                    state
+                        .frames
+                        .push_chunk(FrameChunk::decode(&payload)?, received_at)?
+                };
+                if let Some(started_at) = state.frames.take_completed_started_at() {
+                    state
+                        .receiver
+                        .record_assembly(started_at, std::time::Instant::now());
+                }
+                Ok(frame.map_or(SessionEvent::Ignored, SessionEvent::Frame))
+            }
             PacketType::AudioFrame if from_udp => Ok(state
                 .audio
                 .push(AudioFragment::decode(&payload)?)
@@ -700,7 +842,12 @@ impl ClientSession {
                 state.cursor.update(CursorUpdate::decode(&payload)?);
                 Ok(SessionEvent::Cursor(state.cursor))
             }
-            PacketType::Ping if from_udp => Ok(SessionEvent::Ping),
+            PacketType::Ping if from_udp => {
+                if let Some(stats) = erd_proto::TimestampStats::decode(&payload) {
+                    state.receiver.record_host(stats, received_at);
+                }
+                Ok(SessionEvent::Ping)
+            }
             PacketType::Ping => {
                 drop(state);
                 self.send_control(ControlMessage::Pong)?;
@@ -715,6 +862,9 @@ impl ClientSession {
                 ControlMessage::ClipboardSyncUpdate(update) => {
                     Ok(SessionEvent::Clipboard(update.text))
                 }
+                msg @ (ControlMessage::StreamConfigResponse(_)
+                | ControlMessage::StreamConfigReject(_)
+                | ControlMessage::StreamConfigError(_)) => Ok(SessionEvent::StreamConfig(msg)),
                 _ => Ok(SessionEvent::Ignored),
             },
             _ => Ok(SessionEvent::Ignored),
@@ -855,7 +1005,8 @@ impl RuntimeEvents {
                 SessionEvent::Ignored
                 | SessionEvent::Frame(_)
                 | SessionEvent::Audio(_)
-                | SessionEvent::Cursor(_),
+                | SessionEvent::Cursor(_)
+                | SessionEvent::StreamConfig(_),
             ) => {}
         }
         ready.notify_one();

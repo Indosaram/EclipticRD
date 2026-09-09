@@ -10,6 +10,7 @@ default = ["ffmpeg"]
 ffmpeg = ["dep:ffmpeg-next"]
 d3d11va = ["ffmpeg"]
 videotoolbox = ["ffmpeg"]
+ios-videotoolbox = []
 
 [dependencies]
 erd-proto = { path = "../erd-proto" }
@@ -17,3 +18,7 @@ ffmpeg-next = { workspace = true, optional = true, default-features = false, fea
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+
+[[example]]
+name = "decode_smoke"
+required-features = ["ffmpeg"]

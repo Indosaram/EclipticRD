@@ -29,6 +29,28 @@ use ffmpeg::{
     Dictionary, Packet,
 };
 
+#[cfg(test)]
+thread_local! {
+    static SOFTWARE_FRAME_ALLOCATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+fn allocate_software_frame(format: Pixel, width: u32, height: u32) -> frame::Video {
+    let frame = frame::Video::new(format, width, height);
+    #[cfg(test)]
+    SOFTWARE_FRAME_ALLOCATIONS.with(|count| count.set(count.get() + 1));
+    frame
+}
+
+fn make_frame_writable(frame: &mut frame::Video) -> Result<(), EncodeError> {
+    // SAFETY: Video owns a live AVFrame. The exclusive borrow prevents Rust aliases;
+    // FFmpeg detaches shared AVBufferRefs before the caller mutates retained pixels.
+    let status = unsafe { ffmpeg::ffi::av_frame_make_writable(frame.as_mut_ptr()) };
+    if status < 0 {
+        return Err(EncodeError::Ffmpeg(ffmpeg::Error::from(status)));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCodec {
     Hevc,
@@ -104,6 +126,8 @@ struct OpenEncoder {
     backend: EncoderBackend,
     codec: VideoCodec,
     scaler: ScaleContext,
+    software: frame::Video,
+    source: frame::Video,
     vaapi: Option<VaapiResources>,
 }
 
@@ -219,11 +243,11 @@ impl LinuxVideoEncoder {
 
         let pts = self.next_pts;
         self.next_pts += 1;
-        let mut software = frame::Video::empty();
+        let software = &mut self.open.software;
+        make_frame_writable(software)?;
 
         if self.open.backend == EncoderBackend::Nvenc || self.open.backend == EncoderBackend::Vaapi
         {
-            software = frame::Video::new(Pixel::NV12, self.config.width, self.config.height);
             let width = self.config.width as usize;
             let height = self.config.height as usize;
             let y_stride = software.stride(0);
@@ -262,7 +286,7 @@ impl LinuxVideoEncoder {
             }
         } else {
             // For x264 software fallback (YUV420P)
-            let mut source = frame::Video::new(Pixel::BGRA, self.config.width, self.config.height);
+            let source = &mut self.open.source;
             let source_stride = source.stride(0);
             for row in 0..self.config.height as usize {
                 let input_start = row * stride;
@@ -270,7 +294,7 @@ impl LinuxVideoEncoder {
                 source.data_mut(0)[output_start..output_start + row_bytes]
                     .copy_from_slice(&bgra[input_start..input_start + row_bytes]);
             }
-            self.open.scaler.run(&source, &mut software)?;
+            self.open.scaler.run(source, software)?;
         }
         software.set_pts(Some(pts));
         if self.force_keyframe {
@@ -300,7 +324,7 @@ impl LinuxVideoEncoder {
             hardware.set_kind(software.kind());
             self.open.encoder.send_frame(&hardware)?;
         } else {
-            self.open.encoder.send_frame(&software)?;
+            self.open.encoder.send_frame(software)?;
         }
 
         self.force_keyframe = false;
@@ -405,6 +429,8 @@ fn open_nvenc(config: EncoderConfig, video_codec: VideoCodec) -> Result<OpenEnco
         backend: EncoderBackend::Nvenc,
         codec: video_codec,
         scaler,
+        software: allocate_software_frame(Pixel::NV12, config.width, config.height),
+        source: frame::Video::empty(),
         vaapi: None,
     })
 }
@@ -486,6 +512,8 @@ fn open_vaapi(config: EncoderConfig, video_codec: VideoCodec) -> Result<OpenEnco
         backend: EncoderBackend::Vaapi,
         codec: video_codec,
         scaler,
+        software: allocate_software_frame(Pixel::NV12, config.width, config.height),
+        source: frame::Video::empty(),
         vaapi: Some(VaapiResources { device, frames }),
     })
 }
@@ -516,6 +544,8 @@ fn open_x264(config: EncoderConfig) -> Result<OpenEncoder, EncodeError> {
         backend: EncoderBackend::X264,
         codec: VideoCodec::H264,
         scaler,
+        software: allocate_software_frame(Pixel::YUV420P, config.width, config.height),
+        source: allocate_software_frame(Pixel::BGRA, config.width, config.height),
         vaapi: None,
     })
 }
@@ -626,6 +656,65 @@ fn extract_parameter_sets(codec: VideoCodec, nalus: &[&[u8]]) -> Vec<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn conversion_frames_are_reused_after_warmup() {
+        let config = EncoderConfig {
+            width: 32,
+            height: 32,
+            bitrate: 100_000,
+            fps: 30,
+            keyframe_interval: 300,
+            preferred_codec: VideoCodec::H264,
+        };
+        let mut encoder = LinuxVideoEncoder {
+            config,
+            open: open_x264(config).unwrap(),
+            next_pts: 0,
+            force_keyframe: true,
+            parameter_sets: Vec::new(),
+        };
+        let mut pixels = vec![128; 32 * 32 * 4];
+        encoder.encode_bgra(&pixels, 128).unwrap();
+        SOFTWARE_FRAME_ALLOCATIONS.with(|count| count.set(0));
+        for index in 1..=16 {
+            pixels.fill(index * 8);
+            let output = encoder.encode_bgra(&pixels, 128).unwrap();
+            assert_eq!(output.len(), 1);
+            assert_eq!(output[0].pts, i64::from(index));
+        }
+        SOFTWARE_FRAME_ALLOCATIONS.with(|count| {
+            assert_eq!(
+                count.get(),
+                0,
+                "conversion buffers must survive encode calls"
+            )
+        });
+    }
+
+    #[test]
+    fn reused_frame_detaches_from_retained_native_reference() {
+        ffmpeg::init().unwrap();
+        let mut frame = allocate_software_frame(Pixel::NV12, 32, 32);
+        frame.data_mut(0).fill(29);
+        frame.data_mut(1).fill(71);
+        let mut retained = frame::Video::empty();
+        // SAFETY: Both wrappers own live AVFrames. av_frame_ref creates shared
+        // native ownership; each wrapper independently unreferences it on drop.
+        let status = unsafe { ffmpeg::ffi::av_frame_ref(retained.as_mut_ptr(), frame.as_ptr()) };
+        assert_eq!(status, 0);
+        let original = frame.data(0).as_ptr();
+        assert_eq!(retained.data(0).as_ptr(), original);
+        make_frame_writable(&mut frame).unwrap();
+        assert_ne!(frame.data(0).as_ptr(), original);
+        frame.data_mut(0).fill(200);
+        frame.data_mut(1).fill(100);
+        assert!(retained.data(0).iter().all(|byte| *byte == 29));
+        assert!(retained.data(1).iter().all(|byte| *byte == 71));
+        let unique = frame.data(0).as_ptr();
+        make_frame_writable(&mut frame).unwrap();
+        assert_eq!(frame.data(0).as_ptr(), unique);
+    }
 
     #[test]
     fn packet_timestamp_requires_identity_and_preserves_present_pts() {

@@ -3,8 +3,9 @@ use std::{net::UdpSocket, sync::mpsc, thread, time::Duration};
 use erd_app::{ClientSession, SessionConfig, SessionError, SessionState};
 use erd_net::{PskIdentity, TlsPskServer};
 use erd_proto::{
-    Capabilities, Handshake, InputEvent, InputEventType, Modifiers, PacketHeader, PacketType,
-    PairingGrant, PairingRequest, WireCodec, PROTOCOL_VERSION,
+    BitrateAdjust, Capabilities, ControlMessage, Handshake, InputEvent, InputEventType, Modifiers,
+    PacketHeader, PacketType, PairingGrant, PairingRequest, StreamConfiguration,
+    StreamConfigurationResponse, WireCodec, PROTOCOL_VERSION,
 };
 
 fn packet(packet_type: PacketType, payload: &[u8]) -> Vec<u8> {
@@ -338,4 +339,170 @@ fn stalled_consumer_retains_latest_clipboard_and_terminal_error() {
         runtime.events().try_recv(),
         Err(mpsc::TryRecvError::Disconnected)
     ));
+}
+
+#[test]
+fn mock_server_abr_bitrate_adjust_round_trip() {
+    // Given: authenticated session with mock server listening for control events.
+    let key = [0x42; 32];
+    let listener = TlsPskServer::new([PskIdentity::pairing("abr-test", &key).unwrap()])
+        .unwrap()
+        .bind("127.0.0.1:0")
+        .unwrap();
+    let tcp_address = listener.local_addr().unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_port = udp.local_addr().unwrap().port();
+    let (bitrate_tx, bitrate_rx) = mpsc::channel();
+
+    let server = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap();
+        stream
+            .ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let frame = stream.read_frame().unwrap();
+        let (_, payload) = split_packet(&frame);
+        stream
+            .write_frame(&packet(PacketType::HandshakeAck, payload))
+            .unwrap();
+
+        let mut probe = [0_u8; 1];
+        udp.recv_from(&mut probe).unwrap();
+
+        let control_packet = stream.read_frame().unwrap();
+        let (header, payload) = split_packet(&control_packet);
+        assert_eq!(header.packet_type, PacketType::Control);
+        match ControlMessage::decode(payload).unwrap() {
+            ControlMessage::BitrateAdjust(BitrateAdjust { target_bitrate }) => {
+                bitrate_tx.send(target_bitrate).unwrap();
+            }
+            other => panic!("unexpected control: {other:?}"),
+        }
+    });
+
+    let temporary = tempfile::tempdir().unwrap();
+    let config = SessionConfig {
+        host: "127.0.0.1".to_owned(),
+        tcp_port: tcp_address.port(),
+        udp_port,
+        client_name: "abr-client".to_owned(),
+        capabilities: Capabilities::empty(),
+        pairing_store_path: Some(temporary.path().join("pairings.json")),
+        connect_timeout: Duration::from_secs(5),
+        handshake_ack_timeout: Duration::from_secs(5),
+    };
+    let session = ClientSession::new(config).unwrap();
+    session
+        .connect_with_pairing(erd_app::PairingRecord {
+            id: "abr-test".into(),
+            name: "host".into(),
+            key: key.to_vec(),
+            added_at_unix_ms: 0,
+        })
+        .unwrap();
+
+    // When: client requests bitrate adjustment through send_bitrate_adjust.
+    session.send_bitrate_adjust(6_000_000).unwrap();
+
+    // Then: mock server receives the exact adjusted target bitrate.
+    assert_eq!(
+        bitrate_rx.recv_timeout(Duration::from_secs(5)).unwrap(),
+        6_000_000
+    );
+
+    server.join().unwrap();
+    session.disconnect().unwrap();
+}
+
+#[test]
+fn mock_server_stream_config_negotiation_round_trip() {
+    // Given: authenticated session with mock server responding to stream config request.
+    let key = [0x66; 32];
+    let listener = TlsPskServer::new([PskIdentity::pairing("config-client", &key).unwrap()])
+        .unwrap()
+        .bind("127.0.0.1:0")
+        .unwrap();
+    let tcp_address = listener.local_addr().unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_port = udp.local_addr().unwrap().port();
+
+    let server = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap();
+        stream
+            .ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let frame = stream.read_frame().unwrap();
+        let (_, payload) = split_packet(&frame);
+        stream
+            .write_frame(&packet(PacketType::HandshakeAck, payload))
+            .unwrap();
+
+        let mut probe = [0_u8; 1];
+        udp.recv_from(&mut probe).unwrap();
+
+        let req_frame = stream.read_frame().unwrap();
+        let (header, payload) = split_packet(&req_frame);
+        assert_eq!(header.packet_type, PacketType::Control);
+        let req = match ControlMessage::decode(payload).unwrap() {
+            ControlMessage::StreamConfigRequest(req) => req,
+            other => panic!("expected StreamConfigRequest, got {other:?}"),
+        };
+        assert_eq!(req.request_id, 42);
+        assert_eq!(req.desired.width, 2560);
+        assert_eq!(req.desired.height, 1440);
+
+        let response = ControlMessage::StreamConfigResponse(StreamConfigurationResponse {
+            request_id: req.request_id,
+            active: req.desired,
+        });
+        stream
+            .write_frame(&packet(PacketType::Control, &response.encode().unwrap()))
+            .unwrap();
+    });
+
+    let temporary = tempfile::tempdir().unwrap();
+    let config = SessionConfig {
+        host: "127.0.0.1".to_owned(),
+        tcp_port: tcp_address.port(),
+        udp_port,
+        client_name: "config-client".to_owned(),
+        capabilities: Capabilities::empty(),
+        pairing_store_path: Some(temporary.path().join("pairings.json")),
+        connect_timeout: Duration::from_secs(5),
+        handshake_ack_timeout: Duration::from_secs(5),
+    };
+    let session = ClientSession::new(config).unwrap();
+    session
+        .connect_with_pairing(erd_app::PairingRecord {
+            id: "config-client".into(),
+            name: "host".into(),
+            key: key.to_vec(),
+            added_at_unix_ms: 0,
+        })
+        .unwrap();
+
+    // When: client submits stream configuration request.
+    let desired = StreamConfiguration {
+        width: 2560,
+        height: 1440,
+        bitrate: 15_000_000,
+        frames_per_second: 60,
+    };
+    session.request_stream_config(42, desired).unwrap();
+    let event = session.receive_tcp_event().unwrap();
+
+    // Then: client receives matching StreamConfigResponse.
+    match event {
+        erd_app::SessionEvent::StreamConfig(ControlMessage::StreamConfigResponse(res)) => {
+            assert_eq!(res.request_id, 42);
+            assert_eq!(res.active, desired);
+        }
+        other => panic!("expected StreamConfigResponse event, got {other:?}"),
+    }
+
+    server.join().unwrap();
+    session.disconnect().unwrap();
 }

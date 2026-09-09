@@ -1,4 +1,9 @@
 //! Ecliptic Remote Desktop presentation primitives.
+//!
+//! The default `cpal-output` feature provides native CPAL device/stream output.
+//! Disable default features to use the same bounded [`AudioQueue`], PCM checks,
+//! gain/mute controls, and output event/status payloads with a caller-owned sink.
+//! No alternative sink or format conversion is supplied by this crate.
 
 mod audio;
 

@@ -2,6 +2,93 @@
 
 use erd_proto::Modifiers;
 
+/// Wire audio format produced by every host: interleaved f32 LE stereo at 48 kHz,
+/// matching the client's cpal output contract in `erd-render::audio`.
+pub const WIRE_AUDIO_CHANNELS: usize = 2;
+pub const WIRE_AUDIO_SAMPLE_RATE: u32 = 48_000;
+
+/// Sample layout of a WASAPI loopback mix format relevant to wire conversion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceAudioFormat {
+    pub channels: usize,
+    pub sample_rate: u32,
+    /// `false` for 16-bit PCM, `true` for IEEE f32 (shared-mode mix format norm).
+    pub is_float: bool,
+}
+
+impl Default for SourceAudioFormat {
+    fn default() -> Self {
+        Self {
+            channels: WIRE_AUDIO_CHANNELS,
+            sample_rate: WIRE_AUDIO_SAMPLE_RATE,
+            is_float: true,
+        }
+    }
+}
+
+/// Converts one WASAPI loopback packet to the wire format: interleaved f32 LE
+/// stereo at 48 kHz. Downmixes multi-channel by keeping the first two channels,
+/// duplicates mono, converts 16-bit PCM, and linearly resamples other rates.
+pub fn convert_to_wire_audio(pcm: &[u8], source: &SourceAudioFormat) -> Vec<u8> {
+    if source.channels == 0 {
+        return Vec::new();
+    }
+    let bytes_per_sample = if source.is_float { 4 } else { 2 };
+    let frame_bytes = bytes_per_sample * source.channels;
+    let frame_count = pcm.len() / frame_bytes.max(1);
+    if frame_count == 0 {
+        return Vec::new();
+    }
+
+    let mut samples = Vec::with_capacity(frame_count * WIRE_AUDIO_CHANNELS);
+    for frame in 0..frame_count {
+        let read_sample = |channel: usize| -> f32 {
+            let offset = frame * frame_bytes + channel * bytes_per_sample;
+            if source.is_float {
+                f32::from_le_bytes(pcm[offset..offset + 4].try_into().expect("4 bytes"))
+            } else {
+                i16::from_le_bytes(pcm[offset..offset + 2].try_into().expect("2 bytes")) as f32
+                    / 32_768.0
+            }
+        };
+        if source.channels == 1 {
+            let mono = read_sample(0);
+            samples.push(mono);
+            samples.push(mono);
+        } else {
+            samples.push(read_sample(0));
+            samples.push(read_sample(1));
+        }
+    }
+    // `samples` is now frame-sequential stereo at the source rate.
+    let output = if source.sample_rate == WIRE_AUDIO_SAMPLE_RATE {
+        samples
+    } else {
+        let source_frames = frame_count;
+        let output_frames = (source_frames as u64 * u64::from(WIRE_AUDIO_SAMPLE_RATE)
+            / u64::from(source.sample_rate)) as usize;
+        let step = f64::from(source.sample_rate) / f64::from(WIRE_AUDIO_SAMPLE_RATE);
+        let mut resampled = Vec::with_capacity(output_frames * WIRE_AUDIO_CHANNELS);
+        for frame in 0..output_frames {
+            let position = frame as f64 * step;
+            let index = position.floor() as usize;
+            let next = (index + 1).min(source_frames - 1);
+            let frac = (position - index as f64) as f32;
+            for channel in 0..WIRE_AUDIO_CHANNELS {
+                let left = samples[index * WIRE_AUDIO_CHANNELS + channel];
+                let right = samples[next * WIRE_AUDIO_CHANNELS + channel];
+                resampled.push(left + (right - left) * frac);
+            }
+        }
+        resampled
+    };
+    let mut bytes = Vec::with_capacity(output.len() * 4);
+    for sample in output {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    bytes
+}
+
 const ABSOLUTE_AXIS_MAX: f64 = 65_535.0;
 
 /// Windows virtual desktop bounds in physical pixels.
@@ -378,5 +465,59 @@ mod tests {
     fn clipboard_hash_is_utf8_byte_based() {
         assert_eq!("é".repeat(2048).len(), 4096);
         assert_eq!(clipboard_content_hash("é"), 0x0ac2_1707_b718_1e01);
+    }
+
+    fn read_f32_le(pcm: &[u8]) -> Vec<f32> {
+        pcm.chunks_exact(4)
+            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .collect()
+    }
+
+    #[test]
+    fn stereo_48k_float_passes_through() {
+        let source = SourceAudioFormat::default();
+        let pcm: Vec<u8> = [0.25_f32, -0.5].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let wire = convert_to_wire_audio(&pcm, &source);
+        assert_eq!(read_f32_le(&wire), vec![0.25, -0.5]);
+    }
+
+    #[test]
+    fn mono_is_duplicated_and_s16_converted() {
+        let source = SourceAudioFormat { channels: 1, is_float: false, ..Default::default() };
+        let pcm: Vec<u8> = [16384_i16, -16384].iter().flat_map(|s| s.to_le_bytes()).collect();
+        let wire = convert_to_wire_audio(&pcm, &source);
+        let out = read_f32_le(&wire);
+        // Interleaved stereo: [L0, R0, L1, R1] with L == R == mono sample.
+        assert_eq!(out.len(), 4);
+        assert!((out[0] - 0.5).abs() < 1e-6 && (out[1] - 0.5).abs() < 1e-6);
+        assert!((out[2] + 0.5).abs() < 1e-6 && (out[3] + 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn multichannel_keeps_front_pair_and_partial_frames_are_dropped() {
+        let source = SourceAudioFormat { channels: 6, ..Default::default() };
+        let frame: Vec<u8> = [0.1_f32, 0.9, 0.0, 0.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        let mut pcm = frame.clone();
+        pcm.extend_from_slice(&[0xAB]); // trailing partial sample
+        let out = read_f32_le(&convert_to_wire_audio(&pcm, &source));
+        assert_eq!(out, vec![0.1, 0.9]);
+    }
+
+    #[test]
+    fn resampling_scales_frame_count_toward_48k() {
+        let source = SourceAudioFormat { sample_rate: 24_000, ..Default::default() };
+        // Two stereo frames: (0,0) then (1,1).
+        let pcm: Vec<u8> = [0.0_f32, 0.0, 1.0, 1.0]
+            .iter()
+            .flat_map(|s| s.to_le_bytes())
+            .collect();
+        let out = read_f32_le(&convert_to_wire_audio(&pcm, &source));
+        assert_eq!(out.len(), 8); // 2 stereo frames @24k -> 4 stereo frames @48k
+        assert_eq!(out[0], 0.0); // frame 0 -> source frame 0
+        assert_eq!(out[2], 0.5); // frame 1 -> halfway 0..1
+        assert!((out[4] - 1.0).abs() < 1e-6); // frame 2 -> source frame 1
     }
 }

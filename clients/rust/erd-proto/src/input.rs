@@ -23,10 +23,16 @@ pub enum InputEventType {
     MiddleMouseUp = 12,
     Reset = 13,
     RelativeMove = 14,
+    GamepadAxis = 15,
+    GamepadButtonDown = 16,
+    GamepadButtonUp = 17,
+    PenMove = 18,
+    PenDown = 19,
+    PenUp = 20,
 }
 
 impl InputEventType {
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 21] = [
         Self::MouseMove,
         Self::LeftMouseDown,
         Self::LeftMouseUp,
@@ -42,6 +48,12 @@ impl InputEventType {
         Self::MiddleMouseUp,
         Self::Reset,
         Self::RelativeMove,
+        Self::GamepadAxis,
+        Self::GamepadButtonDown,
+        Self::GamepadButtonUp,
+        Self::PenMove,
+        Self::PenDown,
+        Self::PenUp,
     ];
 }
 
@@ -65,6 +77,12 @@ impl TryFrom<u8> for InputEventType {
             12 => Ok(Self::MiddleMouseUp),
             13 => Ok(Self::Reset),
             14 => Ok(Self::RelativeMove),
+            15 => Ok(Self::GamepadAxis),
+            16 => Ok(Self::GamepadButtonDown),
+            17 => Ok(Self::GamepadButtonUp),
+            18 => Ok(Self::PenMove),
+            19 => Ok(Self::PenDown),
+            20 => Ok(Self::PenUp),
             unknown => Err(CodecError::UnknownInputEventType(unknown)),
         }
     }
@@ -124,6 +142,73 @@ pub struct InputEvent {
 
 impl InputEvent {
     pub const SIZE: usize = 21;
+
+    pub fn pen_move(x: f32, y: f32, pressure: f32, tilt_x: f32, tilt_y: f32) -> Self {
+        Self {
+            event_type: InputEventType::PenMove,
+            x,
+            y,
+            key_code: (tilt_y.clamp(-90.0, 90.0) as i16) as u16,
+            modifiers: Modifiers::empty(),
+            scroll_dx: pressure.clamp(0.0, 1.0),
+            scroll_dy: tilt_x.clamp(-90.0, 90.0),
+        }
+    }
+
+    pub fn pen_down(x: f32, y: f32, pressure: f32, tilt_x: f32, tilt_y: f32) -> Self {
+        Self {
+            event_type: InputEventType::PenDown,
+            x,
+            y,
+            key_code: (tilt_y.clamp(-90.0, 90.0) as i16) as u16,
+            modifiers: Modifiers::empty(),
+            scroll_dx: pressure.clamp(0.0, 1.0),
+            scroll_dy: tilt_x.clamp(-90.0, 90.0),
+        }
+    }
+
+    pub fn pen_up(x: f32, y: f32) -> Self {
+        Self {
+            event_type: InputEventType::PenUp,
+            x,
+            y,
+            key_code: 0,
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        }
+    }
+
+    pub fn gamepad_axis(gamepad_id: u8, axis_id: u8, x: f32, y: f32) -> Self {
+        let code = ((gamepad_id as u16) << 8) | (axis_id as u16);
+        Self {
+            event_type: InputEventType::GamepadAxis,
+            x,
+            y,
+            key_code: code,
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        }
+    }
+
+    pub fn gamepad_button(gamepad_id: u8, button_id: u8, pressed: bool) -> Self {
+        let code = ((gamepad_id as u16) << 8) | (button_id as u16);
+        let event_type = if pressed {
+            InputEventType::GamepadButtonDown
+        } else {
+            InputEventType::GamepadButtonUp
+        };
+        Self {
+            event_type,
+            x: 0.0,
+            y: 0.0,
+            key_code: code,
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        }
+    }
 }
 
 impl WireCodec for InputEvent {

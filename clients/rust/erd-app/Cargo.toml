@@ -5,10 +5,14 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["ffmpeg"]
+ffmpeg = ["erd-decode/ffmpeg"]
+
 [dependencies]
 erd-proto = { path = "../erd-proto" }
 erd-net = { path = "../erd-net" }
-erd-decode = { path = "../erd-decode" }
+erd-decode = { path = "../erd-decode", default-features = false }
 erd-render = { path = "../erd-render" }
 tokio.workspace = true
 anyhow.workspace = true

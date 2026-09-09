@@ -1,5 +1,9 @@
 //! OpenSSL TLS 1.2 PSK transport and v3 TCP framing.
 
+#[cfg(test)]
+#[path = "nonblocking_write_tests.rs"]
+mod nonblocking_write_tests;
+
 use std::{
     collections::{HashMap, VecDeque},
     io::{self, Read, Write},
@@ -369,6 +373,21 @@ pub struct TlsPskStream<S> {
     frame_reader: TcpFrameReader,
     pending_events: VecDeque<TcpFrameEvent>,
     read_needs_write: bool,
+    outbound: VecDeque<PendingFrame>,
+    outbound_bytes: usize,
+    write_needs_read: bool,
+    write_failed: bool,
+}
+
+// Bound both tiny-frame metadata and retained plaintext (including the active
+// frame). A maximum-size protocol frame can always fit in an empty queue.
+const MAX_OUTBOUND_FRAMES: usize = 64;
+const MAX_OUTBOUND_BYTES: usize = erd_proto::MAX_TCP_FRAME_SIZE + 4;
+const TLS_WRITE_CHUNK: usize = 16 * 1024;
+
+struct PendingFrame {
+    bytes: Vec<u8>,
+    offset: usize,
 }
 
 impl<S: Read + Write> TlsPskStream<S> {
@@ -378,6 +397,10 @@ impl<S: Read + Write> TlsPskStream<S> {
             frame_reader: TcpFrameReader::new(),
             pending_events: VecDeque::new(),
             read_needs_write: false,
+            outbound: VecDeque::new(),
+            outbound_bytes: 0,
+            write_needs_read: false,
+            write_failed: false,
         }
     }
 
@@ -393,11 +416,108 @@ impl<S: Read + Write> TlsPskStream<S> {
         self.stream.ssl().psk_identity()
     }
 
-    pub fn write_frame(&mut self, payload: &[u8]) -> Result<(), TlsPskError> {
+    /// Admits one frame without performing I/O. WouldBlock means the bounded
+    /// queue is full and this payload was NOT admitted. Frames are never coalesced.
+    pub fn queue_frame(&mut self, payload: &[u8]) -> Result<(), TlsPskError> {
+        if self.write_failed {
+            return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
+        }
+        if payload.is_empty() || payload.len() > erd_proto::MAX_TCP_FRAME_SIZE {
+            return Err(erd_proto::CodecError::InvalidFrameLength(
+                u32::try_from(payload.len()).unwrap_or(u32::MAX),
+            )
+            .into());
+        }
+        let frame_length = payload.len() + 4;
+        if self.outbound.len() == MAX_OUTBOUND_FRAMES
+            || frame_length > MAX_OUTBOUND_BYTES - self.outbound_bytes
+        {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock).into());
+        }
         let frame = TcpFrameWriter::encode(payload)?;
-        self.stream.write_all(&frame)?;
-        self.stream.flush()?;
+        self.outbound_bytes += frame_length;
+        self.outbound.push_back(PendingFrame {
+            bytes: frame,
+            offset: 0,
+        });
         Ok(())
+    }
+
+    /// Blocking convenience API. On I/O WouldBlock the admitted frame remains
+    /// owned here: resume with flush_pending_frames, NOT by resubmitting payload.
+    /// Nonblocking owners should use queue_frame and readiness-driven write steps.
+    pub fn write_frame(&mut self, payload: &[u8]) -> Result<(), TlsPskError> {
+        self.queue_frame(payload)?;
+        self.flush_pending_frames()
+    }
+
+    pub fn has_pending_frames(&self) -> bool {
+        !self.outbound.is_empty()
+    }
+
+    pub fn write_needs_read(&self) -> bool {
+        self.write_needs_read
+    }
+
+    pub fn flush_pending_frames(&mut self) -> Result<(), TlsPskError> {
+        if self.write_failed {
+            return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
+        }
+        while self.has_pending_frames() {
+            self.write_frame_step()?;
+        }
+        Ok(())
+    }
+
+    /// At most one bounded SSL_write (or transport flush). The front allocation,
+    /// offset and slice length survive WANT_READ/WANT_WRITE unchanged, as OpenSSL
+    /// requires. Only acknowledged plaintext advances the offset.
+    pub fn write_frame_step(&mut self) -> Result<(), TlsPskError> {
+        if self.write_failed {
+            return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
+        }
+        let Some(frame) = self.outbound.front_mut() else {
+            return Ok(());
+        };
+        self.write_needs_read = false;
+        let result = if frame.offset == frame.bytes.len() {
+            self.stream.flush().map(|()| {
+                self.outbound_bytes -= self.outbound.pop_front().unwrap().bytes.len();
+            })
+        } else {
+            let end = (frame.offset + TLS_WRITE_CHUNK).min(frame.bytes.len());
+            match self.stream.ssl_write(&frame.bytes[frame.offset..end]) {
+                Ok(0) => Err(io::ErrorKind::WriteZero.into()),
+                Ok(count) => {
+                    frame.offset += count;
+                    Ok(())
+                }
+                Err(error)
+                    if matches!(
+                        error.code(),
+                        openssl::ssl::ErrorCode::WANT_READ | openssl::ssl::ErrorCode::WANT_WRITE
+                    ) =>
+                {
+                    self.write_needs_read = error.code() == openssl::ssl::ErrorCode::WANT_READ;
+                    Err(io::ErrorKind::WouldBlock.into())
+                }
+                Err(error) => Err(error.into_io_error().unwrap_or_else(io::Error::other)),
+            }
+        };
+        match result {
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => Ok(()),
+            Err(error) => {
+                if error.kind() != io::ErrorKind::WouldBlock {
+                    // A terminal write can have committed ciphertext. Continuing
+                    // with another payload is never safe, even if I/O recovers.
+                    self.write_failed = true;
+                    self.outbound.clear();
+                    self.outbound_bytes = 0;
+                }
+                Err(error.into())
+            }
+            Ok(()) => Ok(()),
+        }
     }
 
     /// Reads one framed payload, buffering partial reads and coalesced frames.
@@ -412,6 +532,9 @@ impl<S: Read + Write> TlsPskStream<S> {
 
     /// Performs at most one TLS read, retaining incomplete framing for the next step.
     pub fn read_frame_step(&mut self) -> Result<Option<Vec<u8>>, TlsPskError> {
+        if self.write_failed {
+            return Err(io::Error::from(io::ErrorKind::BrokenPipe).into());
+        }
         if self.pending_events.is_empty() {
             let mut buffer = [0_u8; 64 * 1024];
             self.read_needs_write = false;
@@ -763,6 +886,45 @@ mod tests {
         stream.write_frame(b"partial framed echo").unwrap();
         assert_eq!(stream.read_frame().unwrap(), b"partial framed echo");
         server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn rejected_queue_frame_does_not_allocate() {
+        let psk = PskIdentity::new("queue-cost", vec![0x51; 32]).unwrap();
+        let listener = TlsPskServer::new([psk.clone()])
+            .unwrap()
+            .bind("127.0.0.1:0")
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let host = thread::spawn(move || listener.accept().unwrap());
+        let mut client = TlsPskClient::new(psk).unwrap().connect(address).unwrap();
+        let _server = host.join().unwrap();
+        for _ in 0..MAX_OUTBOUND_FRAMES {
+            client.queue_frame(b"x").unwrap();
+        }
+        let retained_bytes = client.outbound_bytes;
+        let payload = vec![0x37; 1024 * 1024];
+        let (result, count) = crate::udp_gcm::tests::allocations(|| client.queue_frame(&payload));
+        assert!(
+            matches!(result, Err(TlsPskError::Io(error)) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+        assert_eq!(client.outbound.len(), MAX_OUTBOUND_FRAMES);
+        assert_eq!(client.outbound_bytes, retained_bytes);
+        assert!(matches!(
+            client.queue_frame(&[]),
+            Err(TlsPskError::Frame(
+                erd_proto::CodecError::InvalidFrameLength(0)
+            ))
+        ));
+        let oversized = vec![0; MAX_TCP_FRAME_SIZE + 1];
+        assert!(matches!(
+            client.queue_frame(&oversized),
+            Err(TlsPskError::Frame(
+                erd_proto::CodecError::InvalidFrameLength(_)
+            ))
+        ));
+        eprintln!("allocations for rejected 1 MiB TLS payload: {count}");
+        assert_eq!(count, 0, "queue rejection must precede payload allocation");
     }
 
     #[test]

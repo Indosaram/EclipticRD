@@ -334,15 +334,22 @@ impl LinuxInputInjector {
             | InputEventType::RightMouseDown
             | InputEventType::RightMouseUp
             | InputEventType::MiddleMouseDown
-            | InputEventType::MiddleMouseUp => {
+            | InputEventType::MiddleMouseUp
+            | InputEventType::PenMove
+            | InputEventType::PenDown
+            | InputEventType::PenUp => {
                 let (pixel_x, pixel_y) = map_normalized_to_output(event.x, event.y, self.geometry);
                 let mut events = vec![
                     *AbsoluteAxisEvent::new(AbsoluteAxisCode::ABS_X, pixel_x as i32),
                     *AbsoluteAxisEvent::new(AbsoluteAxisCode::ABS_Y, pixel_y as i32),
                 ];
                 let button = match event.event_type {
-                    InputEventType::LeftMouseDown => Some((KeyCode::BTN_LEFT, 1)),
-                    InputEventType::LeftMouseUp => Some((KeyCode::BTN_LEFT, 0)),
+                    InputEventType::LeftMouseDown | InputEventType::PenDown => {
+                        Some((KeyCode::BTN_LEFT, 1))
+                    }
+                    InputEventType::LeftMouseUp | InputEventType::PenUp => {
+                        Some((KeyCode::BTN_LEFT, 0))
+                    }
                     InputEventType::RightMouseDown => Some((KeyCode::BTN_RIGHT, 1)),
                     InputEventType::RightMouseUp => Some((KeyCode::BTN_RIGHT, 0)),
                     InputEventType::MiddleMouseDown => Some((KeyCode::BTN_MIDDLE, 1)),
@@ -353,6 +360,12 @@ impl LinuxInputInjector {
                     events.push(InputEvent::new(EventType::KEY.0, key.code(), value));
                 }
                 self.pointer.emit(&events)
+            }
+            InputEventType::GamepadAxis
+            | InputEventType::GamepadButtonDown
+            | InputEventType::GamepadButtonUp => {
+                // Gamepad events safely handled; platform virtual gamepad device carries open requirement
+                Ok(())
             }
             InputEventType::RelativeMove => {
                 let dx = event.scroll_dx.round() as i32;

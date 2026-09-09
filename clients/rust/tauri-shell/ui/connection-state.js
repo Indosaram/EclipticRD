@@ -6,15 +6,41 @@
 })(typeof window !== 'undefined' ? window : globalThis, function () {
   'use strict';
 
-  function validateConnection({ host = '', pin = null }) {
+  function validateConnection({ host = '', pin = null, tcpPort = null, udpPort = null }) {
     host = host.trim();
     pin = pin == null ? '' : pin.trim();
     const errors = {};
     if (!host) errors.host = 'required';
     if (pin && !/^[0-9]{8}$/.test(pin)) errors.pin = 'invalid-pin';
+
+    function checkPort(val, fieldName, defaultPort) {
+      if (val === null || val === undefined || val === '') return defaultPort;
+      let num;
+      if (typeof val === 'number') {
+        num = val;
+      } else if (typeof val === 'string' && val.trim() !== '') {
+        const trimmed = val.trim();
+        num = Number(trimmed);
+        if (String(num) !== trimmed) {
+          errors[fieldName] = 'invalid-port';
+          return null;
+        }
+      } else {
+        errors[fieldName] = 'invalid-port';
+        return null;
+      }
+      if (!Number.isInteger(num) || num < 1 || num > 65535) {
+        errors[fieldName] = 'invalid-port';
+        return null;
+      }
+      return num;
+    }
+
+    const finalTcp = checkPort(tcpPort, 'tcpPort', 19730);
+    const finalUdp = checkPort(udpPort, 'udpPort', 19731);
     return Object.keys(errors).length
       ? { ok: false, errors }
-      : { ok: true, args: { host, tcpPort: 19730, udpPort: 19731, pin: pin || null } };
+      : { ok: true, args: { host, tcpPort: finalTcp, udpPort: finalUdp, pin: pin || null } };
   }
 
   const errorText = error => error instanceof Error ? error.message : String(error);
@@ -97,8 +123,6 @@
       state.cleanupError = null;
       state.busy = true;
       clearStats();
-      // Normalize rejection here so cleanup can await only the native operation,
-      // not this outer action (which itself awaits rejection cleanup).
       const operation = Promise.resolve().then(() => invoke('connect', validation.args))
         .then(() => ({ ok: true }), error => ({ ok: false, error: errorText(error) }));
       pendingConnect = operation;

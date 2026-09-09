@@ -1,0 +1,47 @@
+[package]
+name = "erd-ios"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[package.metadata.cargo-all-features]
+skip = true
+
+[build-dependencies]
+tauri-build = { version = "2", default-features = false, features = [] }
+
+[dependencies]
+erd-app = { path = "../erd-app", default-features = false }
+erd-mobile = { path = "../erd-mobile" }
+erd-net = { path = "../erd-net" }
+erd-proto = { path = "../erd-proto" }
+erd-render = { path = "../erd-render" }
+tauri = { version = "2", default-features = false, features = ["wry"] }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+
+[target.'cfg(target_os = "ios")'.dependencies]
+erd-decode = { path = "../erd-decode", default-features = false, features = ["ios-videotoolbox"] }
+objc2 = "0.6"
+objc2-foundation = "0.3"
+core-foundation = { version = "0.10", default-features = false }
+
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+erd-decode = { path = "../erd-decode", features = ["ffmpeg"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lib]
+name = "erd_ios_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "erd-ios"
+path = "src/main.rs"

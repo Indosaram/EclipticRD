@@ -50,9 +50,41 @@ test('PIN and address validation matches backend without losing leading zeros', 
     assert.deepEqual(validateConnection({ host: ` ${host} `, pin: ' 00123456 ' }), {
       ok: true, args: { host, tcpPort: 19730, udpPort: 19731, pin: '00123456' }
     });
+    assert.deepEqual(validateConnection({ host, pin: '00123456', tcpPort: 19740, udpPort: 19741 }), {
+      ok: true, args: { host, tcpPort: 19740, udpPort: 19741, pin: '00123456' }
+    });
     assert.equal(validateConnection({ host, pin: ' ' }).args.pin, null);
     assert.equal(validateConnection({ host, pin: null }).args.pin, null);
   }
+  for (const badTcp of [0, -1, 65536, 19730.5, 'abc', '19730.5']) {
+    assert.deepEqual(
+      validateConnection({ host: 'example.test', tcpPort: badTcp }),
+      { ok: false, errors: { tcpPort: 'invalid-port' } }
+    );
+  }
+  for (const badUdp of [0, -1, 65536, 19731.5, 'abc', '19731.5']) {
+    assert.deepEqual(
+      validateConnection({ host: 'example.test', udpPort: badUdp }),
+      { ok: false, errors: { udpPort: 'invalid-port' } }
+    );
+  }
+});
+
+test('connect passes custom ports through invoke', async () => {
+  const f = fixture();
+  const arrival = f.next('connect');
+  const done = f.connection.connect({
+    host: 'example.test',
+    name: 'Example',
+    pin: '00123456',
+    tcpPort: 19740,
+    udpPort: 19741,
+  });
+  const call = await arrival;
+  assert.equal(call.args.tcpPort, 19740);
+  assert.equal(call.args.udpPort, 19741);
+  call.resolve();
+  assert.equal(await done, true);
 });
 
 test('invalid and unavailable connections never invoke; subscriptions and snapshots are isolated', async () => {

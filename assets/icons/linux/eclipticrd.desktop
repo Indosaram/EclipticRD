@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=EclipticRD
+Comment=Ultra-low latency Remote Desktop
+Exec=eclipticrd
+Icon=eclipticrd
+Terminal=false
+Type=Application
+Categories=Network;RemoteAccess;Utility;
+Keywords=remote;desktop;rdp;parsec;vnc;streaming;
+StartupWMClass=eclipticrd

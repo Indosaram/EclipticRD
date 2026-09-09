@@ -56,3 +56,34 @@ cargo run --manifest-path clients/rust/Cargo.toml -p tauri-shell
 # Headless Client E2E Test
 cargo run --manifest-path clients/rust/Cargo.toml -p erd-app --bin erd-client -- --host <IP> --frames 10
 ```
+
+## REMOTE BUILD & VERIFICATION (Omarchy Linux)
+Linux desktop (Wayland/wlroots, X11, Hyprland) and FFmpeg-dependent components compile natively on the Omarchy remote builder without Mac CPU/memory pressure:
+- **Remote Host**: `indo@100.91.254.71` (Tailscale SSH, Ryzen 5 5600X, Arch Linux).
+- **Remote Workspace**: `/home/indo/projects/EclipticRD-Rewrite` (local NVMe).
+- **FFmpeg 7 Pre-built**: `/home/indo/erd-ffmpeg7` (required by `ffmpeg-next` 8.1.0 to avoid FFmpeg 8 non-exhaustive pattern errors).
+
+### Fast Sync & Remote Check Pattern
+```bash
+# 1) Sync modified sources (excludes target & node_modules)
+rsync -az \
+  --exclude 'target' \
+  --exclude 'target/**' \
+  --exclude 'target-tauri' \
+  --exclude 'node_modules' \
+  --exclude '*.tar.gz' \
+  --exclude '.cache' \
+  --exclude '*.log' \
+  ./ indo@100.91.254.71:~/projects/EclipticRD-Rewrite/
+
+# 2) Execute remote check / test with FFmpeg 7 PKG_CONFIG_PATH
+ssh indo@100.91.254.71 "cd ~/projects/EclipticRD-Rewrite && bash -lc 'PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig:\$PKG_CONFIG_PATH cargo check --manifest-path clients/rust/Cargo.toml'"
+ssh indo@100.91.254.71 "cd ~/projects/EclipticRD-Rewrite && bash -lc 'PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig:\$PKG_CONFIG_PATH cargo test --manifest-path clients/rust/Cargo.toml'"
+```
+
+### Resuming omo directly on Omarchy
+```bash
+ssh indo@100.91.254.71
+cd ~/projects/EclipticRD-Rewrite
+omo --continue
+```

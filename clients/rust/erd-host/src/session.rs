@@ -14,10 +14,11 @@ use erd_net::{
     BOOTSTRAP_IDENTITY, PAIRING_IDENTITY_PREFIX,
 };
 use erd_proto::{
-    AudioFragment, AudioFragmentHeader, BitrateAdjust, Capabilities, ControlMessage, CursorUpdate,
-    FrameChunk, FrameHeader, Handshake, InputEvent, PacketHeader, PacketType, PairingGrant,
-    PairingReject, PairingRejectReason, PairingRequest, WireCodec, MAX_AUDIO_FRAGMENT_BYTES,
-    MAX_VIDEO_CHUNK_BYTES, PROTOCOL_VERSION,
+    AudioFragmentHeader, BitrateAdjust, Capabilities, ClipboardSyncDirection, ClipboardSyncOrigin,
+    ClipboardSyncUpdate, ControlMessage, CursorUpdate, FrameHeader, Handshake, InputEvent,
+    PacketHeader, PacketType, PairingGrant, PairingReject, PairingRejectReason, PairingRequest,
+    StreamConfigurationErrorCode, StreamConfigurationReject, StreamConfigurationResponse,
+    WireCodec, MAX_AUDIO_FRAGMENT_BYTES, MAX_VIDEO_CHUNK_BYTES, PROTOCOL_VERSION,
 };
 use openssl::base64;
 use rand::RngCore;
@@ -52,7 +53,30 @@ pub const DEFAULT_UDP_PORT: u16 = 19_731;
 pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(2);
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 pub const PAIRING_WINDOW: Duration = Duration::from_secs(300);
-pub const TIMESTAMP_STATS_MAGIC: &[u8; 6] = b"ERDTS1";
+/// The shared codec remains available through both legacy host paths.
+///
+/// ```
+/// let stats = erd_host::TimestampStats {
+///     frame_id: 7,
+///     capture_us: 10,
+///     encode_start_us: 20,
+///     encode_end_us: 30,
+///     send_us: 40,
+/// };
+/// let session_stats: erd_host::session::TimestampStats = stats;
+/// let shared_stats: erd_proto::TimestampStats = session_stats;
+/// let encode: fn(erd_host::TimestampStats) -> Vec<u8> =
+///     erd_host::session::TimestampStats::encode;
+/// let decode: fn(&[u8]) -> Option<erd_host::TimestampStats> =
+///     erd_host::session::TimestampStats::decode;
+/// let bytes = encode(shared_stats);
+/// assert_eq!(bytes.len(), 42);
+/// assert_eq!(erd_host::TimestampStats::SIZE, 42);
+/// assert_eq!(&bytes[..6], erd_host::session::TIMESTAMP_STATS_MAGIC);
+/// assert_eq!(erd_host::session::TIMESTAMP_STATS_MAGIC, b"ERDTS1");
+/// assert_eq!(decode(&bytes), Some(stats));
+/// ```
+pub use erd_proto::{TimestampStats, TIMESTAMP_STATS_MAGIC};
 const SWIFT_REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -368,43 +392,6 @@ impl SessionState {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TimestampStats {
-    pub frame_id: u32,
-    pub capture_us: u64,
-    pub encode_start_us: u64,
-    pub encode_end_us: u64,
-    pub send_us: u64,
-}
-
-impl TimestampStats {
-    pub const SIZE: usize = 6 + 4 + 8 * 4;
-
-    pub fn encode(self) -> Vec<u8> {
-        let mut output = Vec::with_capacity(Self::SIZE);
-        output.extend_from_slice(TIMESTAMP_STATS_MAGIC);
-        output.extend_from_slice(&self.frame_id.to_le_bytes());
-        output.extend_from_slice(&self.capture_us.to_le_bytes());
-        output.extend_from_slice(&self.encode_start_us.to_le_bytes());
-        output.extend_from_slice(&self.encode_end_us.to_le_bytes());
-        output.extend_from_slice(&self.send_us.to_le_bytes());
-        output
-    }
-
-    pub fn decode(bytes: &[u8]) -> Option<Self> {
-        if bytes.len() != Self::SIZE || &bytes[..6] != TIMESTAMP_STATS_MAGIC {
-            return None;
-        }
-        Some(Self {
-            frame_id: u32::from_le_bytes(bytes[6..10].try_into().ok()?),
-            capture_us: u64::from_le_bytes(bytes[10..18].try_into().ok()?),
-            encode_start_us: u64::from_le_bytes(bytes[18..26].try_into().ok()?),
-            encode_end_us: u64::from_le_bytes(bytes[26..34].try_into().ok()?),
-            send_us: u64::from_le_bytes(bytes[34..42].try_into().ok()?),
-        })
-    }
-}
-
 #[derive(Debug, Error)]
 pub enum SessionError {
     #[error("I/O failed: {0}")]
@@ -439,6 +426,8 @@ pub enum SessionError {
     MissingSessionSalt,
     #[error("UDP peer is unavailable")]
     UdpPeerUnavailable,
+    #[error("discovery advertisement failed: {0}")]
+    Discovery(#[from] erd_net::discovery::DiscoveryError),
     #[error("media pipeline stopped")]
     MediaStopped,
 }
@@ -1069,6 +1058,7 @@ struct WindowsMediaSource {
     height: u32,
     bitrate: u32,
     codec: VideoCodec,
+    capture_audio: bool,
 }
 
 #[cfg(target_os = "windows")]
@@ -1179,10 +1169,10 @@ impl MediaSource for WindowsMediaSource {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         let mut workers = native_pipeline::Workers::<WindowsRawFrame>::new();
-        let first_packet_emitted = Arc::new(AtomicBool::new(false));
+        let first_keyframe_emitted = Arc::new(AtomicBool::new(false));
         {
             let sender = sender.clone();
-            let first_packet_emitted = Arc::clone(&first_packet_emitted);
+            let first_keyframe_emitted = Arc::clone(&first_keyframe_emitted);
             let display_index = self.display_index;
             let fps = self.fps.max(1);
             workers.spawn("erd-win-capture", true, move |handoff| {
@@ -1280,14 +1270,15 @@ impl MediaSource for WindowsMediaSource {
                                     }));
                                 }
                             }
-                            if last_frame.is_none()
-                                && last_jiggle.elapsed() >= Duration::from_millis(700)
+                            if (!first_keyframe_emitted.load(Ordering::Relaxed)
+                                || last_frame.is_none())
+                                && last_jiggle.elapsed() >= Duration::from_millis(300)
                             {
                                 last_jiggle = started;
                                 jiggle_flip = !jiggle_flip;
                                 cursor_jiggle::nudge(jiggle_flip);
                             }
-                            let keepalive_interval = if first_packet_emitted.load(Ordering::Relaxed)
+                            let keepalive_interval = if first_keyframe_emitted.load(Ordering::Relaxed)
                             {
                                 Duration::from_millis(500)
                             } else {
@@ -1326,6 +1317,28 @@ impl MediaSource for WindowsMediaSource {
                 }
             })?;
         }
+        if self.capture_audio {
+            let sender = sender.clone();
+            workers.spawn("erd-win-audio", false, move |handoff| {
+                let mut capture =
+                    match crate::audio_windows::WindowsAudioCapture::new() {
+                        Ok(capture) => capture,
+                        Err(error) => {
+                            tracing::warn!(%error, "Windows audio loopback unavailable; continuing without audio");
+                            return;
+                        }
+                    };
+                info!("Windows audio loopback started");
+                while !handoff.is_stopped() {
+                    let pcm = capture.poll();
+                    if pcm.is_empty() {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    let _ = sender.send(MediaEvent::Audio(pcm));
+                }
+            })?;
+        }
         let config = EncoderConfig {
             width: self.width,
             height: self.height,
@@ -1343,9 +1356,10 @@ impl MediaSource for WindowsMediaSource {
                         .map_err(|error| format!("mf init: {error}"))
                 },
                 |frame| {
+                    let is_key = frame.is_key_frame;
                     let sent = sender.send(MediaEvent::Video(frame)).is_ok();
-                    if sent {
-                        first_packet_emitted.store(true, Ordering::Relaxed);
+                    if sent && is_key {
+                        first_keyframe_emitted.store(true, Ordering::Relaxed);
                     }
                     sent
                 },
@@ -1682,6 +1696,9 @@ pub struct HostServer {
     pairing_deadline: Option<Instant>,
     bootstrap_identity: Option<PskIdentity>,
     preauth_timeout: Duration,
+    _advertisement: Option<erd_net::discovery::ServiceAdvertiser>,
+    #[cfg(all(test, target_os = "linux"))]
+    prepared_admission_input: Mutex<Option<LinuxInputInjector>>,
 }
 
 #[cfg(test)]
@@ -1703,7 +1720,7 @@ impl HostServer {
             config.frames_per_second
         };
         let media_source = Self::default_media_source(&config, fps)?;
-        Self::bind_with_media(config, media_source)
+        Self::bind_with_media_advertising(config, media_source, true)
     }
 
     #[cfg(target_os = "macos")]
@@ -1765,6 +1782,7 @@ impl HostServer {
             height: config.display.pixel_height,
             bitrate: config.bitrate,
             codec: VideoCodec::H264,
+            capture_audio: config.capture_audio,
         }))
     }
 
@@ -1780,12 +1798,25 @@ impl HostServer {
 
     #[cfg(test)]
     fn bind_synthetic(config: HostConfig, frame_count: u32) -> Result<Self, SessionError> {
-        Self::bind_with_media(config, Arc::new(SyntheticMediaSource { frame_count }))
+        Self::bind_with_media_advertising(
+            config,
+            Arc::new(SyntheticMediaSource { frame_count }),
+            false,
+        )
     }
 
+    #[cfg(test)]
     fn bind_with_media(
         config: HostConfig,
         media_source: Arc<dyn MediaSource>,
+    ) -> Result<Self, SessionError> {
+        Self::bind_with_media_advertising(config, media_source, false)
+    }
+
+    fn bind_with_media_advertising(
+        config: HostConfig,
+        media_source: Arc<dyn MediaSource>,
+        advertise: bool,
     ) -> Result<Self, SessionError> {
         if config
             .bootstrap_pin
@@ -1812,6 +1843,34 @@ impl HostServer {
         if pairing_deadline.is_some() {
             lockout.lock().expect("lockout poisoned").begin_pairing();
         }
+        let bound_tcp = tcp_listener.local_addr()?;
+        let bound_udp = udp_socket.local_addr()?;
+        let _advertisement = if advertise {
+            match erd_net::discovery::ServiceAdvertiser::start(
+                &config.host_name,
+                bound_tcp.port(),
+                bound_udp.port(),
+                bound_tcp,
+            ) {
+                Ok(adv) => {
+                    tracing::info!(
+                        host = %config.host_name,
+                        tcp = %bound_tcp,
+                        udp = %bound_udp,
+                        "Started LAN discovery advertisement"
+                    );
+                    Some(adv)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to start LAN discovery advertisement: {e}. Direct host connectivity remains usable."
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
         Ok(Self {
             config,
             tcp_listener,
@@ -1821,7 +1880,14 @@ impl HostServer {
             pairing_deadline,
             bootstrap_identity,
             preauth_timeout: Duration::from_secs(10),
+            _advertisement,
+            #[cfg(all(test, target_os = "linux"))]
+            prepared_admission_input: Mutex::new(None),
         })
+    }
+
+    pub fn is_advertising(&self) -> bool {
+        self._advertisement.is_some()
     }
 
     pub fn tcp_addr(&self) -> Result<SocketAddr, SessionError> {
@@ -1935,19 +2001,28 @@ impl HostServer {
         );
         #[cfg(target_os = "windows")]
         let mut input = WindowsInputInjector::new(None).map_err(|error| SessionError::Io(error))?;
-        #[cfg(target_os = "linux")]
+        #[cfg(all(target_os = "linux", not(test)))]
         let mut input =
             LinuxInputInjector::new(crate::inject_linux::OutputGeometry::single_output(
                 self.config.display.pixel_width,
                 self.config.display.pixel_height,
             ))
             .map_err(|error| SessionError::Io(error))?;
+        #[cfg(all(target_os = "linux", test))]
+        let mut input = tests::admission_input(self)?;
         let session_origin = Instant::now();
         info!(identity = negotiated_identity, peer = %tcp_peer, "TLS-PSK session established");
         let mut last_pong = Instant::now();
         let mut next_ping = Instant::now() + HEARTBEAT_INTERVAL;
         let mut stop_sender_tx = None;
         let mut sender_thread = None;
+        let mut clipboard_sync = false;
+        #[cfg(target_os = "windows")]
+        let mut clipboard = Some(crate::WindowsClipboard::new());
+        #[cfg(target_os = "linux")]
+        let mut clipboard = crate::clipboard_linux::LinuxClipboard::new().ok();
+        #[cfg(target_os = "linux")]
+        let mut next_clipboard_poll = Instant::now();
 
         let result = (|| -> Result<(), SessionError> {
             // If authenticated and media_receiver is set, we run UDP sending in a dedicated thread to avoid TCP blocking it.
@@ -2056,6 +2131,55 @@ impl HostServer {
                     if now.duration_since(last_pong) >= HEARTBEAT_TIMEOUT {
                         warn!(peer = %tcp_peer, "heartbeat timeout");
                         break;
+                    }
+                    #[cfg(any(target_os = "windows", target_os = "linux"))]
+                    if clipboard_sync {
+                        // Linux reads the pasteboard through a subprocess, so it
+                        // is gated to the protocol's 500 ms cadence; the Win32
+                        // poll is a single syscall and runs every iteration.
+                        #[cfg(target_os = "linux")]
+                        let clipboard_due = now >= next_clipboard_poll;
+                        #[cfg(target_os = "linux")]
+                        if clipboard_due {
+                            next_clipboard_poll =
+                                now + crate::clipboard_linux::DEFAULT_POLL_INTERVAL;
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        let clipboard_due = true;
+                        if clipboard_due {
+                            if let Some(clipboard) = clipboard.as_mut() {
+                                let polled = {
+                                    #[cfg(target_os = "windows")]
+                                    {
+                                        clipboard.poll()
+                                    }
+                                    #[cfg(target_os = "linux")]
+                                    {
+                                        clipboard.poll(now)
+                                    }
+                                };
+                                match polled {
+                                    Ok(Some(text)) => {
+                                        debug!(bytes = text.len(), "clipboard change detected");
+                                        send_tcp_control(
+                                            &mut stream,
+                                            ControlMessage::ClipboardSyncUpdate(
+                                                ClipboardSyncUpdate {
+                                                    request_id: 0,
+                                                    direction: ClipboardSyncDirection::HostToClient,
+                                                    origin: ClipboardSyncOrigin::LocalPasteboard,
+                                                    text,
+                                                },
+                                            ),
+                                        )?;
+                                    }
+                                    Ok(None) => {}
+                                    Err(error) => {
+                                        debug!(%error, "clipboard poll failed");
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -2168,6 +2292,14 @@ impl HostServer {
                                 erd_proto::CodecError::UnsupportedVersion(handshake.version),
                             ));
                         }
+                        clipboard_sync = handshake
+                            .capabilities
+                            .contains(Capabilities::TEXT_CLIPBOARD_SYNC);
+                        debug!(
+                            clipboard_sync,
+                            bits = handshake.capabilities.bits(),
+                            "capabilities negotiated"
+                        );
                         c2h_cipher = Some(DatagramCipher::derive(
                             &record.key,
                             &handshake.session_salt,
@@ -2225,13 +2357,105 @@ impl HostServer {
                                 if target_bitrate > 0 =>
                             {
                                 if let Some(media) = &media_handle {
-                                    media.update_bitrate(target_bitrate as u32)?;
+                                    if let Err(error) = media.update_bitrate(target_bitrate as u32)
+                                    {
+                                        // A rejected quality change must not end the
+                                        // session; the stream stays at its old bitrate.
+                                        warn!(%error, target_bitrate, "bitrate adjust failed");
+                                    }
+                                }
+                            }
+                            ControlMessage::StreamConfigRequest(req) => {
+                                let reject_reason = if req.desired.width == 0
+                                    || req.desired.height == 0
+                                    || req.desired.width > 7680
+                                    || req.desired.height > 4320
+                                {
+                                    Some((
+                                        StreamConfigurationErrorCode::UnsupportedDimensions,
+                                        "unsupported dimensions",
+                                    ))
+                                } else if req.desired.frames_per_second == 0
+                                    || req.desired.frames_per_second > 240
+                                {
+                                    Some((
+                                        StreamConfigurationErrorCode::UnsupportedFps,
+                                        "unsupported fps",
+                                    ))
+                                } else if req.desired.bitrate < 100_000
+                                    || req.desired.bitrate > 300_000_000
+                                {
+                                    Some((
+                                        StreamConfigurationErrorCode::UnsupportedBitrate,
+                                        "unsupported bitrate",
+                                    ))
+                                } else {
+                                    None
+                                };
+                                match reject_reason {
+                                    Some((reason, message)) => {
+                                        send_tcp_control(
+                                            &mut stream,
+                                            ControlMessage::StreamConfigReject(
+                                                StreamConfigurationReject {
+                                                    request_id: req.request_id,
+                                                    reason,
+                                                    message: message.to_owned(),
+                                                },
+                                            ),
+                                        )?;
+                                    }
+                                    None => {
+                                        if let Some(media) = &media_handle {
+                                            let _ = media.update_bitrate(req.desired.bitrate);
+                                        }
+                                        send_tcp_control(
+                                            &mut stream,
+                                            ControlMessage::StreamConfigResponse(
+                                                StreamConfigurationResponse {
+                                                    request_id: req.request_id,
+                                                    active: req.desired,
+                                                },
+                                            ),
+                                        )?;
+                                    }
                                 }
                             }
                             ControlMessage::Ping => {
                                 send_tcp_control(&mut stream, ControlMessage::Pong)?;
                             }
                             ControlMessage::Pong => last_pong = Instant::now(),
+                            ControlMessage::ClipboardSyncUpdate(update) => {
+                                #[cfg(any(target_os = "windows", target_os = "linux"))]
+                                if clipboard_sync
+                                    && matches!(
+                                        update.direction,
+                                        ClipboardSyncDirection::ClientToHost
+                                            | ClipboardSyncDirection::Bidirectional
+                                    )
+                                {
+                                    if let Some(clipboard) = clipboard.as_mut() {
+                                        let applied = {
+                                            #[cfg(target_os = "windows")]
+                                            {
+                                                clipboard.apply_remote_text(&update.text)
+                                            }
+                                            #[cfg(target_os = "linux")]
+                                            {
+                                                clipboard.apply_remote_text(
+                                                    &update.text,
+                                                    Instant::now(),
+                                                )
+                                            }
+                                        };
+                                        if let Err(error) = applied {
+                                            warn!(%error, "failed to apply remote clipboard text");
+                                        }
+                                    }
+                                }
+                                #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+                                let _ = update;
+                            }
                             ControlMessage::Disconnect | ControlMessage::StopStream => break,
                             _ => {}
                         }
@@ -2280,6 +2504,12 @@ impl HostServer {
                     return Ok(());
                 }
                 Ok(_) => continue,
+                Err(error)
+                    if error.kind() == io::ErrorKind::ConnectionReset
+                        || error.raw_os_error() == Some(10054) =>
+                {
+                    continue;
+                }
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(error) => return Err(SessionError::Io(error)),
             }
@@ -2292,6 +2522,8 @@ struct UdpSender {
     sequence: u32,
     frame_id: u32,
     audio_frame_id: u32,
+    payload: Vec<u8>,
+    datagram: Vec<u8>,
 }
 
 impl UdpSender {
@@ -2305,8 +2537,11 @@ impl UdpSender {
     ) -> Result<(), SessionError> {
         self.sequence = self.sequence.wrapping_add(1);
         let header = PacketHeader::new(packet_type, self.sequence, unix_ms_u32(), 0);
-        let datagram = cipher.seal_datagram(&header, payload)?;
-        socket.send_to(&datagram, peer)?;
+        let header = header.to_bytes();
+        self.datagram.clear();
+        self.datagram.extend_from_slice(&header);
+        cipher.seal_into(payload, &header, &mut self.datagram)?;
+        socket.send_to(&self.datagram, peer)?;
         Ok(())
     }
 
@@ -2342,18 +2577,21 @@ impl UdpSender {
             &header.encode()?,
         )?;
         for (index, bytes) in frame.data.chunks(MAX_VIDEO_CHUNK_BYTES).enumerate() {
-            let chunk = FrameChunk {
-                frame_id,
-                chunk_index: index as u16,
-                data: bytes.to_vec(),
-            };
-            self.send_packet(
-                socket,
-                peer,
-                cipher,
-                PacketType::FrameChunk,
-                &chunk.encode()?,
-            )?;
+            // Spread keyframe-sized bursts (100+ datagrams at line rate lose
+            // mid-frame chunks on WiFi/relay paths, stranding assembly until
+            // the next keyframe). Only large frames are paced, so the 60 fps
+            // small-P-frame budget stays untouched.
+            if chunk_count > 16 && index > 0 && index % 8 == 0 {
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let mut payload = std::mem::take(&mut self.payload);
+            payload.clear();
+            payload.extend_from_slice(&frame_id.to_le_bytes());
+            payload.extend_from_slice(&(index as u16).to_le_bytes());
+            payload.extend_from_slice(bytes);
+            let sent = self.send_packet(socket, peer, cipher, PacketType::FrameChunk, &payload);
+            self.payload = payload;
+            sent?;
         }
         let send_at = Instant::now();
         let stats = TimestampStats {
@@ -2393,21 +2631,19 @@ impl UdpSender {
         let fragment_count = u16::try_from(fragment_count)
             .map_err(|_| SessionError::Store("audio frame has too many fragments".into()))?;
         for (index, data) in bytes.chunks(MAX_AUDIO_FRAGMENT_BYTES).enumerate() {
-            let fragment = AudioFragment {
-                header: AudioFragmentHeader {
-                    frame_id: self.audio_frame_id,
-                    fragment_index: index as u16,
-                    fragment_count,
-                },
-                data: data.to_vec(),
-            };
-            self.send_packet(
-                socket,
-                peer,
-                cipher,
-                PacketType::AudioFrame,
-                &fragment.encode()?,
-            )?;
+            let header = AudioFragmentHeader {
+                frame_id: self.audio_frame_id,
+                fragment_index: index as u16,
+                fragment_count,
+            }
+            .to_bytes()?;
+            let mut payload = std::mem::take(&mut self.payload);
+            payload.clear();
+            payload.extend_from_slice(&header);
+            payload.extend_from_slice(data);
+            let sent = self.send_packet(socket, peer, cipher, PacketType::AudioFrame, &payload);
+            self.payload = payload;
+            sent?;
         }
         Ok(())
     }
@@ -2491,6 +2727,148 @@ fn monotonic_us(origin: Instant, value: Instant) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use erd_proto::{AudioFragment, FrameChunk};
+
+    #[test]
+    fn bind_synthetic_does_not_start_mdns_advertisement() {
+        let directory = tempdir().unwrap();
+        let (consent, _) = mpsc::channel();
+        let mut config = test_config(
+            PairingStore::new(directory.path().join("keys.json")), consent,
+        );
+        config.tcp_addr = "127.0.0.1:0".parse().unwrap();
+        config.udp_addr = "127.0.0.1:0".parse().unwrap();
+        let server = HostServer::bind_synthetic(config, 1).unwrap();
+        assert!(!server.is_advertising());
+    }
+
+    #[test]
+    fn bind_with_advertising_fallback_keeps_host_usable() {
+        let directory = tempdir().unwrap();
+        let (consent, _) = mpsc::channel();
+        let mut config = test_config(
+            PairingStore::new(directory.path().join("keys.json")), consent,
+        );
+        config.tcp_addr = "127.0.0.1:0".parse().unwrap();
+        config.udp_addr = "127.0.0.1:0".parse().unwrap();
+        let source = Arc::new(SyntheticMediaSource { frame_count: 1 });
+        let server = HostServer::bind_with_media_advertising(config, source, true).unwrap();
+        assert!(server.tcp_addr().is_ok());
+        assert!(server.udp_addr().is_ok());
+    }
+
+    #[test]
+    fn sender_reuses_video_packet_buffers() {
+        let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let peer = rx.local_addr().unwrap();
+        let mut cipher =
+            DatagramCipher::derive(&[0x31; 32], &[0x72; 16], Direction::HostToClient).unwrap();
+        let mut receiver =
+            DatagramCipher::derive(&[0x31; 32], &[0x72; 16], Direction::HostToClient).unwrap();
+        let mut sender = UdpSender::default();
+        let expected: Vec<_> = (0..MAX_VIDEO_CHUNK_BYTES + 7)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        let now = Instant::now();
+        let frame = || VideoFrame {
+            data: expected.clone(),
+            is_key_frame: true,
+            capture_at: now,
+            encode_started_at: now,
+            encode_completed_at: now,
+        };
+        sender
+            .send_frame(&tx, peer, &mut cipher, 320, 180, frame(), now)
+            .unwrap();
+        let mut packet = [0; 65536];
+        for _ in 0..4 {
+            rx.recv(&mut packet).unwrap();
+        }
+        let input = frame();
+        let (result, count) = crate::test_alloc::allocations(|| {
+            sender.send_frame(&tx, peer, &mut cipher, 320, 180, input, now)
+        });
+        result.unwrap();
+        let mut chunks = std::collections::BTreeMap::new();
+        let mut sequences = std::collections::BTreeSet::new();
+        let mut saw_header = false;
+        let mut saw_timing = false;
+        for _ in 0..4 {
+            let size = rx.recv(&mut packet).unwrap();
+            let (header, payload) = receiver.open_datagram(&packet[..size]).unwrap();
+            sequences.insert(header.sequence);
+            match header.packet_type {
+                PacketType::FrameHeader => {
+                    let frame = FrameHeader::decode(&payload).unwrap();
+                    assert_eq!((frame.frame_id, frame.width, frame.height), (2, 320, 180));
+                    assert_eq!(frame.total_chunks, 2);
+                    assert_eq!(frame.total_size as usize, expected.len());
+                    saw_header = true;
+                }
+                PacketType::FrameChunk => {
+                    let chunk = FrameChunk::decode(&payload).unwrap();
+                    assert_eq!(chunk.frame_id, 2);
+                    chunks.insert(chunk.chunk_index, chunk.data);
+                }
+                PacketType::Ping => {
+                    assert!(!payload.is_empty());
+                    saw_timing = true;
+                }
+                other => panic!("unexpected packet type {other:?}"),
+            }
+        }
+        assert!(saw_header && saw_timing);
+        assert_eq!(sequences.into_iter().collect::<Vec<_>>(), [5, 6, 7, 8]);
+        assert_eq!(chunks.into_values().flatten().collect::<Vec<_>>(), expected);
+        eprintln!("warm two-chunk video sender allocations: {count}");
+        assert!(count <= 2, "fragment and datagram buffers must be reused");
+    }
+
+    #[test]
+    fn sender_reuses_audio_packet_buffers() {
+        let tx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let rx = UdpSocket::bind("127.0.0.1:0").unwrap();
+        rx.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        let peer = rx.local_addr().unwrap();
+        let mut cipher =
+            DatagramCipher::derive(&[0x41; 32], &[0x82; 16], Direction::HostToClient).unwrap();
+        let mut receiver =
+            DatagramCipher::derive(&[0x41; 32], &[0x82; 16], Direction::HostToClient).unwrap();
+        let mut sender = UdpSender::default();
+        let expected = vec![0x29; MAX_AUDIO_FRAGMENT_BYTES + 9];
+        sender
+            .send_audio(&tx, peer, &mut cipher, &expected)
+            .unwrap();
+        let mut packet = [0; 65536];
+        for _ in 0..2 {
+            rx.recv(&mut packet).unwrap();
+        }
+        let (result, count) =
+            crate::test_alloc::allocations(|| sender.send_audio(&tx, peer, &mut cipher, &expected));
+        result.unwrap();
+        let mut chunks = std::collections::BTreeMap::new();
+        for _ in 0..2 {
+            let size = rx.recv(&mut packet).unwrap();
+            let (header, payload) = receiver.open_datagram(&packet[..size]).unwrap();
+            assert_eq!(header.packet_type, PacketType::AudioFrame);
+            let fragment = AudioFragment::decode(&payload).unwrap();
+            assert_eq!(fragment.header.frame_id, 2);
+            assert_eq!(fragment.header.fragment_count, 2);
+            chunks.insert(fragment.header.fragment_index, fragment.data);
+        }
+        assert_eq!(chunks.into_values().flatten().collect::<Vec<_>>(), expected);
+        let sequence = sender.sequence;
+        sender.send_audio(&tx, peer, &mut cipher, &[]).unwrap();
+        assert_eq!(sender.sequence, sequence);
+        assert_eq!(sender.audio_frame_id, 2);
+        eprintln!("warm two-fragment audio sender allocations: {count}");
+        assert_eq!(
+            count, 0,
+            "audio fragment and datagram buffers must be reused"
+        );
+    }
 
     #[test]
     fn bootstrap_kdf_runs_once_per_unchanged_pairing_window() {
@@ -2550,30 +2928,63 @@ mod tests {
         assert_eq!(disabled[0].identity(), "erd-disabled");
     }
 
+    #[cfg(target_os = "linux")]
+    pub(super) fn admission_input(server: &HostServer) -> io::Result<LinuxInputInjector> {
+        if let Some(input) = server.prepared_admission_input.lock().unwrap().take() {
+            return Ok(input);
+        }
+        LinuxInputInjector::new(crate::inject_linux::OutputGeometry::single_output(
+            server.config.display.pixel_width,
+            server.config.display.pixel_height,
+        ))
+    }
+
+    fn prepare_admission_input(_server: &mut HostServer) {
+        // Real uinput device registration contends across parallel tests. It is
+        // a fixture prerequisite, not the TLS/consent wait being measured here.
+        // Keep production construction and the single admission deadline intact.
+        #[cfg(target_os = "linux")]
+        {
+            let started = Instant::now();
+            let input = admission_input(_server).unwrap();
+            *_server.prepared_admission_input.get_mut().unwrap() = Some(input);
+            eprintln!("admission input prerequisite: {:?}", started.elapsed());
+        }
+    }
+
     fn pairing_deadline_scenario(approve: bool) {
+        // Given: costly prerequisites are ready before the admission budget.
+        let setup_started = Instant::now();
         let directory = tempdir().unwrap();
         let (consent, prompts) = mpsc::channel();
         let config = test_config(
             PairingStore::new(directory.path().join("keys.json")),
             consent,
         );
-        let server = HostServer::bind_synthetic(config, 0).unwrap();
+        let mut server = HostServer::bind_synthetic(config, 0).unwrap();
+        prepare_admission_input(&mut server);
+        let client = TlsPskClient::new(PskIdentity::bootstrap("12345678").unwrap()).unwrap();
+        let tls = TlsPskServer::new(server.current_psks().unwrap()).unwrap();
+        eprintln!(
+            "pairing prerequisites (including both KDFs): {:?}",
+            setup_started.elapsed()
+        );
         let addr = server.tcp_addr().unwrap();
+        let (deadline_tx, deadline_rx) = mpsc::channel();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
             let (socket, peer) = server.tcp_listener.accept().unwrap();
-            let tls = TlsPskServer::new(server.current_psks().unwrap()).unwrap();
-            let stream = tls.accept_stream(socket).unwrap();
-            done_tx
-                .send(server.handle_connection(
-                    stream,
-                    peer,
-                    Instant::now() + Duration::from_millis(200),
-                ))
-                .unwrap();
+            let deadline = Instant::now() + Duration::from_millis(200);
+            deadline_tx.send(deadline).unwrap();
+            socket.set_nodelay(true).unwrap();
+            let result = tls
+                .accept_stream_until(socket, deadline)
+                .map_err(SessionError::Tls)
+                .and_then(|stream| server.handle_connection(stream, peer, deadline));
+            done_tx.send((result, Instant::now())).unwrap();
         });
-        let client = TlsPskClient::new(PskIdentity::bootstrap("12345678").unwrap()).unwrap();
         let mut tcp = client.connect(addr).unwrap();
+        let deadline = deadline_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         tcp.ssl_stream()
             .get_ref()
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -2596,12 +3007,22 @@ mod tests {
                     done_rx.try_recv()
                 )
             });
+        // When: actual consent delivery (and, if approved, a wire grant) proves
+        // entry to the state under test. An earlier timeout is never success.
+        eprintln!(
+            "consent entered with {:?} remaining",
+            deadline.checked_duration_since(Instant::now())
+        );
         let retained_prompt = if approve {
             prompt.approve();
             let packet = tcp.read_frame().unwrap();
             assert_eq!(
                 split_packet(&packet).unwrap().0.packet_type,
                 PacketType::PairingGrant
+            );
+            eprintln!(
+                "grant received with {:?} remaining",
+                deadline.checked_duration_since(Instant::now())
             );
             None
         } else {
@@ -2615,13 +3036,21 @@ mod tests {
         drop(tcp);
         drop(retained_prompt);
         worker.join().unwrap();
-        assert!(
-            matches!(
-                completion.unwrap(),
-                Err(SessionError::ConsentTimeout) | Err(SessionError::Io(_))
-            ),
-            "consent or post-grant state must not extend the preauth deadline"
+        // Then: the original absolute deadline ends this specific state while
+        // the client (and pending consent sender) are still open.
+        let (result, ended_at) = completion.expect("preauth deadline must release the host");
+        assert!(ended_at >= deadline, "admission ended before its deadline");
+        eprintln!(
+            "admission completed {:?} after deadline: {result:?}",
+            ended_at.duration_since(deadline)
         );
+        if approve {
+            assert!(
+                matches!(result, Err(SessionError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
+            );
+        } else {
+            assert!(matches!(result, Err(SessionError::ConsentTimeout)));
+        }
     }
 
     #[test]
@@ -2652,6 +3081,7 @@ mod tests {
         config.bootstrap_pin = None;
         let mut server = HostServer::bind_synthetic(config, 0).unwrap();
         server.preauth_timeout = Duration::from_millis(50);
+        prepare_admission_input(&mut server);
         let addr = server.tcp_addr().unwrap();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -2675,7 +3105,9 @@ mod tests {
             ended_before_peer,
             "idle preauth client monopolized host admission"
         );
-        assert!(completion.unwrap().is_err());
+        assert!(
+            matches!(completion.unwrap(), Err(SessionError::Io(error)) if error.kind() == io::ErrorKind::TimedOut)
+        );
     }
 
     #[test]
@@ -2695,6 +3127,7 @@ mod tests {
         config.bootstrap_pin = None;
         let mut server = HostServer::bind_synthetic(config, 0).unwrap();
         server.preauth_timeout = Duration::from_millis(100);
+        prepare_admission_input(&mut server);
         let addr = server.tcp_addr().unwrap();
         let (done_tx, done_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
@@ -3266,6 +3699,246 @@ mod tests {
             .all(|pair| pair[0].frame_id < pair[1].frame_id));
         send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
         consent_thread.join().unwrap();
+        server_thread.join().unwrap();
+    }
+
+    struct BitrateRecordSource {
+        bitrates: Arc<Mutex<Vec<u32>>>,
+    }
+
+    struct BitrateRecordHandle {
+        bitrates: Arc<Mutex<Vec<u32>>>,
+    }
+
+    impl MediaSource for BitrateRecordSource {
+        fn start(
+            &self,
+            _sender: SyncSender<MediaEvent>,
+        ) -> Result<Box<dyn MediaHandle>, SessionError> {
+            Ok(Box::new(BitrateRecordHandle {
+                bitrates: Arc::clone(&self.bitrates),
+            }))
+        }
+    }
+
+    impl MediaHandle for BitrateRecordHandle {
+        fn force_key_frame(&self) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn update_bitrate(&self, bitrate: u32) -> Result<(), SessionError> {
+            self.bitrates.lock().unwrap().push(bitrate);
+            Ok(())
+        }
+        fn stop(&mut self) {}
+    }
+
+    #[test]
+    fn bitrate_adjust_updates_encoder_and_rejects_malformed_limits() {
+        // Given: paired host server with tracked media handle.
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [0x5a; 32];
+        store
+            .save(PairingRecord {
+                id: "bitrate-test".into(),
+                name: "fixture".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, _) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let bitrates = Arc::new(Mutex::new(Vec::new()));
+        let source = Arc::new(BitrateRecordSource {
+            bitrates: Arc::clone(&bitrates),
+        });
+        let server = HostServer::bind_with_media(config, source).unwrap();
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1).unwrap());
+
+        let client =
+            TlsPskClient::new(PskIdentity::pairing("bitrate-test", &key).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        let handshake = Handshake {
+            name: "scripted-client".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::empty(),
+            pairing_id: "bitrate-test".into(),
+            session_salt: [0x33; 16],
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        tcp.write_frame(&packet).unwrap();
+        let ack = tcp.read_frame().unwrap();
+        assert_eq!(
+            decode_tcp_packet(&ack).0.packet_type,
+            PacketType::HandshakeAck
+        );
+
+        // When: client submits malformed non-positive and valid positive bitrates.
+        send_tcp_control(
+            &mut tcp,
+            ControlMessage::BitrateAdjust(BitrateAdjust { target_bitrate: 0 }),
+        )
+        .unwrap();
+        send_tcp_control(
+            &mut tcp,
+            ControlMessage::BitrateAdjust(BitrateAdjust {
+                target_bitrate: -100,
+            }),
+        )
+        .unwrap();
+        send_tcp_control(
+            &mut tcp,
+            ControlMessage::BitrateAdjust(BitrateAdjust {
+                target_bitrate: 4_000_000,
+            }),
+        )
+        .unwrap();
+        send_tcp_control(
+            &mut tcp,
+            ControlMessage::BitrateAdjust(BitrateAdjust {
+                target_bitrate: 15_000_000,
+            }),
+        )
+        .unwrap();
+        send_tcp_control(&mut tcp, ControlMessage::Ping).unwrap();
+        let pong = tcp.read_frame().unwrap();
+        let (header, payload) = decode_tcp_packet(&pong);
+        assert_eq!(header.packet_type, PacketType::Control);
+        assert_eq!(ControlMessage::decode(payload).unwrap(), ControlMessage::Pong);
+
+        // Then: host applied only positive bitrates to media encoder in exact order.
+        assert_eq!(*bitrates.lock().unwrap(), vec![4_000_000, 15_000_000]);
+
+        send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+        server_thread.join().unwrap();
+    }
+
+    #[test]
+    fn stream_configuration_negotiates_valid_and_rejects_invalid_values() {
+        // Given: paired host server with tracked media handle.
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [0x7c; 32];
+        store
+            .save(PairingRecord {
+                id: "config-test".into(),
+                name: "fixture".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, _) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let bitrates = Arc::new(Mutex::new(Vec::new()));
+        let source = Arc::new(BitrateRecordSource {
+            bitrates: Arc::clone(&bitrates),
+        });
+        let server = HostServer::bind_with_media(config, source).unwrap();
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1).unwrap());
+
+        let client =
+            TlsPskClient::new(PskIdentity::pairing("config-test", &key).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        let handshake = Handshake {
+            name: "scripted-client".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::empty(),
+            pairing_id: "config-test".into(),
+            session_salt: [0x88; 16],
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        tcp.write_frame(&packet).unwrap();
+        let ack = tcp.read_frame().unwrap();
+        assert_eq!(
+            decode_tcp_packet(&ack).0.packet_type,
+            PacketType::HandshakeAck
+        );
+
+        // When: client requests invalid dimensions.
+        let invalid_dim = erd_proto::StreamConfigurationRequest {
+            request_id: 101,
+            desired: erd_proto::StreamConfiguration {
+                width: 0,
+                height: 1080,
+                bitrate: 5_000_000,
+                frames_per_second: 60,
+            },
+        };
+        send_tcp_control(&mut tcp, ControlMessage::StreamConfigRequest(invalid_dim)).unwrap();
+        let reject_frame = tcp.read_frame().unwrap();
+        let (header, payload) = decode_tcp_packet(&reject_frame);
+        assert_eq!(header.packet_type, PacketType::Control);
+        match ControlMessage::decode(payload).unwrap() {
+            ControlMessage::StreamConfigReject(rej) => {
+                assert_eq!(rej.request_id, 101);
+                assert_eq!(
+                    rej.reason,
+                    StreamConfigurationErrorCode::UnsupportedDimensions
+                );
+            }
+            other => panic!("expected reject, got {other:?}"),
+        }
+
+        // When: client requests invalid fps.
+        let invalid_fps = erd_proto::StreamConfigurationRequest {
+            request_id: 102,
+            desired: erd_proto::StreamConfiguration {
+                width: 1920,
+                height: 1080,
+                bitrate: 5_000_000,
+                frames_per_second: 0,
+            },
+        };
+        send_tcp_control(&mut tcp, ControlMessage::StreamConfigRequest(invalid_fps)).unwrap();
+        let reject_frame = tcp.read_frame().unwrap();
+        let (_, payload) = decode_tcp_packet(&reject_frame);
+        match ControlMessage::decode(payload).unwrap() {
+            ControlMessage::StreamConfigReject(rej) => {
+                assert_eq!(rej.request_id, 102);
+                assert_eq!(rej.reason, StreamConfigurationErrorCode::UnsupportedFps);
+            }
+            other => panic!("expected reject, got {other:?}"),
+        }
+
+        // When: client requests valid configuration.
+        let valid_req = erd_proto::StreamConfigurationRequest {
+            request_id: 103,
+            desired: erd_proto::StreamConfiguration {
+                width: 2560,
+                height: 1440,
+                bitrate: 8_000_000,
+                frames_per_second: 60,
+            },
+        };
+        send_tcp_control(&mut tcp, ControlMessage::StreamConfigRequest(valid_req)).unwrap();
+        let resp_frame = tcp.read_frame().unwrap();
+        let (_, payload) = decode_tcp_packet(&resp_frame);
+        match ControlMessage::decode(payload).unwrap() {
+            ControlMessage::StreamConfigResponse(resp) => {
+                assert_eq!(resp.request_id, 103);
+                assert_eq!(resp.active, valid_req.desired);
+            }
+            other => panic!("expected response, got {other:?}"),
+        }
+
+        // Then: host updated encoder with negotiated bitrate.
+        assert_eq!(*bitrates.lock().unwrap(), vec![8_000_000]);
+
+        send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
         server_thread.join().unwrap();
     }
 }

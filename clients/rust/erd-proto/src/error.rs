@@ -27,6 +27,12 @@ pub enum CodecError {
     UnknownClipboardDirection(u8),
     #[error("unknown clipboard origin {0}")]
     UnknownClipboardOrigin(u8),
+    #[error("unknown color range {0}")]
+    UnknownColorRange(u8),
+    #[error("unknown color matrix {0}")]
+    UnknownColorMatrix(u8),
+    #[error("unknown chroma subsampling {0}")]
+    UnknownChromaSubsampling(u8),
     #[error("invalid UTF-8 in {field}")]
     InvalidUtf8 { field: &'static str },
     #[error("invalid {field} length {actual}; expected {expected}")]

@@ -1,5 +1,7 @@
 #[cfg(target_os = "linux")]
 pub mod audio_linux;
+#[cfg(target_os = "windows")]
+pub mod audio_windows;
 #[cfg(target_os = "linux")]
 pub mod capture_linux;
 #[cfg(target_os = "macos")]
@@ -24,6 +26,10 @@ pub mod inject_macos;
 pub mod inject_windows;
 pub mod session;
 pub mod windows_logic;
+
+#[cfg(test)]
+#[path = "../../test-support/allocations.rs"]
+mod test_alloc;
 
 #[cfg(target_os = "macos")]
 pub use capture_macos::{CaptureConfig, CaptureEvent, CaptureFrame, ScreenCapture};

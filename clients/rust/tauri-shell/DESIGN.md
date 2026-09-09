@@ -202,8 +202,9 @@ Preserve existing IDs used by rendering, automation, and input routing:
 - Session: `session-overlay` with `data-ui-scope`, `launcher-panel`,
   `session-connecting-modal`, `modal-connecting-text`, `session-host-name`.
 - Actions: `btn-home`, `btn-expand`, `btn-disconnect`, `btn-fullscreen`,
-  `btn-fullscreen-label`; preserve disclosure `aria-controls` and fullscreen
-  `aria-pressed`.
+  `btn-fullscreen-label`, `btn-pointer-lock`, `btn-pointer-lock-label`;
+  preserve disclosure `aria-controls`, fullscreen `aria-pressed`, and
+  pointer lock `aria-pressed`.
 - Metrics: `session-stat-fps`, `session-stat-lat`, `session-stat-p50`,
   `session-stat-p99`, `session-stat-state`, `session-stat-frames`,
   `session-stat-decoded`, `session-stat-audio`. Legacy `lat` ID stays while
@@ -221,6 +222,17 @@ Keep the callable behavior of `refreshHosts`, `connectDirect`,
 `endSessionToHome`, `toggleLauncherPanel`, `toggleSessionFullscreen`.
 Calls remain `list_hosts`, `connect({host,tcpPort:19730,udpPort:19731,pin})`,
 `disconnect`, `stats`, `poll_frame_raw`, and `send_input({event})`.
+Pointer input contract:
+- Buttons: `button 0` -> `LeftMouseDown`/`LeftMouseUp`; `button 1` ->
+  `MiddleMouseDown`/`MiddleMouseUp`; `button 2` -> `RightMouseDown`/`RightMouseUp`.
+  Unsupported extra buttons (`button >= 3`) are rejected and never map to left click.
+- Relative pointer motion: pointer lock utilizes `RelativeMove` carrying
+  accumulated motion deltas in `scroll_dx` (horizontal) and `scroll_dy` (vertical).
+- Pointer lock availability: `btn-pointer-lock` is visible only when real webview
+  `Element.prototype.requestPointerLock` and `document.exitPointerLock` APIs exist;
+  unsupported environments must never simulate a locked state.
+- Teardown & release: window blur, tab hidden state, and disconnect exit pointer
+  lock and emit release events for all currently held mouse buttons and keys.
 No new Rust API is required by this contract. Preserve raw buffer framing,
 render scheduling, coordinate mapping, held-key releases, and native
 fullscreen fallback; presentation work must not rewrite the transport.

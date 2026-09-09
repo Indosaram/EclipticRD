@@ -1,9 +1,12 @@
-//! Ecliptic Remote Desktop version 3 network transport layer.
-
+pub mod discovery;
 pub mod signaling;
 pub mod stun;
 pub mod tls_psk;
 pub mod udp_gcm;
+
+#[cfg(test)]
+#[path = "../../test-support/allocations.rs"]
+mod test_alloc;
 
 pub use signaling::{SessionCandidate, SignalingClient, SignalingError};
 pub use stun::{StunClient, StunError};
