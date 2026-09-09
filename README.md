@@ -1,0 +1,261 @@
+<p align="center">
+  <img src="clients/rust/tauri-shell/icons/icon-1024.png" alt="EclipticRD icon" width="112">
+</p>
+
+<h1 align="center">EclipticRD</h1>
+
+<p align="center">
+  Self-hosted remote desktop in Rust.<br>
+  Native capture and encoding, encrypted streaming, Tauri clients, and an automation API.
+</p>
+
+<p align="center">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/source_license-MIT-blue" alt="Source license: MIT"></a>
+  <img src="https://img.shields.io/badge/status-early_development-orange" alt="Status: early development">
+  <img src="https://img.shields.io/badge/core-Rust-dea584" alt="Core: Rust">
+</p>
+
+EclipticRD connects a host daemon to a desktop or mobile client. The host captures
+the screen, encodes video, and accepts input; the client decodes frames, plays
+audio, and presents a computer library and in-session controls.
+
+The project is under active development. Windows and Hyprland host streams have
+been exercised with the macOS release CLI/API. This is not a blanket claim of
+production readiness, complete platform support, or a guaranteed latency figure.
+
+## What is implemented
+
+- **Desktop client:** Tauri application with discovered and paired computers,
+  search, favorites, direct connection, session controls, and receiver statistics.
+- **Video:** H.264/HEVC pipelines, hardware-backed host paths, bounded frame
+  queues, keyframe recovery, and NV12 presentation through WebGL in the clients.
+- **Audio and input:** host audio capture, client audio controls, keyboard,
+  mouse, relative pointer input, held-input release, and clipboard integration.
+  Availability and verification differ by platform.
+- **Discovery and pairing:** Bonjour/DNS-SD on Apple platforms, mDNS on
+  Linux/Windows, PIN bootstrap, and persisted pairing records.
+- **Transport:** TLS-PSK control connections and authenticated UDP media with
+  replay protection.
+- **Automation:** a headless client, loopback HTTP/WebSocket API, and stdio MCP
+  interface for screen capture and input.
+- **Mobile:** shared Rust lifecycle/input code and an iOS Tauri application with
+  Keychain integration and VideoToolbox decoding. Android application packaging
+  is not implemented.
+
+## Platform status
+
+| Platform | Host | Client / verification |
+| --- | --- | --- |
+| Windows | DXGI capture, Media Foundation H.264 encoding, input and audio paths | Host streaming verified; desktop client code exists, but native Windows GUI QA is not complete |
+| Linux / Hyprland | wlr-screencopy, FFmpeg encoding, uinput, PipeWire/PulseAudio | Host streaming verified; Linux desktop GUI QA is not complete |
+| Other Wayland compositors | Requires `zwlr_screencopy_v1`; verify compositor support | Not covered by the Hyprland test results |
+| KDE/GNOME Wayland and X11 | Capture backends are planned, not implemented | Do not infer host support from uinput support |
+| macOS | ScreenCaptureKit, VideoToolbox, native input paths | Desktop app launch and release CLI/API streaming verified; native GUI session QA remains incomplete |
+| iOS | Not a host | App built and installed on a physical iPhone; full on-device stream/audio/input QA remains incomplete |
+| Android | Not a host | Shared Rust support code only; no runnable Android application yet |
+
+See the [Linux support matrix](docs/linux-desktop-support.md) and
+[iOS implementation report](docs/ios-device-implementation-20260909.md).
+
+## Build from source
+
+The active workspace is **`clients/rust/Cargo.toml`**. The root Cargo workspace
+contains an earlier ScreenCaptureKit experiment, not the desktop application.
+
+```sh
+git clone https://github.com/Indosaram/EclipticRD.git
+cd EclipticRD
+rustup toolchain install stable
+```
+
+### Dependencies
+
+Use a current stable Rust toolchain and the native build tools for your platform.
+The lockfile's transitive dependencies have not been certified against the
+workspace's declared minimum Rust version.
+
+| Component | Requirements |
+| --- | --- |
+| FFmpeg-backed host/client paths | FFmpeg **7.0.2** development headers and shared libraries, plus `pkg-config`; the Rust bindings are `ffmpeg-next` 8.1.0 |
+| Native dependencies | A C/C++ toolchain, Make and Perl for vendored OpenSSL; Clang/libclang where required by bindings |
+| Linux desktop client | Tauri v2's GTK/WebKitGTK 4.1 development dependencies |
+| Linux media/input | ALSA, udev, Wayland, VAAPI/DRM development dependencies; PipeWire or PulseAudio tools for host audio |
+| macOS | Command Line Tools and the appropriate Apple SDK |
+| iOS | Tauri mobile tooling, Xcode, signing configuration, and a physical device |
+
+Do not mix headers and runtime libraries from different FFmpeg versions. Point
+`PKG_CONFIG_PATH` at the selected FFmpeg prefix; make its shared libraries
+available to the loader when running the binaries. Installing a distribution's
+latest FFmpeg package is not necessarily compatible with this lockfile.
+
+For the project's pinned Linux build, see
+[FFmpeg on Omarchy](docs/ffmpeg-omarchy-build.md). **That private build enables
+`--enable-nonfree` and is not a redistributable binary recipe.**
+General Tauri prerequisites are documented
+[upstream](https://v2.tauri.app/start/prerequisites/).
+
+### Desktop and headless binaries
+
+With the native dependencies available:
+
+```sh
+cargo build --manifest-path clients/rust/Cargo.toml --locked --release \
+  -p erd-host -p erd-app
+
+cargo build --manifest-path clients/rust/Cargo.toml --locked --release \
+  -p tauri-shell --features tauri/custom-protocol
+```
+
+This builds binaries, not a fully packaged or notarized installer. If
+`CARGO_TARGET_DIR` is unset, native-target outputs are under
+`clients/rust/target/release/`; Windows executables have an `.exe` suffix.
+
+## Connect to a computer
+
+### 1. Start the host
+
+Run inside the desktop session you intend to share:
+
+```sh
+clients/rust/target/release/erd-host --pin generate
+```
+
+The host prints a bootstrap PIN and prompts for pairing approval. The bootstrap
+window lasts five minutes; established pairings are used for later connections.
+`--auto-approve` is intended for controlled automation, not required for normal use.
+
+- **Linux:** grant the user access to `/dev/uinput`, keep the Wayland session
+  environment available, and optionally select a display with `--output NAME`.
+  See [permission setup](docs/linux-desktop-support.md).
+- **Windows:** elevated applications require a host running with appropriate
+  privileges for input injection.
+- **macOS:** grant Screen Recording and Accessibility permissions.
+
+### 2. Open the desktop client
+
+```sh
+clients/rust/target/release/tauri-shell
+```
+
+Choose a discovered computer or enter its address, supply the host's PIN, and
+approve the request on the host. Discovery uses `_erd._tcp.local.`. Multicast
+filtering, guest Wi-Fi isolation, firewall rules, and subnet boundaries can
+prevent discovery; a directly reachable address can still be used.
+
+| Port | Purpose |
+| --- | --- |
+| TCP 19730 | Authenticated control connection |
+| UDP 19731 | Encrypted media and related packets |
+| UDP 5353 | Local mDNS discovery |
+| TCP 19735 on loopback | Optional local automation API |
+
+### 3. Run a headless smoke test
+
+Replace the address and example PIN with your host's values:
+
+```sh
+clients/rust/target/release/erd-client \
+  --host 192.168.1.50 --pin 12345678 --frames 30 \
+  --stats-json receiver-stats.json
+```
+
+The client exits successfully after decoding the requested frames. For an
+existing pairing, use `--pairing-id` instead of a fresh PIN. Decode timings in
+the statistics are not end-to-end display latency.
+
+Discovery can also be inspected independently:
+
+```sh
+cargo run --manifest-path clients/rust/Cargo.toml --locked \
+  -p erd-net --bin erd-discover -- --timeout-secs 3
+```
+
+## Automation API
+
+Start the headless client with `--agent-server 19735` in addition to its host
+and pairing arguments. The API binds to loopback; it is not a separately
+authenticated public network service.
+
+```sh
+curl http://127.0.0.1:19735/api/v1/health
+curl http://127.0.0.1:19735/api/v1/screen/info
+
+curl -X POST http://127.0.0.1:19735/api/v1/input/action \
+  -H 'Content-Type: application/json' \
+  -d '{"action":"mouse_move","x":0.5,"y":0.5,"normalized":true}'
+
+curl -X POST http://127.0.0.1:19735/api/v1/session/disconnect
+```
+
+`GET /api/v1/screen/screenshot?format=png` returns JSON with dimensions and a
+base64-encoded image, not a raw PNG response. The `--mcp` CLI option exposes the
+stdio MCP interface instead of the HTTP surface.
+
+## Architecture
+
+```text
+Host desktop
+  capture -> encode -> authenticated UDP media
+                              |
+Client                        v
+  reassemble -> bounded frame queue -> decode -> NV12 presentation
+      |
+      +-- input / clipboard / session control over TLS-PSK
+```
+
+| Crate | Responsibility |
+| --- | --- |
+| `erd-proto` | Wire types, framing, handshake and protocol limits |
+| `erd-net` | TCP/UDP transport, replay protection, discovery, signaling and STUN |
+| `erd-decode` | FFmpeg and iOS VideoToolbox decoding |
+| `erd-render` | Presentation and audio infrastructure |
+| `erd-app` | Sessions, pairing, frame queues, statistics, CLI and automation |
+| `erd-host` | Platform capture, encoding, audio and input injection |
+| `erd-mobile` | Shared mobile input, lifecycle and storage abstractions |
+| `tauri-shell` | Desktop application |
+| `ios-shell` | iOS application and native integration |
+
+## Tests and current limits
+
+```sh
+cargo test --manifest-path clients/rust/Cargo.toml --locked \
+  --workspace --exclude erd-ios
+
+bun test clients/rust/tauri-shell/ui/connection-state.test.mjs \
+  clients/rust/tauri-shell/ui/library.test.mjs \
+  clients/rust/tauri-shell/tests/app-icon.test.mjs
+
+node --test clients/rust/tauri-shell/ui/performance.test.mjs \
+  clients/rust/tauri-shell/ui/session-overlay.test.mjs
+
+# Requires Bun 1.4 with WebView support.
+bun test clients/rust/tauri-shell/tests/frontend-page.test.mjs
+```
+
+The September 9 deployment passed the non-iOS Rust workspace tests and 71 desktop
+UI tests. The macOS release CLI decoded 170 Linux frames and 78 Windows frames,
+with screenshot, input and clean-disconnect API checks.
+
+There are still material limits:
+
+- The Linux Tailscale sample reported about 29.5% receiver loss.
+- Windows host-ready-to-encode p95 was about 946 ms in that sample.
+- Direct Windows LAN connectivity was not verified in that run.
+- Native GUI visual checks and actual audio playback were not separately verified.
+- Full physical-iPhone streaming/input/audio QA is unfinished.
+
+See [deployment evidence and rollback details](docs/release-deployment-20260909.md)
+for the exact scope and measurements. A passing CLI smoke test is not a substitute
+for native GUI or latency validation.
+
+## License
+
+EclipticRD's original source is licensed under the [MIT License](LICENSE).
+Dependencies retain their own licenses.
+
+**The currently documented nonfree Linux FFmpeg build must not be redistributed.**
+Publishing this source repository does not approve redistributing existing
+application bundles, codecs, SDKs, or CI artifacts.
+
+Read [third-party notices and binary distribution requirements](THIRD_PARTY_NOTICES.md)
+and the [locked dependency license inventory](docs/dependency-licenses.md).
