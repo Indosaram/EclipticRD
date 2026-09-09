@@ -139,7 +139,8 @@ fn protocol_errors_notifications_and_tool_names() {
             "remote_type_text",
             "remote_release_all",
             "remote_get_screen_info",
-            "remote_take_screenshot"
+            "remote_take_screenshot",
+            "remote_wait_for_screen_change"
         ]
     );
     assert_eq!(backend.sent.load(Ordering::SeqCst), 0);
@@ -232,6 +233,9 @@ impl AgentServerBackend for TestBackend {
             width: 1920,
             height: 1080,
             scale: 1.0,
+            logical_width: Some(1920),
+            logical_height: Some(1080),
+            monitors: vec![],
             connected_host: "test-mcp".to_string(),
         }
     }

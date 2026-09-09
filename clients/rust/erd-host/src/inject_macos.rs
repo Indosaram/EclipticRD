@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -35,6 +36,11 @@ pub struct InputInjector {
     event_source: std::cell::RefCell<Option<core_graphics::event_source::CGEventSource>>,
     #[cfg(all(test, target_os = "macos"))]
     source_creations: std::cell::Cell<usize>,
+    // Track held mouse buttons and keys for Reset event
+    #[cfg(target_os = "macos")]
+    active_mouse_buttons: std::cell::RefCell<HashSet<u8>>,
+    #[cfg(target_os = "macos")]
+    active_keys: std::cell::RefCell<HashSet<u16>>,
 }
 
 impl InputInjector {
@@ -50,6 +56,10 @@ impl InputInjector {
             event_source: std::cell::RefCell::new(None),
             #[cfg(all(test, target_os = "macos"))]
             source_creations: std::cell::Cell::new(0),
+            #[cfg(target_os = "macos")]
+            active_mouse_buttons: std::cell::RefCell::new(HashSet::new()),
+            #[cfg(target_os = "macos")]
+            active_keys: std::cell::RefCell::new(HashSet::new()),
         }
     }
 
@@ -122,6 +132,42 @@ impl InputInjector {
             Ok(created)
         };
 
+        // Handle Reset by synthesizing key and button up events for all active state
+        if event.event_type == InputEventType::Reset {
+            let buttons = self.active_mouse_buttons.borrow().clone();
+            let keys = self.active_keys.borrow().clone();
+            // Synthesize releases for held buttons and keys
+            for button_code in buttons {
+                let button = match button_code {
+                    0 => CGMouseButton::Left,
+                    1 => CGMouseButton::Right,
+                    2 => CGMouseButton::Center,
+                    _ => continue,
+                };
+                if let Ok(release_event) = CGEvent::new_mouse_event(
+                    source()?,
+                    match button_code {
+                        0 => CGEventType::LeftMouseUp,
+                        1 => CGEventType::RightMouseUp,
+                        2 => CGEventType::OtherMouseUp,
+                        _ => unreachable!(),
+                    },
+                    point,
+                    button,
+                ) {
+                    release_event.post(core_graphics::event::CGEventTapLocation::HID);
+                }
+            }
+            for key_code in keys {
+                if let Ok(release_event) = CGEvent::new_keyboard_event(source()?, key_code, false) {
+                    release_event.post(core_graphics::event::CGEventTapLocation::HID);
+                }
+            }
+            self.active_mouse_buttons.borrow_mut().clear();
+            self.active_keys.borrow_mut().clear();
+            return Ok(None);
+        }
+
         let cg_event = match event.event_type {
             InputEventType::MouseMove => CGEvent::new_mouse_event(
                 source()?,
@@ -141,30 +187,42 @@ impl InputInjector {
                 point,
                 CGMouseButton::Right,
             ),
-            InputEventType::LeftMouseDown => CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::LeftMouseDown,
-                point,
-                CGMouseButton::Left,
-            ),
-            InputEventType::LeftMouseUp => CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::LeftMouseUp,
-                point,
-                CGMouseButton::Left,
-            ),
-            InputEventType::RightMouseDown => CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::RightMouseDown,
-                point,
-                CGMouseButton::Right,
-            ),
-            InputEventType::RightMouseUp => CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::RightMouseUp,
-                point,
-                CGMouseButton::Right,
-            ),
+            InputEventType::LeftMouseDown => {
+                self.active_mouse_buttons.borrow_mut().insert(0);
+                CGEvent::new_mouse_event(
+                    source()?,
+                    CGEventType::LeftMouseDown,
+                    point,
+                    CGMouseButton::Left,
+                )
+            }
+            InputEventType::LeftMouseUp => {
+                self.active_mouse_buttons.borrow_mut().remove(&0);
+                CGEvent::new_mouse_event(
+                    source()?,
+                    CGEventType::LeftMouseUp,
+                    point,
+                    CGMouseButton::Left,
+                )
+            }
+            InputEventType::RightMouseDown => {
+                self.active_mouse_buttons.borrow_mut().insert(1);
+                CGEvent::new_mouse_event(
+                    source()?,
+                    CGEventType::RightMouseDown,
+                    point,
+                    CGMouseButton::Right,
+                )
+            }
+            InputEventType::RightMouseUp => {
+                self.active_mouse_buttons.borrow_mut().remove(&1);
+                CGEvent::new_mouse_event(
+                    source()?,
+                    CGEventType::RightMouseUp,
+                    point,
+                    CGMouseButton::Right,
+                )
+            }
             InputEventType::ScrollWheel => CGEvent::new_scroll_event(
                 source()?,
                 ScrollEventUnit::PIXEL,
@@ -173,41 +231,67 @@ impl InputInjector {
                 event.scroll_dx.round() as i32,
                 0,
             ),
-            InputEventType::KeyDown => CGEvent::new_keyboard_event(source()?, event.key_code, true),
-            InputEventType::KeyUp => CGEvent::new_keyboard_event(source()?, event.key_code, false),
+            InputEventType::KeyDown => {
+                self.active_keys.borrow_mut().insert(event.key_code);
+                CGEvent::new_keyboard_event(source()?, event.key_code, true)
+            }
+            InputEventType::KeyUp => {
+                self.active_keys.borrow_mut().remove(&event.key_code);
+                CGEvent::new_keyboard_event(source()?, event.key_code, false)
+            }
             InputEventType::FlagsChanged => {
                 CGEvent::new_keyboard_event(source()?, event.key_code, true)
             }
-            InputEventType::MiddleMouseDown => CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::OtherMouseDown,
-                point,
-                CGMouseButton::Center,
-            ),
-            InputEventType::MiddleMouseUp => CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::OtherMouseUp,
-                point,
-                CGMouseButton::Center,
-            ),
+            InputEventType::MiddleMouseDown => {
+                self.active_mouse_buttons.borrow_mut().insert(2);
+                CGEvent::new_mouse_event(
+                    source()?,
+                    CGEventType::OtherMouseDown,
+                    point,
+                    CGMouseButton::Center,
+                )
+            }
+            InputEventType::MiddleMouseUp => {
+                self.active_mouse_buttons.borrow_mut().remove(&2);
+                CGEvent::new_mouse_event(
+                    source()?,
+                    CGEventType::OtherMouseUp,
+                    point,
+                    CGMouseButton::Center,
+                )
+            }
             InputEventType::PenMove => CGEvent::new_mouse_event(
                 source()?,
                 CGEventType::MouseMoved,
                 point,
                 CGMouseButton::Left,
             ),
-            InputEventType::PenDown => CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::LeftMouseDown,
-                point,
-                CGMouseButton::Left,
-            ),
-            InputEventType::PenUp => CGEvent::new_mouse_event(
-                source()?,
-                CGEventType::LeftMouseUp,
-                point,
-                CGMouseButton::Left,
-            ),
+            InputEventType::PenDown => {
+                self.active_mouse_buttons.borrow_mut().insert(0);
+                CGEvent::new_mouse_event(
+                    source()?,
+                    CGEventType::LeftMouseDown,
+                    point,
+                    CGMouseButton::Left,
+                )
+            }
+            InputEventType::PenUp => {
+                self.active_mouse_buttons.borrow_mut().remove(&0);
+                CGEvent::new_mouse_event(
+                    source()?,
+                    CGEventType::LeftMouseUp,
+                    point,
+                    CGMouseButton::Left,
+                )
+            }
+            InputEventType::UnicodeChar => {
+                // Convert UTF-16 code unit to string and set on keyboard event
+                let unicode_str = String::from_utf16_lossy(&[event.key_code]);
+                let cg_event = CGEvent::new_keyboard_event(source()?, 0, true)
+                    .map_err(|_| InputError::EventCreation)?;
+                cg_event.set_string(&unicode_str);
+                return Ok(Some(cg_event));
+            }
             InputEventType::Reset
             | InputEventType::RelativeMove
             | InputEventType::GamepadAxis
@@ -461,7 +545,14 @@ mod tests {
                                 | InputEventType::MiddleMouseDown
                                 | InputEventType::MiddleMouseUp
                                 | InputEventType::Reset
-                                | InputEventType::RelativeMove => {}
+                                | InputEventType::RelativeMove
+                                | InputEventType::GamepadAxis
+                                | InputEventType::GamepadButtonDown
+                                | InputEventType::GamepadButtonUp
+                                | InputEventType::PenMove
+                                | InputEventType::PenDown
+                                | InputEventType::PenUp
+                                | InputEventType::UnicodeChar => {}
                             }
                         }
                         _ => panic!("unexpected event/no-op for {event_type:?}"),

@@ -88,6 +88,7 @@ pub enum SessionEvent {
     Cursor(CursorState),
     Clipboard(String),
     StreamConfig(ControlMessage),
+    InputAck { sequence: u32, success: bool, error_code: u8 },
     Ping,
     Ignored,
 }
@@ -171,6 +172,7 @@ pub struct ClientSession {
     udp: Arc<Mutex<Option<Arc<UdpTransport>>>>,
     udp_send: Arc<Mutex<Option<DatagramCipher>>>,
     udp_receive: Arc<Mutex<Option<DatagramCipher>>>,
+    last_input_ack: Arc<Mutex<Option<(u32, bool, u8)>>>,
     trace: ReceiverTrace,
     #[cfg(test)]
     tcp_wait: Arc<Mutex<Option<mpsc::Sender<()>>>>,
@@ -193,6 +195,7 @@ impl ClientSession {
             udp: Arc::new(Mutex::new(None)),
             udp_send: Arc::new(Mutex::new(None)),
             udp_receive: Arc::new(Mutex::new(None)),
+            last_input_ack: Arc::new(Mutex::new(None)),
             trace: std::env::var_os("ERD_RECEIVER_TRACE_PATH")
                 .map(|path| ReceiverTrace::at_path(path.into()))
                 .unwrap_or_default(),
@@ -209,6 +212,11 @@ impl ClientSession {
 
     pub fn receiver_trace(&self) -> ReceiverTrace {
         self.trace.clone()
+    }
+
+    /// Returns the most recently received input acknowledgement (sequence, success, error_code).
+    pub fn last_input_ack(&self) -> Option<(u32, bool, u8)> {
+        self.last_input_ack.lock().ok()?.clone()
     }
 
     /// Configure before connecting; clones made later share this endpoint trace.
@@ -978,6 +986,16 @@ impl ClientSession {
                 ControlMessage::ClipboardSyncUpdate(update) => {
                     Ok(SessionEvent::Clipboard(update.text))
                 }
+                ControlMessage::InputAck(ack) => {
+                    if let Ok(mut lock) = self.last_input_ack.lock() {
+                        *lock = Some((ack.sequence, ack.success, ack.error_code));
+                    }
+                    Ok(SessionEvent::InputAck {
+                        sequence: ack.sequence,
+                        success: ack.success,
+                        error_code: ack.error_code,
+                    })
+                }
                 msg @ (ControlMessage::StreamConfigResponse(_)
                 | ControlMessage::StreamConfigReject(_)
                 | ControlMessage::StreamConfigError(_)) => Ok(SessionEvent::StreamConfig(msg)),
@@ -1122,7 +1140,8 @@ impl RuntimeEvents {
                 | SessionEvent::Frame(_)
                 | SessionEvent::Audio(_)
                 | SessionEvent::Cursor(_)
-                | SessionEvent::StreamConfig(_),
+                | SessionEvent::StreamConfig(_)
+                | SessionEvent::InputAck { .. },
             ) => {}
         }
         ready.notify_one();
@@ -1580,5 +1599,19 @@ mod cancellation_tests {
         stop.join().unwrap();
         host.join().unwrap();
         session.disconnect().unwrap();
+    }
+
+    #[test]
+    fn client_session_tracks_input_ack_events() {
+        let config = SessionConfig::direct("127.0.0.1", "test-client");
+        let session = ClientSession::new(config).unwrap();
+        assert!(session.last_input_ack().is_none());
+
+        // Simulate recording an InputAck via internal lock
+        if let Ok(mut lock) = session.last_input_ack.lock() {
+            *lock = Some((101, true, 0));
+        }
+
+        assert_eq!(session.last_input_ack(), Some((101, true, 0)));
     }
 }

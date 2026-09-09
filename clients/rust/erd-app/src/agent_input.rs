@@ -32,11 +32,29 @@ fn default_type_delay_ms() -> u64 {
     20
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MonitorInfo {
+    pub id: u32,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale: f32,
+    pub is_primary: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScreenInfo {
     pub width: u32,
     pub height: u32,
     pub scale: f32,
+    #[serde(default)]
+    pub logical_width: Option<u32>,
+    #[serde(default)]
+    pub logical_height: Option<u32>,
+    #[serde(default)]
+    pub monitors: Vec<MonitorInfo>,
     pub connected_host: String,
 }
 
@@ -111,6 +129,13 @@ pub fn encode_nv12_screenshot(
     Ok(base64::prelude::BASE64_STANDARD.encode(&output))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FrameMetadata {
+    pub frame_id: u64,
+    pub timestamp_ms: u64,
+    pub age_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum MouseButton {
@@ -134,6 +159,14 @@ impl MouseButton {
             Self::Left => InputEventType::LeftMouseUp,
             Self::Right => InputEventType::RightMouseUp,
             Self::Middle => InputEventType::MiddleMouseUp,
+        }
+    }
+
+    pub fn to_drag_event_type(self) -> InputEventType {
+        match self {
+            Self::Left => InputEventType::LeftMouseDragged,
+            Self::Right => InputEventType::RightMouseDragged,
+            Self::Middle => InputEventType::LeftMouseDragged,
         }
     }
 }
@@ -696,13 +729,14 @@ pub fn convert_agent_action_to_events(
             });
 
             let step_count = (*steps).max(1);
+            let drag_event_type = button.to_drag_event_type();
             for i in 1..=step_count {
                 let t = i as f32 / step_count as f32;
                 let cur_x = sx + (ex - sx) * t;
                 let cur_y = sy + (ey - sy) * t;
                 *current_pos = (cur_x, cur_y);
                 events.push(InputEvent {
-                    event_type: InputEventType::LeftMouseDragged,
+                    event_type: drag_event_type,
                     x: cur_x,
                     y: cur_y,
                     key_code: 0,
@@ -840,6 +874,13 @@ pub fn convert_agent_action_to_events(
                             scroll_dx: 0.0,
                             scroll_dy: 0.0,
                         });
+                    }
+                } else {
+                    // Non-ASCII character: convert to UTF-16 code units and emit UnicodeChar events
+                    let mut utf16_buf = [0u16; 2];
+                    let len = ch.encode_utf16(&mut utf16_buf).len();
+                    for code_unit in &utf16_buf[..len] {
+                        events.push(InputEvent::unicode_char(*code_unit, current_pos.0, current_pos.1));
                     }
                 }
             }
@@ -1101,5 +1142,289 @@ mod tests {
             .decode(&jpeg_base64)
             .unwrap();
         assert_eq!(&jpeg_bytes[0..2], &[0xFF, 0xD8]);
+    }
+
+    #[test]
+    fn right_mouse_drag_emits_right_dragged_event() {
+        let mut tracker = InputStateTracker::default();
+        let mut current_pos = (0.0, 0.0);
+
+        let drag = AgentAction::Drag {
+            start_x: 100.0,
+            start_y: 200.0,
+            end_x: 300.0,
+            end_y: 400.0,
+            button: MouseButton::Right,
+            steps: 5,
+            duration_ms: 200,
+            normalized: false,
+        };
+        let events =
+            convert_agent_action_to_events(&drag, &mut tracker, &mut current_pos, 1000.0, 1000.0)
+                .unwrap();
+        assert!(events.len() >= 7); // MouseMove, MouseDown, 5 drags, MouseUp
+        let has_right_dragged = events
+            .iter()
+            .any(|e| e.event_type == InputEventType::RightMouseDragged);
+        assert!(has_right_dragged, "drag with right button must emit RightMouseDragged events");
+        let has_right_down = events
+            .iter()
+            .any(|e| e.event_type == InputEventType::RightMouseDown);
+        assert!(has_right_down);
+        let has_right_up = events
+            .iter()
+            .any(|e| e.event_type == InputEventType::RightMouseUp);
+        assert!(has_right_up);
+    }
+
+    #[test]
+    fn types_multilingual_text_with_unicode_char_events() {
+        let mut tracker = InputStateTracker::default();
+        let mut current_pos = (0.0, 0.0);
+
+        let type_text = AgentAction::TypeText {
+            text: "Hello 세계 🚀".to_string(),
+            delay_ms: 0,
+            paste_mode: false,
+        };
+        let events = convert_agent_action_to_events(
+            &type_text,
+            &mut tracker,
+            &mut current_pos,
+            1000.0,
+            1000.0,
+        )
+        .unwrap();
+
+        // "Hello" = 10 events (5 chars × 2 for KeyDown/KeyUp)
+        // " " (space) = 2 events
+        // "세" (Korean) = 1 or more UnicodeChar events
+        // "계" (Korean) = 1 or more UnicodeChar events
+        // " " (space) = 2 events
+        // "🚀" (emoji, multi-code-unit) = 2 UnicodeChar events (surrogate pair)
+        let has_unicode_events = events
+            .iter()
+            .any(|e| e.event_type == InputEventType::UnicodeChar);
+        assert!(
+            has_unicode_events,
+            "TypeText with non-ASCII characters must generate UnicodeChar events"
+        );
+        // Verify no silent drops: events should include both ASCII and non-ASCII
+        let has_ascii_events = events
+            .iter()
+            .any(|e| e.event_type == InputEventType::KeyDown);
+        assert!(
+            has_ascii_events,
+            "TypeText must synthesize ASCII characters with KeyDown/KeyUp"
+        );
+    }
+
+    #[test]
+    fn left_mouse_drag_emits_left_dragged_event() {
+        let mut tracker = InputStateTracker::default();
+        let mut current_pos = (0.0, 0.0);
+
+        let drag = AgentAction::Drag {
+            start_x: 100.0,
+            start_y: 200.0,
+            end_x: 300.0,
+            end_y: 400.0,
+            button: MouseButton::Left,
+            steps: 5,
+            duration_ms: 200,
+            normalized: false,
+        };
+        let events =
+            convert_agent_action_to_events(&drag, &mut tracker, &mut current_pos, 1000.0, 1000.0)
+                .unwrap();
+        assert!(events.len() >= 7); // MouseMove, MouseDown, 5 drags, MouseUp
+        let has_left_dragged = events
+            .iter()
+            .any(|e| e.event_type == InputEventType::LeftMouseDragged);
+        assert!(has_left_dragged, "drag with left button must emit LeftMouseDragged events");
+        let has_left_down = events
+            .iter()
+            .any(|e| e.event_type == InputEventType::LeftMouseDown);
+        assert!(has_left_down);
+        let has_left_up = events
+            .iter()
+            .any(|e| e.event_type == InputEventType::LeftMouseUp);
+        assert!(has_left_up);
+    }
+
+    #[test]
+    fn serializes_screen_info_with_logical_dimensions_and_monitors() {
+        let monitor1 = MonitorInfo {
+            id: 1,
+            name: "HDMI-1".to_string(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            is_primary: true,
+        };
+        let monitor2 = MonitorInfo {
+            id: 2,
+            name: "DP-1".to_string(),
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            scale: 2.0,
+            is_primary: false,
+        };
+        let screen = ScreenInfo {
+            width: 3840,
+            height: 1440,
+            scale: 1.5,
+            logical_width: Some(2560),
+            logical_height: Some(960),
+            monitors: vec![monitor1, monitor2],
+            connected_host: "test-host".to_string(),
+        };
+        let json = serde_json::to_value(&screen).unwrap();
+        assert_eq!(json["width"], 3840);
+        assert_eq!(json["height"], 1440);
+        assert_eq!(json["scale"], 1.5);
+        assert_eq!(json["logical_width"], 2560);
+        assert_eq!(json["logical_height"], 960);
+        assert_eq!(json["monitors"].as_array().unwrap().len(), 2);
+        assert_eq!(json["monitors"][0]["id"], 1);
+        assert_eq!(json["monitors"][0]["name"], "HDMI-1");
+        assert_eq!(json["monitors"][0]["is_primary"], true);
+        assert_eq!(json["monitors"][1]["scale"], 2.0);
+    }
+
+    #[test]
+    fn deserializes_screen_info_with_backward_compatibility() {
+        // Old JSON without logical_width, logical_height, and monitors
+        let old_json = r#"{
+            "width": 1920,
+            "height": 1080,
+            "scale": 1.0,
+            "connected_host": "legacy-host"
+        }"#;
+        let screen: ScreenInfo = serde_json::from_str(old_json).unwrap();
+        assert_eq!(screen.width, 1920);
+        assert_eq!(screen.height, 1080);
+        assert_eq!(screen.scale, 1.0);
+        assert_eq!(screen.logical_width, None);
+        assert_eq!(screen.logical_height, None);
+        assert_eq!(screen.monitors, Vec::new());
+        assert_eq!(screen.connected_host, "legacy-host");
+    }
+
+    #[test]
+    fn deserializes_screen_info_with_new_fields() {
+        let new_json = r#"{
+            "width": 3840,
+            "height": 1440,
+            "scale": 2.0,
+            "logical_width": 1920,
+            "logical_height": 720,
+            "monitors": [
+                {
+                    "id": 1,
+                    "name": "HDMI",
+                    "x": 0,
+                    "y": 0,
+                    "width": 1920,
+                    "height": 1080,
+                    "scale": 1.0,
+                    "is_primary": true
+                }
+            ],
+            "connected_host": "new-host"
+        }"#;
+        let screen: ScreenInfo = serde_json::from_str(new_json).unwrap();
+        assert_eq!(screen.width, 3840);
+        assert_eq!(screen.logical_width, Some(1920));
+        assert_eq!(screen.logical_height, Some(720));
+        assert_eq!(screen.monitors.len(), 1);
+        assert_eq!(screen.monitors[0].id, 1);
+        assert_eq!(screen.monitors[0].name, "HDMI");
+        assert_eq!(screen.monitors[0].is_primary, true);
+    }
+
+    #[test]
+    fn normalizes_coordinates_from_physical_pixels() {
+        // Physical pixel 960, 270 on 1920x1080 display = normalized 0.5, 0.75
+        let (x, y) = normalize_agent_coordinates(960.0, 270.0, false, 1920.0, 1080.0).unwrap();
+        assert_eq!((x, y), (0.5, 0.75));
+
+        // Left edge: physical 0, 0 = normalized 0.0, 1.0
+        let (x, y) = normalize_agent_coordinates(0.0, 0.0, false, 1920.0, 1080.0).unwrap();
+        assert_eq!((x, y), (0.0, 1.0));
+
+        // Right edge: physical 1920, 1080 = normalized 1.0, 0.0
+        let (x, y) = normalize_agent_coordinates(1920.0, 1080.0, false, 1920.0, 1080.0).unwrap();
+        assert_eq!((x, y), (1.0, 0.0));
+
+        // Out of bounds: physical 2400, 1500 clamped to 1.0, 0.0
+        let (x, y) = normalize_agent_coordinates(2400.0, 1500.0, false, 1920.0, 1080.0).unwrap();
+        assert!((x - 1.0).abs() < 1e-6);
+        assert!((y - 0.0).abs() < 1e-6);
+
+        // Negative physical: clamped to 0.0, 1.0
+        let (x, y) = normalize_agent_coordinates(-100.0, -100.0, false, 1920.0, 1080.0).unwrap();
+        assert_eq!((x, y), (0.0, 1.0));
+    }
+
+    #[test]
+    fn normalizes_already_normalized_coordinates() {
+        // When normalized=true, expects 0.0-1.0 range, applies clamping and Y flip
+        let (x, y) = normalize_agent_coordinates(0.5, 0.25, true, 1920.0, 1080.0).unwrap();
+        assert_eq!((x, y), (0.5, 0.75));
+
+        let (x, y) = normalize_agent_coordinates(0.0, 0.0, true, 1920.0, 1080.0).unwrap();
+        assert_eq!((x, y), (0.0, 1.0));
+
+        let (x, y) = normalize_agent_coordinates(1.0, 1.0, true, 1920.0, 1080.0).unwrap();
+        assert_eq!((x, y), (1.0, 0.0));
+    }
+
+    #[test]
+    fn rejects_non_finite_coordinates() {
+        assert!(normalize_agent_coordinates(f32::NAN, 0.0, true, 1920.0, 1080.0).is_err());
+        assert!(normalize_agent_coordinates(0.0, f32::NAN, true, 1920.0, 1080.0).is_err());
+        assert!(normalize_agent_coordinates(f32::INFINITY, 0.0, false, 1920.0, 1080.0).is_err());
+        assert!(normalize_agent_coordinates(0.0, f32::NEG_INFINITY, false, 1920.0, 1080.0).is_err());
+    }
+
+    #[test]
+    fn monitor_info_equality() {
+        let m1 = MonitorInfo {
+            id: 1,
+            name: "HDMI".to_string(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            is_primary: true,
+        };
+        let m2 = MonitorInfo {
+            id: 1,
+            name: "HDMI".to_string(),
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            is_primary: true,
+        };
+        let m3 = MonitorInfo {
+            id: 2,
+            name: "DP".to_string(),
+            x: 1920,
+            y: 0,
+            width: 2560,
+            height: 1440,
+            scale: 2.0,
+            is_primary: false,
+        };
+        assert_eq!(m1, m2);
+        assert_ne!(m1, m3);
     }
 }

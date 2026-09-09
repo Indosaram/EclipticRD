@@ -15,10 +15,11 @@ use erd_net::{
 };
 use erd_proto::{
     AudioFragmentHeader, BitrateAdjust, Capabilities, ClipboardSyncDirection, ClipboardSyncOrigin,
-    ClipboardSyncUpdate, ControlMessage, CursorUpdate, FrameHeader, Handshake, InputEvent,
-    PacketHeader, PacketType, PairingGrant, PairingReject, PairingRejectReason, PairingRequest,
-    StreamConfigurationErrorCode, StreamConfigurationReject, StreamConfigurationResponse,
-    WireCodec, MAX_AUDIO_FRAGMENT_BYTES, MAX_VIDEO_CHUNK_BYTES, PROTOCOL_VERSION,
+    ClipboardSyncUpdate, ControlMessage, CursorUpdate, FrameHeader, Handshake, InputAckMessage,
+    InputEvent, PacketHeader, PacketType, PairingGrant, PairingReject, PairingRejectReason,
+    PairingRequest, StreamConfigurationErrorCode, StreamConfigurationReject,
+    StreamConfigurationResponse, WireCodec, MAX_AUDIO_FRAGMENT_BYTES, MAX_VIDEO_CHUNK_BYTES,
+    PROTOCOL_VERSION,
 };
 use openssl::base64;
 use rand::RngCore;
@@ -2486,7 +2487,15 @@ impl HostServer {
                             continue;
                         }
                         let event = InputEvent::decode(payload)?;
-                        inject_input(&event, |event| input.inject(event));
+                        let success = inject_input(&event, |event| input.inject(event));
+                        let ack = InputAckMessage {
+                            sequence: header.sequence,
+                            success,
+                            error_code: if success { 0 } else { 1 },
+                        };
+                        if let Err(error) = send_tcp_control(&mut stream, ControlMessage::InputAck(ack)) {
+                            warn!(%error, "failed to send input ACK");
+                        }
                     }
                     PacketType::Control => {
                         if state != SessionState::Authenticated {
@@ -2928,10 +2937,14 @@ impl UdpSender {
 fn inject_input<E: std::fmt::Display>(
     event: &InputEvent,
     inject: impl FnOnce(&InputEvent) -> Result<(), E>,
-) {
+) -> bool {
     tracing::trace!(?event, "Host received input event");
-    if let Err(error) = inject(event) {
-        tracing::warn!(%error, "input event was not injected");
+    match inject(event) {
+        Ok(()) => true,
+        Err(error) => {
+            tracing::warn!(%error, "input event was not injected");
+            false
+        }
     }
 }
 

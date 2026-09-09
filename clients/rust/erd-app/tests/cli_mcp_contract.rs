@@ -126,6 +126,7 @@ async fn owned_session(shutdown: Shutdown) {
         command.arg("--mcp");
     }
     command.args([
+        "--allow-unauthenticated-agent",
         "--agent-server",
         &if matches!(shutdown, Shutdown::OccupiedHttp) {
             occupied.local_addr().unwrap().port().to_string()

@@ -29,6 +29,9 @@ impl AgentServerBackend for MockHostReceiver {
             width: 3840,
             height: 1600,
             scale: 1.0,
+            logical_width: Some(3840),
+            logical_height: Some(1600),
+            monitors: Vec::new(),
             connected_host: "omarchy-linux".to_string(),
         }
     }

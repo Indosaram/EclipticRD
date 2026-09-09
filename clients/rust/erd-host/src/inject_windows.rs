@@ -15,7 +15,7 @@ use erd_proto::{InputEvent, InputEventType, Modifiers};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{
         SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS,
-        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
+        KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOUSEEVENTF_ABSOLUTE, MOUSEEVENTF_HWHEEL,
         MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
         MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_VIRTUALDESK,
         MOUSEEVENTF_WHEEL, MOUSEINPUT, MOUSE_EVENT_FLAGS, VIRTUAL_KEY, VK_LCONTROL, VK_LMENU,
@@ -160,6 +160,14 @@ impl WindowsInputInjector {
                 self.modifiers = event.modifiers;
                 send_inputs(&inputs)
             }
+            InputEventType::UnicodeChar => {
+                // Unicode text input: emit key down and key up with KEYEVENTF_UNICODE
+                let inputs = vec![
+                    unicode_input(event.key_code, false),
+                    unicode_input(event.key_code, true),
+                ];
+                send_inputs(&inputs)
+            }
         }
     }
 }
@@ -252,6 +260,25 @@ fn scroll_units(delta: f32) -> i32 {
     (delta * WHEEL_DELTA)
         .round()
         .clamp(i32::MIN as f32, i32::MAX as f32) as i32
+}
+
+fn unicode_input(code_unit: u16, key_up: bool) -> INPUT {
+    let mut flags = KEYEVENTF_UNICODE;
+    if key_up {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: code_unit,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    }
 }
 
 fn send_inputs(inputs: &[INPUT]) -> io::Result<()> {

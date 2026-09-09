@@ -20,6 +20,9 @@ impl AgentServerBackend for RecordedBackend {
             width: 64,
             height: 64,
             scale: 1.0,
+            logical_width: Some(64),
+            logical_height: Some(64),
+            monitors: vec![],
             connected_host: "fixture".into(),
         }
     }

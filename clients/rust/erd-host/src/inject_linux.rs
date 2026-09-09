@@ -184,6 +184,75 @@ pub fn macos_keycode_to_evdev(key_code: u16) -> Option<KeyCode> {
     })
 }
 
+/// Maps an ASCII character to an evdev KeyCode and whether Shift is required.
+pub fn ascii_to_evdev(ch: char) -> Option<(KeyCode, bool)> {
+    match ch {
+        'a'..='z' => {
+            let key = match ch {
+                'a' => KeyCode::KEY_A, 'b' => KeyCode::KEY_B, 'c' => KeyCode::KEY_C,
+                'd' => KeyCode::KEY_D, 'e' => KeyCode::KEY_E, 'f' => KeyCode::KEY_F,
+                'g' => KeyCode::KEY_G, 'h' => KeyCode::KEY_H, 'i' => KeyCode::KEY_I,
+                'j' => KeyCode::KEY_J, 'k' => KeyCode::KEY_K, 'l' => KeyCode::KEY_L,
+                'm' => KeyCode::KEY_M, 'n' => KeyCode::KEY_N, 'o' => KeyCode::KEY_O,
+                'p' => KeyCode::KEY_P, 'q' => KeyCode::KEY_Q, 'r' => KeyCode::KEY_R,
+                's' => KeyCode::KEY_S, 't' => KeyCode::KEY_T, 'u' => KeyCode::KEY_U,
+                'v' => KeyCode::KEY_V, 'w' => KeyCode::KEY_W, 'x' => KeyCode::KEY_X,
+                'y' => KeyCode::KEY_Y, 'z' => KeyCode::KEY_Z, _ => unreachable!(),
+            };
+            Some((key, false))
+        }
+        'A'..='Z' => {
+            let lower = ch.to_ascii_lowercase();
+            ascii_to_evdev(lower).map(|(k, _)| (k, true))
+        }
+        '0'..='9' => {
+            let key = match ch {
+                '0' => KeyCode::KEY_0, '1' => KeyCode::KEY_1, '2' => KeyCode::KEY_2,
+                '3' => KeyCode::KEY_3, '4' => KeyCode::KEY_4, '5' => KeyCode::KEY_5,
+                '6' => KeyCode::KEY_6, '7' => KeyCode::KEY_7, '8' => KeyCode::KEY_8,
+                '9' => KeyCode::KEY_9, _ => unreachable!(),
+            };
+            Some((key, false))
+        }
+        ' ' => Some((KeyCode::KEY_SPACE, false)),
+        '\n' | '\r' => Some((KeyCode::KEY_ENTER, false)),
+        '\t' => Some((KeyCode::KEY_TAB, false)),
+        '-' => Some((KeyCode::KEY_MINUS, false)),
+        '_' => Some((KeyCode::KEY_MINUS, true)),
+        '=' => Some((KeyCode::KEY_EQUAL, false)),
+        '+' => Some((KeyCode::KEY_EQUAL, true)),
+        '[' => Some((KeyCode::KEY_LEFTBRACE, false)),
+        '{' => Some((KeyCode::KEY_LEFTBRACE, true)),
+        ']' => Some((KeyCode::KEY_RIGHTBRACE, false)),
+        '}' => Some((KeyCode::KEY_RIGHTBRACE, true)),
+        ';' => Some((KeyCode::KEY_SEMICOLON, false)),
+        ':' => Some((KeyCode::KEY_SEMICOLON, true)),
+        '\'' => Some((KeyCode::KEY_APOSTROPHE, false)),
+        '"' => Some((KeyCode::KEY_APOSTROPHE, true)),
+        '`' => Some((KeyCode::KEY_GRAVE, false)),
+        '~' => Some((KeyCode::KEY_GRAVE, true)),
+        '\\' => Some((KeyCode::KEY_BACKSLASH, false)),
+        '|' => Some((KeyCode::KEY_BACKSLASH, true)),
+        ',' => Some((KeyCode::KEY_COMMA, false)),
+        '<' => Some((KeyCode::KEY_COMMA, true)),
+        '.' => Some((KeyCode::KEY_DOT, false)),
+        '>' => Some((KeyCode::KEY_DOT, true)),
+        '/' => Some((KeyCode::KEY_SLASH, false)),
+        '?' => Some((KeyCode::KEY_SLASH, true)),
+        '!' => Some((KeyCode::KEY_1, true)),
+        '@' => Some((KeyCode::KEY_2, true)),
+        '#' => Some((KeyCode::KEY_3, true)),
+        '$' => Some((KeyCode::KEY_4, true)),
+        '%' => Some((KeyCode::KEY_5, true)),
+        '^' => Some((KeyCode::KEY_6, true)),
+        '&' => Some((KeyCode::KEY_7, true)),
+        '*' => Some((KeyCode::KEY_8, true)),
+        '(' => Some((KeyCode::KEY_9, true)),
+        ')' => Some((KeyCode::KEY_0, true)),
+        _ => None,
+    }
+}
+
 fn modifier_key(modifier: Modifiers) -> Option<KeyCode> {
     if modifier == Modifiers::SHIFT {
         Some(KeyCode::KEY_LEFTSHIFT)
@@ -483,6 +552,25 @@ impl LinuxInputInjector {
                     self.keyboard.emit(&events)
                 }
             }
+            InputEventType::UnicodeChar => {
+                if let Some(ch) = char::from_u32(u32::from(event.key_code)) {
+                    if let Some((key, needs_shift)) = ascii_to_evdev(ch) {
+                        let mut events = Vec::with_capacity(4);
+                        if needs_shift {
+                            events.push(InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 1));
+                        }
+                        events.push(InputEvent::new(EventType::KEY.0, key.code(), 1));
+                        events.push(InputEvent::new(EventType::KEY.0, key.code(), 0));
+                        if needs_shift {
+                            events.push(InputEvent::new(EventType::KEY.0, KeyCode::KEY_LEFTSHIFT.code(), 0));
+                        }
+                        self.keyboard.emit(&events)?;
+                    } else {
+                        tracing::debug!(code_unit = event.key_code, "Linux uinput skipping non-ASCII Unicode char");
+                    }
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -556,5 +644,45 @@ mod tests {
         assert_eq!(KeyCode::BTN_MIDDLE.code(), 0x112);
         assert_eq!(KeyCode::BTN_LEFT.code(), 0x110);
         assert_eq!(KeyCode::BTN_RIGHT.code(), 0x111);
+    }
+
+    #[test]
+    fn safely_ignores_unicode_char_events() {
+        let geometry = OutputGeometry::single_output(1920, 1080);
+        let mut injector = LinuxInputInjector::new(geometry).expect("create injector");
+        let event = WireInputEvent {
+            event_type: erd_proto::InputEventType::UnicodeChar,
+            x: 0.5,
+            y: 0.5,
+            key_code: 0x0041, // UTF-16 code unit for 'A'
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+        // Should inject successfully for ASCII
+        assert!(injector.inject(&event).is_ok());
+
+        // Non-ASCII should also safely succeed without error
+        let non_ascii_event = WireInputEvent {
+            event_type: erd_proto::InputEventType::UnicodeChar,
+            x: 0.5,
+            y: 0.5,
+            key_code: 0xd55c, // '한'
+            modifiers: Modifiers::empty(),
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        };
+        assert!(injector.inject(&non_ascii_event).is_ok());
+    }
+
+    #[test]
+    fn ascii_to_evdev_maps_alphanumerics_and_symbols() {
+        assert_eq!(ascii_to_evdev('a'), Some((KeyCode::KEY_A, false)));
+        assert_eq!(ascii_to_evdev('A'), Some((KeyCode::KEY_A, true)));
+        assert_eq!(ascii_to_evdev('1'), Some((KeyCode::KEY_1, false)));
+        assert_eq!(ascii_to_evdev('!'), Some((KeyCode::KEY_1, true)));
+        assert_eq!(ascii_to_evdev(' '), Some((KeyCode::KEY_SPACE, false)));
+        assert_eq!(ascii_to_evdev('\n'), Some((KeyCode::KEY_ENTER, false)));
+        assert_eq!(ascii_to_evdev('한'), None);
     }
 }

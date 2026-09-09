@@ -766,7 +766,7 @@ impl AppState {
                                 let _ = inner.audio_queue.push_pcm_bytes(&pcm);
                             }
                         }
-                        Ok(SessionEvent::Ping) | Ok(SessionEvent::Cursor(_)) | Ok(SessionEvent::Ignored) => {}
+                        Ok(SessionEvent::Ping) | Ok(SessionEvent::Cursor(_)) | Ok(SessionEvent::Ignored) | Ok(SessionEvent::InputAck { .. }) => {}
                         Ok(SessionEvent::Clipboard(_)) | Ok(SessionEvent::StreamConfig(_)) => {}
                         Err(err) => {
                             if stop_media.load(Ordering::Relaxed) {

@@ -1260,7 +1260,8 @@ pub mod commands {
                             | SessionEvent::Frame(_)
                             | SessionEvent::Audio(_)
                             | SessionEvent::Cursor(_)
-                            | SessionEvent::StreamConfig(_),
+                            | SessionEvent::StreamConfig(_)
+                            | SessionEvent::InputAck { .. },
                         )) => {}
                         Ok(Err(error)) => {
                             errors.push(error.to_string());
@@ -1484,6 +1485,18 @@ pub mod commands {
                 width: frame.width,
                 height: frame.height,
                 scale: 1.0,
+                logical_width: Some(frame.width),
+                logical_height: Some(frame.height),
+                monitors: vec![erd_app::agent_input::MonitorInfo {
+                    id: 0,
+                    name: "Primary Display".to_string(),
+                    x: 0,
+                    y: 0,
+                    width: frame.width,
+                    height: frame.height,
+                    scale: 1.0,
+                    is_primary: true,
+                }],
                 connected_host: "remote-host".to_string(),
             })
         } else {
@@ -1491,6 +1504,18 @@ pub mod commands {
                 width: 1920,
                 height: 1080,
                 scale: 1.0,
+                logical_width: Some(1920),
+                logical_height: Some(1080),
+                monitors: vec![erd_app::agent_input::MonitorInfo {
+                    id: 0,
+                    name: "Primary Display".to_string(),
+                    x: 0,
+                    y: 0,
+                    width: 1920,
+                    height: 1080,
+                    scale: 1.0,
+                    is_primary: true,
+                }],
                 connected_host: "unconnected".to_string(),
             })
         }

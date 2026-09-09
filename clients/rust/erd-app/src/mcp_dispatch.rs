@@ -80,6 +80,28 @@ pub fn handle_mcp_message(
             };
             let content = match call.name.as_str() {
                 "remote_get_screen_info" => Ok(json!([{"type":"text","text":json!(backend.get_screen_info()).to_string()}])),
+                "remote_wait_for_screen_change" => {
+                    let last_frame_id = call.arguments.get("last_frame_id")
+                        .and_then(|v| v.as_u64());
+                    let timeout_ms = call.arguments.get("timeout_ms")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(5000)
+                        .min(30000);
+                    
+                    let start = std::time::Instant::now();
+                    let poll_interval = std::time::Duration::from_millis(25);
+                    loop {
+                        if let Some(meta) = backend.get_latest_frame_metadata() {
+                            if last_frame_id.is_none() || meta.frame_id != last_frame_id.unwrap() {
+                                break Ok(json!([{"type":"text","text":format!("Screen changed: frame_id={}, timestamp_ms={}, age_ms={}", meta.frame_id, meta.timestamp_ms, meta.age_ms)}]));
+                            }
+                        }
+                        if start.elapsed() >= std::time::Duration::from_millis(timeout_ms) {
+                            break Ok(json!([{"type":"text","text":format!("Timeout: no change detected (last_frame_id={})", last_frame_id.unwrap_or(0))}]));
+                        }
+                        std::thread::sleep(poll_interval);
+                    }
+                }
                 "remote_take_screenshot" => {
                     let format = match call.arguments.get("format") {
                         None => ScreenshotFormat::Png,

@@ -29,10 +29,11 @@ pub enum InputEventType {
     PenMove = 18,
     PenDown = 19,
     PenUp = 20,
+    UnicodeChar = 21,
 }
 
 impl InputEventType {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::MouseMove,
         Self::LeftMouseDown,
         Self::LeftMouseUp,
@@ -54,6 +55,7 @@ impl InputEventType {
         Self::PenMove,
         Self::PenDown,
         Self::PenUp,
+        Self::UnicodeChar,
     ];
 }
 
@@ -83,6 +85,7 @@ impl TryFrom<u8> for InputEventType {
             18 => Ok(Self::PenMove),
             19 => Ok(Self::PenDown),
             20 => Ok(Self::PenUp),
+            21 => Ok(Self::UnicodeChar),
             unknown => Err(CodecError::UnknownInputEventType(unknown)),
         }
     }
@@ -142,6 +145,18 @@ pub struct InputEvent {
 
 impl InputEvent {
     pub const SIZE: usize = 21;
+
+    pub fn unicode_char(code_unit: u16, x: f32, y: f32) -> Self {
+        Self {
+            event_type: InputEventType::UnicodeChar,
+            key_code: code_unit,
+            modifiers: Modifiers::empty(),
+            x,
+            y,
+            scroll_dx: 0.0,
+            scroll_dy: 0.0,
+        }
+    }
 
     pub fn pen_move(x: f32, y: f32, pressure: f32, tilt_x: f32, tilt_y: f32) -> Self {
         Self {
@@ -266,4 +281,23 @@ pub fn map_to_host_pixels(
     host_height: f32,
 ) -> (f32, f32) {
     (normalized_x * host_width, normalized_y * host_height)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encodes_and_decodes_unicode_char_event() {
+        let event = InputEvent::unicode_char(0x0041, 0.5, 0.75);
+        assert_eq!(event.event_type, InputEventType::UnicodeChar);
+        assert_eq!(event.key_code, 0x0041);
+        assert_eq!(event.x, 0.5);
+        assert_eq!(event.y, 0.75);
+        assert_eq!(event.modifiers, Modifiers::empty());
+
+        let encoded = event.encode().unwrap();
+        let decoded = InputEvent::decode(&encoded).unwrap();
+        assert_eq!(decoded, event);
+    }
 }

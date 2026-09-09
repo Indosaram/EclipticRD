@@ -15,8 +15,8 @@ use tokio::{
 };
 
 use crate::agent_input::{
-    convert_agent_action_to_events, encode_nv12_screenshot, AgentAction, InputStateTracker,
-    ScreenInfo, ScreenshotFormat,
+    convert_agent_action_to_events, encode_nv12_screenshot, AgentAction, FrameMetadata,
+    InputStateTracker, ScreenInfo, ScreenshotFormat,
 };
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -69,6 +69,9 @@ pub trait AgentServerBackend: Send + Sync + 'static {
     fn send_input_event(&self, event: erd_proto::InputEvent) -> Result<(), String>;
     fn get_screen_info(&self) -> ScreenInfo;
     fn get_latest_frame_nv12(&self) -> Option<(u32, u32, Arc<Vec<u8>>)>;
+    fn get_latest_frame_metadata(&self) -> Option<FrameMetadata> {
+        None
+    }
 
     /// Whether the backend owns a remote session it can gracefully stop via
     /// [`AgentServerBackend::try_disconnect_session`]. Generic screenshot/input
@@ -95,6 +98,7 @@ pub struct AgentServer {
     tracker: Arc<Mutex<InputStateTracker>>,
     current_pos: Arc<Mutex<(f32, f32)>>,
     done_tx: Arc<tokio::sync::watch::Sender<bool>>,
+    auth_token: Option<String>,
     #[cfg(test)]
     accepted: Option<tokio::sync::mpsc::Sender<()>>,
 }
@@ -108,9 +112,19 @@ impl AgentServer {
             tracker: Arc::new(Mutex::new(InputStateTracker::default())),
             current_pos: Arc::new(Mutex::new((0.5, 0.5))),
             done_tx: Arc::new(tokio::sync::watch::channel(false).0),
+            auth_token: None,
             #[cfg(test)]
             accepted: None,
         }
+    }
+
+    pub fn with_auth_token(mut self, token: impl Into<String>) -> Self {
+        self.auth_token = Some(token.into());
+        self
+    }
+
+    pub fn set_auth_token(&mut self, token: impl Into<String>) {
+        self.auth_token = Some(token.into());
     }
 
     pub async fn bind(
@@ -127,6 +141,7 @@ impl AgentServer {
                 tracker: Arc::new(Mutex::new(InputStateTracker::default())),
                 current_pos: Arc::new(Mutex::new((0.5, 0.5))),
                 done_tx: Arc::new(tokio::sync::watch::channel(false).0),
+                auth_token: None,
                 #[cfg(test)]
                 accepted: None,
             },
@@ -151,6 +166,32 @@ impl AgentServer {
         let work = Arc::new(ConnectionWork::new());
         let mut connections = JoinSet::new();
 
+        // Spawn watchdog timer task (500ms interval)
+        let watchdog_tracker = tracker.clone();
+        let watchdog_backend = backend.clone();
+        let watchdog_pos = current_pos.clone();
+        connections.spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            loop {
+                interval.tick().await;
+                let pos = *watchdog_pos.lock().await;
+                if let Ok(mut t) = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    watchdog_tracker.lock(),
+                )
+                .await
+                {
+                    if let Some(events) = t.check_timeout(pos.0, pos.1) {
+                        if !events.is_empty() {
+                            for event in events {
+                                let _ = watchdog_backend.send_input_event(event);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
         loop {
             if *done_rx.borrow() {
                 session_disconnect_requested = true;
@@ -171,7 +212,7 @@ impl AgentServer {
                         Ok((stream, _peer_addr)) => {
                             if connections.len() < MAX_CONNECTIONS {
                                 connections.spawn(handle_connection(stream, backend.clone(),
-                                    tracker.clone(), current_pos.clone(), done_tx.clone(), work.clone()));
+                                    tracker.clone(), current_pos.clone(), done_tx.clone(), work.clone(), self.auth_token.clone()));
                             } else {
                                 // No rejection tasks or queue: silent peers cannot grow work.
                                 drop(stream);
@@ -219,6 +260,32 @@ fn log_connection_result(joined: Option<Result<std::io::Result<()>, tokio::task:
             tracing::error!(%error, "Agent HTTP task failed")
         }
         Some(Ok(Ok(()))) | Some(Err(_)) | None => {}
+    }
+}
+
+fn check_auth_header(auth_token: Option<&str>, headers_text: &str) -> bool {
+    if let Some(expected) = auth_token {
+        for line in headers_text.lines().skip(1) {
+            let (name, value) = match line.split_once(':') {
+                Some((n, v)) => (n, v.trim()),
+                None => continue,
+            };
+            if name.eq_ignore_ascii_case("Authorization") {
+                if let Some(token) = value.strip_prefix("Bearer ") {
+                    if token == expected {
+                        return true;
+                    }
+                }
+            }
+            if name.eq_ignore_ascii_case("X-ERD-Token") {
+                if value == expected {
+                    return true;
+                }
+            }
+        }
+        false
+    } else {
+        true
     }
 }
 
@@ -316,6 +383,7 @@ async fn handle_connection(
     current_pos: Arc<Mutex<(f32, f32)>>,
     done_tx: Arc<tokio::sync::watch::Sender<bool>>,
     work: Arc<ConnectionWork>,
+    auth_token: Option<String>,
 ) -> std::io::Result<()> {
     let buf = match read_request(&mut stream).await {
         Ok(buf) => buf,
@@ -363,6 +431,11 @@ async fn handle_connection(
     let header_end = request_str
         .find("\r\n\r\n")
         .or_else(|| request_str.find("\n\n"));
+    
+    let headers_text = match header_end {
+        Some(idx) => &request_str[..idx],
+        None => &request_str,
+    };
     let body = match header_end {
         Some(idx) => {
             let offset = if request_str[idx..].starts_with("\r\n\r\n") {
@@ -374,6 +447,21 @@ async fn handle_connection(
         }
         None => &[],
     };
+
+    macro_rules! require_auth {
+        () => {
+            if !check_auth_header(auth_token.as_deref(), headers_text) {
+                return send_response(
+                    &mut stream,
+                    401,
+                    "Unauthorized",
+                    "application/json",
+                    b"{\"ok\":false,\"error\":\"unauthorized\"}",
+                )
+                .await;
+            }
+        };
+    }
 
     match (method, path) {
         ("GET", "/api/v1/health") | ("GET", "/health") => {
@@ -387,11 +475,13 @@ async fn handle_connection(
             .await
         }
         ("GET", "/api/v1/screen/info") => {
+            require_auth!();
             let info = work.blocking(move || backend.get_screen_info()).await?;
             let json = serde_json::to_vec(&info)?;
             send_response(&mut stream, 200, "OK", "application/json", &json).await
         }
         ("GET", path) if path.starts_with("/api/v1/screen/screenshot") => {
+            require_auth!();
             let permit = match work.screenshots.clone().try_acquire_owned() {
                 Ok(permit) => permit,
                 Err(_) => {
@@ -417,14 +507,18 @@ async fn handle_connection(
                     match backend.get_latest_frame_nv12() {
                     Some((width, height, nv12_buf)) => {
                         match encode_nv12_screenshot(width, height, &nv12_buf, format) {
-                            Ok(base64_data) => (
-                                200,
-                                "OK",
-                                serde_json::json!({
+                            Ok(base64_data) => {
+                                let mut json_resp = serde_json::json!({
                                     "ok": true, "format": format, "width": width,
                                     "height": height, "base64": base64_data,
-                                }),
-                            ),
+                                });
+                                if let Some(meta) = backend.get_latest_frame_metadata() {
+                                    json_resp["frame_id"] = serde_json::json!(meta.frame_id);
+                                    json_resp["timestamp_ms"] = serde_json::json!(meta.timestamp_ms);
+                                    json_resp["age_ms"] = serde_json::json!(meta.age_ms);
+                                }
+                                (200, "OK", json_resp)
+                            },
                             Err(err) => (
                                 500,
                                 "Internal Error",
@@ -442,7 +536,63 @@ async fn handle_connection(
             let json = serde_json::to_vec(&resp)?;
             send_response(&mut stream, status, text, "application/json", &json).await
         }
+        ("GET", path) if path.starts_with("/api/v1/screen/wait_change") => {
+            require_auth!();
+            // Parse query parameters
+            let query = path.split('?').nth(1).unwrap_or("");
+            let mut last_frame_id: Option<u64> = None;
+            let mut timeout_ms: u64 = 5000;
+            
+            for param in query.split('&') {
+                if let Some((key, value)) = param.split_once('=') {
+                    match key {
+                        "last_frame_id" => {
+                            if let Ok(id) = value.parse::<u64>() {
+                                last_frame_id = Some(id);
+                            }
+                        }
+                        "timeout_ms" => {
+                            if let Ok(ms) = value.parse::<u64>() {
+                                timeout_ms = ms.min(30000);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            
+            let start = tokio::time::Instant::now();
+            let poll_interval = Duration::from_millis(25);
+            let timeout_dur = Duration::from_millis(timeout_ms);
+            let resp = loop {
+                if let Some(meta) = backend.get_latest_frame_metadata() {
+                    // Check if frame has changed
+                    if last_frame_id.is_none() || meta.frame_id != last_frame_id.unwrap() {
+                        break serde_json::json!({
+                            "ok": true,
+                            "changed": true,
+                            "frame_id": meta.frame_id,
+                            "timestamp_ms": meta.timestamp_ms,
+                            "age_ms": meta.age_ms,
+                        });
+                    }
+                }
+                
+                if start.elapsed() >= timeout_dur {
+                    break serde_json::json!({
+                        "ok": true,
+                        "changed": false,
+                        "frame_id": last_frame_id.unwrap_or(0),
+                    });
+                }
+                
+                tokio::time::sleep(poll_interval).await;
+            };
+            let json = serde_json::to_vec(&resp)?;
+            send_response(&mut stream, 200, "OK", "application/json", &json).await
+        }
         ("POST", "/api/v1/input/action") | ("POST", "/api/v1/input/batch") => {
+            require_auth!();
             if work.input_closed.load(Ordering::SeqCst) {
                 return reject_input(&mut stream).await;
             }
@@ -524,6 +674,7 @@ async fn handle_connection(
             send_response(&mut stream, status, text, "application/json", &json).await
         }
         ("POST", "/api/v1/input/reset") => {
+            require_auth!();
             if work.input_closed.load(Ordering::SeqCst) {
                 return reject_input(&mut stream).await;
             }
@@ -550,6 +701,7 @@ async fn handle_connection(
             send_response(&mut stream, status, text, "application/json", &json).await
         }
         ("POST", "/api/v1/session/disconnect") => {
+            require_auth!();
             handle_session_disconnect(&mut stream, backend, tracker, current_pos, done_tx, work)
                 .await
         }
@@ -652,14 +804,16 @@ async fn handle_session_disconnect(
     });
     if let Some(error) = error {
         resp["error"] = error.into();
-        return send_response(
+        let response = send_response(
             stream,
             500,
             "Internal Error",
             "application/json",
             &serde_json::to_vec(&resp)?,
         )
-        .await;
+        .await?;
+        done_tx.send_replace(true);
+        return Ok(response);
     }
     // Teardown follows the bounded response attempt even if the client vanished.
     // No new input can appear between release, response, and backend stop.
@@ -683,7 +837,7 @@ async fn send_response(
     body: &[u8],
 ) -> std::io::Result<()> {
     let response_header = format!(
-        "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
+        "HTTP/1.1 {status_code} {status_text}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         body.len()
     );
     tokio::time::timeout(REQUEST_TIMEOUT, async {
@@ -1070,6 +1224,9 @@ mod tests {
                 width: 1920,
                 height: 1080,
                 scale: 1.0,
+                logical_width: Some(1920),
+                logical_height: Some(1080),
+                monitors: vec![],
                 connected_host: "test-host".to_string(),
             }
         }
@@ -1548,6 +1705,193 @@ mod tests {
         assert_eq!(backend.events.lock().unwrap().len(), 1);
     }
 
+    #[tokio::test]
+    async fn unauthorized_request_returns_401() {
+        let backend = Arc::new(MockBackend {
+            sent_count: AtomicUsize::new(0),
+        });
+        let (mut server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend.clone())
+            .await
+            .unwrap();
+        server.set_auth_token("secret-token");
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(server.run(rx));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/v1/screen/info HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut resp_bytes),
+        )
+        .await
+        .expect("read timeout")
+        .unwrap();
+        let delimiter = b"\r\n\r\n";
+        let header_end = resp_bytes
+            .windows(delimiter.len())
+            .position(|w| w == delimiter)
+            .expect("header delimiter");
+        let header_str = std::str::from_utf8(&resp_bytes[..header_end]).unwrap();
+        assert!(header_str.starts_with("HTTP/1.1 401 Unauthorized"));
+        let body_bytes = &resp_bytes[header_end + delimiter.len()..];
+        let body_val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap();
+        assert_eq!(body_val["ok"], false);
+        assert_eq!(body_val["error"], "unauthorized");
+        shutdown.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn authorized_request_with_bearer_token_returns_200() {
+        let backend = Arc::new(MockBackend {
+            sent_count: AtomicUsize::new(0),
+        });
+        let (mut server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend.clone())
+            .await
+            .unwrap();
+        server.set_auth_token("secret-token");
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(server.run(rx));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/v1/screen/info HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer secret-token\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut resp_bytes),
+        )
+        .await
+        .expect("read timeout")
+        .unwrap();
+        let delimiter = b"\r\n\r\n";
+        let header_end = resp_bytes
+            .windows(delimiter.len())
+            .position(|w| w == delimiter)
+            .expect("header delimiter");
+        let header_str = std::str::from_utf8(&resp_bytes[..header_end]).unwrap();
+        assert!(header_str.starts_with("HTTP/1.1 200 OK"), "expected 200 OK, got: {}", header_str);
+        let body_bytes = &resp_bytes[header_end + delimiter.len()..];
+        let body_val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap();
+        assert_eq!(body_val["width"], 1920);
+        shutdown.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn authorized_request_with_x_erd_token_returns_200() {
+        let backend = Arc::new(MockBackend {
+            sent_count: AtomicUsize::new(0),
+        });
+        let (mut server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend.clone())
+            .await
+            .unwrap();
+        server.set_auth_token("secret-token");
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(server.run(rx));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/v1/screen/info HTTP/1.1\r\nHost: localhost\r\nX-ERD-Token: secret-token\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut resp_bytes),
+        )
+        .await
+        .expect("read timeout")
+        .unwrap();
+        let delimiter = b"\r\n\r\n";
+        let header_end = resp_bytes
+            .windows(delimiter.len())
+            .position(|w| w == delimiter)
+            .expect("header delimiter");
+        let header_str = std::str::from_utf8(&resp_bytes[..header_end]).unwrap();
+        assert!(header_str.starts_with("HTTP/1.1 200 OK"), "expected 200 OK, got: {}", header_str);
+        let body_bytes = &resp_bytes[header_end + delimiter.len()..];
+        let body_val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap();
+        assert_eq!(body_val["width"], 1920);
+        shutdown.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn health_endpoint_requires_no_auth() {
+        let backend = Arc::new(MockBackend {
+            sent_count: AtomicUsize::new(0),
+        });
+        let (mut server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend.clone())
+            .await
+            .unwrap();
+        server.set_auth_token("secret-token");
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(server.run(rx));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut resp_bytes),
+        )
+        .await
+        .expect("read timeout")
+        .unwrap();
+        let delimiter = b"\r\n\r\n";
+        let header_end = resp_bytes
+            .windows(delimiter.len())
+            .position(|w| w == delimiter)
+            .expect("header delimiter");
+        let header_str = std::str::from_utf8(&resp_bytes[..header_end]).unwrap();
+        assert!(header_str.starts_with("HTTP/1.1 200 OK"));
+        let body_bytes = &resp_bytes[header_end + delimiter.len()..];
+        let body_val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap();
+        assert_eq!(body_val["status"], "ok");
+        shutdown.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn response_headers_omit_access_control_allow_origin_wildcard() {
+        let backend = Arc::new(MockBackend {
+            sent_count: AtomicUsize::new(0),
+        });
+        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend.clone())
+            .await
+            .unwrap();
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(server.run(rx));
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/v1/health HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            stream.read_to_end(&mut resp_bytes),
+        )
+        .await
+        .expect("read timeout")
+        .unwrap();
+        let delimiter = b"\r\n\r\n";
+        let header_end = resp_bytes
+            .windows(delimiter.len())
+            .position(|w| w == delimiter)
+            .expect("header delimiter");
+        let header_str = std::str::from_utf8(&resp_bytes[..header_end]).unwrap();
+        assert!(!header_str.contains("Access-Control-Allow-Origin"), "CORS wildcard must not be present");
+        shutdown.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
     #[tokio::test(start_paused = true)]
     async fn idle_header_and_body_reader_deadlines() {
         use std::{future::Future, task::Poll, time::Duration};
@@ -1675,5 +2019,221 @@ mod tests {
             .unwrap(),
             0
         );
+    }
+
+    struct MetadataBackend {
+        sent_count: AtomicUsize,
+        frame_metadata: std::sync::Mutex<Option<FrameMetadata>>,
+    }
+
+    impl AgentServerBackend for MetadataBackend {
+        fn send_input_event(&self, _event: erd_proto::InputEvent) -> Result<(), String> {
+            self.sent_count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn get_screen_info(&self) -> ScreenInfo {
+            MockBackend {
+                sent_count: AtomicUsize::new(0),
+            }
+            .get_screen_info()
+        }
+
+        fn get_latest_frame_nv12(&self) -> Option<(u32, u32, Arc<Vec<u8>>)> {
+            let w = 64u32;
+            let h = 64u32;
+            let len = (w * h * 3 / 2) as usize;
+            Some((w, h, Arc::new(vec![128u8; len])))
+        }
+
+        fn get_latest_frame_metadata(&self) -> Option<FrameMetadata> {
+            self.frame_metadata.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn screenshot_response_includes_frame_metadata_when_present() {
+        let backend = Arc::new(MetadataBackend {
+            sent_count: AtomicUsize::new(0),
+            frame_metadata: std::sync::Mutex::new(Some(FrameMetadata {
+                frame_id: 42,
+                timestamp_ms: 1000,
+                age_ms: 50,
+            })),
+        });
+        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend).await.unwrap();
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(server.run(rx));
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/v1/screen/screenshot HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.read_to_end(&mut resp_bytes),
+        )
+        .await
+        .expect("screenshot read timeout")
+        .unwrap();
+
+        let header_end = resp_bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap();
+        let body_bytes = &resp_bytes[header_end + 4..];
+        let body_val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap();
+        assert_eq!(body_val["frame_id"], 42);
+        assert_eq!(body_val["timestamp_ms"], 1000);
+        assert_eq!(body_val["age_ms"], 50);
+
+        shutdown.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_change_returns_immediately_when_frame_changed() {
+        let backend = Arc::new(MetadataBackend {
+            sent_count: AtomicUsize::new(0),
+            frame_metadata: std::sync::Mutex::new(Some(FrameMetadata {
+                frame_id: 100,
+                timestamp_ms: 2000,
+                age_ms: 10,
+            })),
+        });
+        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend).await.unwrap();
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(server.run(rx));
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/v1/screen/wait_change?last_frame_id=99&timeout_ms=5000 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.read_to_end(&mut resp_bytes),
+        )
+        .await
+        .expect("wait_change read timeout")
+        .unwrap();
+
+        let header_end = resp_bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap();
+        let body_bytes = &resp_bytes[header_end + 4..];
+        let body_val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap();
+        assert_eq!(body_val["ok"], true);
+        assert_eq!(body_val["changed"], true);
+        assert_eq!(body_val["frame_id"], 100);
+
+        shutdown.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_change_returns_timeout_when_no_change() {
+        let backend = Arc::new(MetadataBackend {
+            sent_count: AtomicUsize::new(0),
+            frame_metadata: std::sync::Mutex::new(Some(FrameMetadata {
+                frame_id: 50,
+                timestamp_ms: 1500,
+                age_ms: 20,
+            })),
+        });
+        let (server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend).await.unwrap();
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(server.run(rx));
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/v1/screen/wait_change?last_frame_id=50&timeout_ms=100 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.read_to_end(&mut resp_bytes),
+        )
+        .await
+        .expect("wait_change read timeout")
+        .unwrap();
+
+        let header_end = resp_bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .unwrap();
+        let body_bytes = &resp_bytes[header_end + 4..];
+        let body_val: serde_json::Value = serde_json::from_slice(body_bytes).unwrap();
+        assert_eq!(body_val["ok"], true);
+        assert_eq!(body_val["changed"], false);
+        assert_eq!(body_val["frame_id"], 50);
+
+        shutdown.send(true).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_change_requires_authentication() {
+        let backend = Arc::new(MetadataBackend {
+            sent_count: AtomicUsize::new(0),
+            frame_metadata: std::sync::Mutex::new(Some(FrameMetadata {
+                frame_id: 60,
+                timestamp_ms: 1800,
+                age_ms: 30,
+            })),
+        });
+        let (mut server, addr) = AgentServer::bind("127.0.0.1:0".parse().unwrap(), backend).await.unwrap();
+        server.set_auth_token("secret-token");
+        let (shutdown, rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(server.run(rx));
+
+        // Test without auth header should be rejected
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"GET /api/v1/screen/wait_change?last_frame_id=50&timeout_ms=100 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp_bytes = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream.read_to_end(&mut resp_bytes),
+        )
+        .await
+        .expect("read timeout")
+        .unwrap();
+
+        let header_line = String::from_utf8_lossy(&resp_bytes[..resp_bytes.iter().position(|&b| b == b'\n').unwrap()]);
+        assert!(header_line.contains("401"), "should return 401 Unauthorized without auth");
+
+        // Test with valid auth header should succeed
+        let mut stream2 = TcpStream::connect(addr).await.unwrap();
+        stream2
+            .write_all(b"GET /api/v1/screen/wait_change?last_frame_id=50&timeout_ms=100 HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer secret-token\r\n\r\n")
+            .await
+            .unwrap();
+
+        let mut resp_bytes2 = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            stream2.read_to_end(&mut resp_bytes2),
+        )
+        .await
+        .expect("read timeout")
+        .unwrap();
+
+        let header_line2 = String::from_utf8_lossy(&resp_bytes2[..resp_bytes2.iter().position(|&b| b == b'\n').unwrap()]);
+        assert!(header_line2.contains("200"), "should return 200 OK with valid auth");
+
+        shutdown.send(true).unwrap();
+        task.await.unwrap().unwrap();
     }
 }

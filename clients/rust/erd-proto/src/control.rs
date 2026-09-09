@@ -22,10 +22,11 @@ pub enum ControlMessageType {
     ClipboardSyncRequest = 11,
     ClipboardSyncUpdate = 12,
     ClipboardSyncError = 13,
+    InputAck = 14,
 }
 
 impl ControlMessageType {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::RequestKeyFrame,
         Self::StartStream,
         Self::StopStream,
@@ -40,6 +41,7 @@ impl ControlMessageType {
         Self::ClipboardSyncRequest,
         Self::ClipboardSyncUpdate,
         Self::ClipboardSyncError,
+        Self::InputAck,
     ];
 }
 
@@ -62,6 +64,7 @@ impl TryFrom<u8> for ControlMessageType {
             11 => Ok(Self::ClipboardSyncRequest),
             12 => Ok(Self::ClipboardSyncUpdate),
             13 => Ok(Self::ClipboardSyncError),
+            14 => Ok(Self::InputAck),
             unknown => Err(CodecError::UnknownControlMessageType(unknown)),
         }
     }
@@ -88,6 +91,40 @@ impl WireCodec for BitrateAdjust {
         let target_bitrate = decoder.i32("target bitrate")?;
         decoder.finish("bitrate adjustment")?;
         Ok(Self { target_bitrate })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InputAckMessage {
+    pub sequence: u32,
+    pub success: bool,
+    pub error_code: u8,
+}
+
+impl InputAckMessage {
+    pub const SIZE: usize = 6;
+}
+
+impl WireCodec for InputAckMessage {
+    fn encode(&self) -> Result<Vec<u8>, CodecError> {
+        let mut output = Vec::with_capacity(Self::SIZE);
+        push_u32(&mut output, self.sequence);
+        output.push(self.success as u8);
+        output.push(self.error_code);
+        Ok(output)
+    }
+
+    fn decode(input: &[u8]) -> Result<Self, CodecError> {
+        let mut decoder = Decoder::new(input);
+        let sequence = decoder.u32("input ack sequence")?;
+        let success = decoder.u8("input ack success")? != 0;
+        let error_code = decoder.u8("input ack error code")?;
+        decoder.finish("input ack message")?;
+        Ok(Self {
+            sequence,
+            success,
+            error_code,
+        })
     }
 }
 
@@ -472,6 +509,7 @@ pub enum ControlMessage {
     ClipboardSyncRequest(ClipboardSyncRequest),
     ClipboardSyncUpdate(ClipboardSyncUpdate),
     ClipboardSyncError(ClipboardSyncError),
+    InputAck(InputAckMessage),
 }
 
 impl ControlMessage {
@@ -491,6 +529,7 @@ impl ControlMessage {
             Self::ClipboardSyncRequest(_) => ControlMessageType::ClipboardSyncRequest,
             Self::ClipboardSyncUpdate(_) => ControlMessageType::ClipboardSyncUpdate,
             Self::ClipboardSyncError(_) => ControlMessageType::ClipboardSyncError,
+            Self::InputAck(_) => ControlMessageType::InputAck,
         }
     }
 }
@@ -513,6 +552,7 @@ impl WireCodec for ControlMessage {
             Self::ClipboardSyncRequest(value) => value.encode()?,
             Self::ClipboardSyncUpdate(value) => value.encode()?,
             Self::ClipboardSyncError(value) => value.encode()?,
+            Self::InputAck(value) => value.encode()?,
         };
         output.extend_from_slice(&body);
         Ok(output)
@@ -553,6 +593,55 @@ impl WireCodec for ControlMessage {
             ControlMessageType::ClipboardSyncError => {
                 Ok(Self::ClipboardSyncError(ClipboardSyncError::decode(body)?))
             }
+            ControlMessageType::InputAck => {
+                Ok(Self::InputAck(InputAckMessage::decode(body)?))
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_ack_message_roundtrip() {
+        let original = InputAckMessage {
+            sequence: 42,
+            success: true,
+            error_code: 0,
+        };
+        let encoded = original.encode().unwrap();
+        assert_eq!(encoded.len(), InputAckMessage::SIZE);
+        let decoded = InputAckMessage::decode(&encoded).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn input_ack_message_with_error() {
+        let original = InputAckMessage {
+            sequence: 100,
+            success: false,
+            error_code: 5,
+        };
+        let encoded = original.encode().unwrap();
+        assert_eq!(encoded.len(), InputAckMessage::SIZE);
+        let decoded = InputAckMessage::decode(&encoded).unwrap();
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn control_message_input_ack_roundtrip() {
+        let ack = InputAckMessage {
+            sequence: 123,
+            success: true,
+            error_code: 0,
+        };
+        let original = ControlMessage::InputAck(ack);
+        let encoded = original.encode().unwrap();
+        assert!(encoded.len() > 0);
+        assert_eq!(encoded[0], ControlMessageType::InputAck as u8);
+        let decoded = ControlMessage::decode(&encoded).unwrap();
+        assert_eq!(decoded, original);
     }
 }

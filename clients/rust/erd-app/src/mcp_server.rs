@@ -116,7 +116,7 @@ pub fn list_mcp_tools() -> Value {
         },
         {
             "name": "remote_get_screen_info",
-            "description": "Gets current remote screen dimensions, scale factor, and connected host name.",
+            "description": "Gets current remote screen info including physical dimensions (width, height in pixels), DPI scale factor, logical resolution (logical_width, logical_height), multi-monitor enumeration (monitors array with per-monitor id, name, coordinates, scale, primary flag), and connected host name.",
             "inputSchema": {
                 "type": "object",
                 "properties": {}
@@ -129,6 +129,17 @@ pub fn list_mcp_tools() -> Value {
                 "type": "object",
                 "properties": {
                     "format": { "type": "string", "enum": ["png", "jpeg"], "default": "png" }
+                }
+            }
+        },
+        {
+            "name": "remote_wait_for_screen_change",
+            "description": "Waits for a new video frame to arrive on the remote screen, enabling reactive perception loops without polling delays.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "last_frame_id": { "type": "integer", "description": "Frame ID to compare against (optional)" },
+                    "timeout_ms": { "type": "integer", "description": "Maximum wait time in milliseconds (optional, default 5000, max 30000)" }
                 }
             }
         }
