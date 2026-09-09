@@ -233,26 +233,36 @@ cargo run --manifest-path clients/rust/Cargo.toml --locked \
 ## Performance and verification limits
 
 Performance is the second priority after reliable agent operation. The transport
-uses bounded decode queues, keyframe recovery, and native capture/encode paths.
-The Windows encoder reselects the latest raw frame after blocked control work;
-repeated static content retains its original capture time while diagnostics
-separate content age from time spent waiting for encoding.
+uses bounded decode queues, keyframe recovery, native capture/encode paths, and
+an MTU-safe 1200-byte UDP datagram budget to eliminate IP fragmentation across
+encapsulated tunnels like Tailscale. The Windows encoder reselects the latest raw
+frame after blocked control work; repeated static content retains its original
+capture time while diagnostics separate content age from time spent waiting for
+encoding.
 
 Receiver sequence gaps are not automatically network loss. Optional bounded
 endpoint traces distinguish send failures, authenticated arrivals, late
-packets, assembly failures, and queue recovery. Historical high-loss Linux
-measurements have not established one reproducible network cause; do not infer
-that diagnostic instrumentation eliminates packet loss.
+packets, assembly failures, and queue recovery. While MTU-safe packetization
+verified zero fragmentation and 100% packet arrival in candidate testing,
+historical sequence gaps are not retrospectively attributed to fragmentation alone;
+do not infer that diagnostic instrumentation eliminates network loss.
 
 Decode time excludes capture, encoding, network transit, assembly, and display
 presentation. A static repeated frame's old capture timestamp is also not proof
-that a newly captured frame waited that long in a queue. No screenshot or
-end-to-end latency guarantee is made.
+that a newly captured frame waited that long in a queue. Latency measurements
+from distinct workloads and trial conditions (such as a historical 417 ms active
+trace versus a preliminary 14 ms window) are not comparable and do not constitute
+a causal optimization proof. No screenshot or end-to-end latency guarantee is made,
+streaming frame rate is not guaranteed at 60 fps, and GPU zero-copy is not claimed.
+Linux hardware encoding uses VA-API on AMD Radeon graphics (not NVIDIA/NVENC).
+Windows physical DXGI capture restores frame streaming across DPI-scaled displays,
+though full stage attribution remains preliminary pending zero-overflow trace reruns.
+Portrait display rotation is not supported for streaming.
 
 See the [agent-first verification report](docs/agent-first-verification-20260909.md)
-for current test results, native MCP/API checks, and unresolved performance
-measurements, and [deployment evidence](docs/release-deployment-20260909.md)
-for the earlier deployed release.
+for initial test results and native MCP/API checks, the [follow-up performance verification report](docs/remaining-performance-verification-20260909.md)
+for MTU, Clippy, and preliminary stage attribution findings, and
+[deployment evidence](docs/release-deployment-20260909.md) for the earlier deployed release.
 Native GUI/audio playback and full on-device iOS session QA remain incomplete;
 CLI/API stream verification does not substitute for those checks.
 

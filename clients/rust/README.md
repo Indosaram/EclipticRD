@@ -38,7 +38,8 @@ claude mcp add --transport stdio --scope project eclipticrd \
   -- /path/to/erd-client --host HOST --pairing-id ID --pairing-store FILE --mcp
 
 # Codex
-codex mcp add eclipticrd -- /path/to/erd-client --host HOST --pairing-id ID --pairing-store FILE --mcp
+codex mcp add eclipticrd \
+  -- /path/to/erd-client --host HOST --pairing-id ID --pairing-store FILE --mcp
 ```
 
 See [docs/agent-setup.md](../../docs/agent-setup.md) for full setup and [skills/eclipticrd-remote-control/SKILL.md](../../skills/eclipticrd-remote-control/SKILL.md) for tool reference.
@@ -86,17 +87,23 @@ The nested `tauri-shell/src-tauri/Cargo.toml` is not the workspace root; build `
 ## Platform Support and Performance
 
 - **macOS**: ScreenCaptureKit, VideoToolbox paths; desktop launch and CLI streaming verified, native GUI session QA incomplete
-- **Linux** (Hyprland/wlroots): wlr-screencopy, FFmpeg; host streaming verified; GUI QA incomplete
-- **Windows**: DXGI capture, Media Foundation H.264; host streaming and CLI verified; native Windows GUI QA incomplete
+- **Linux** (Hyprland/wlroots): wlr-screencopy, FFmpeg / VA-API (AMD Radeon RX 580; no NVIDIA hardware); host streaming verified; GUI QA incomplete
+- **Windows**: DXGI capture (ModeDesc physical geometry fix), Media Foundation H.264; host streaming and CLI verified; stage attribution preliminary pending finite zero-overflow trace rerun; native Windows GUI QA incomplete
 - **iOS**: VideoToolbox decoding; shared input/lifecycle code; full QA incomplete
 - **Android**: Shared support only; no runnable app yet
 
-**Performance:** bounded frame queues, keyframe recovery, and native encoding.
+**Performance:** bounded frame queues, keyframe recovery, native encoding, and
+an MTU-safe 1200-byte UDP datagram budget avoiding IP-layer fragmentation.
 Decode time is not end-to-end latency; sequence gaps are not a direct measure
 of network loss. Static-frame content age is distinct from encoding work
-residence. There is no guaranteed screenshot or input latency.
+residence, and latency measurements across differing workloads and runs (such as
+prior 417 ms vs preliminary 14 ms fresh residence) are not causal comparison proofs.
+There is no guaranteed screenshot or input latency, guaranteed 60 fps, or GPU zero-copy.
+Rotated portrait displays are not supported for streaming.
 
-See [docs/release-deployment-20260909.md](../../docs/release-deployment-20260909.md) for full evidence and limits.
+See [docs/release-deployment-20260909.md](../../docs/release-deployment-20260909.md),
+[docs/agent-first-verification-20260909.md](../../docs/agent-first-verification-20260909.md),
+and [docs/remaining-performance-verification-20260909.md](../../docs/remaining-performance-verification-20260909.md) for full evidence and limits.
 
 ## Licensing
 
