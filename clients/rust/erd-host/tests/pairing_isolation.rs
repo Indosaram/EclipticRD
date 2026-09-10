@@ -48,6 +48,8 @@ fn test_outbound_client_pairing_rejected_as_host_authorization() {
             name: "RemoteHostName".into(),
             key: client_key.clone(),
             added_at_unix_ms: 1700000000000,
+            last_endpoint: None,
+            endpoint_aliases: Vec::new(),
         };
         client_store.save(client_record.clone()).unwrap();
 

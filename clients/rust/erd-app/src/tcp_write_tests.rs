@@ -70,6 +70,8 @@ fn fixture() -> Fixture {
             name: "peer".into(),
             key: vec![19; 32],
             added_at_unix_ms: 0,
+            last_endpoint: None,
+            endpoint_aliases: Vec::new(),
         })
         .unwrap();
     let peer = peer_rx.recv_timeout(WATCHDOG).unwrap();

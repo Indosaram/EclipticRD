@@ -489,6 +489,8 @@ mod tests {
             name: "Galaxy S24".into(),
             key: vec![0x42; 32],
             added_at_unix_ms: 1700000000000,
+            last_endpoint: None,
+            endpoint_aliases: Vec::new(),
         };
 
         store.save_record(&record).unwrap();
@@ -514,6 +516,8 @@ mod tests {
             name: "Workstation".into(),
             key: vec![0x33; 32],
             added_at_unix_ms: 1700000000000,
+            last_endpoint: None,
+            endpoint_aliases: Vec::new(),
         };
         store.save_record(&record).unwrap();
 

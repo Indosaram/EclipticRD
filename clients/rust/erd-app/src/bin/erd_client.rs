@@ -461,6 +461,8 @@ fn run_client(mut cli: Cli) -> Result<()> {
                 name: cli.host.clone(),
                 key,
                 added_at_unix_ms: 0,
+                last_endpoint: None,
+                endpoint_aliases: Vec::new(),
             };
             info!(pairing_id = %pairing.id, "Connecting with explicit PSK");
             session

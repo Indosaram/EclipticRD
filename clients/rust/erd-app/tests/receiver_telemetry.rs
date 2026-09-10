@@ -83,6 +83,8 @@ impl Connected {
                 name: "fixture".into(),
                 key: key.to_vec(),
                 added_at_unix_ms: 0,
+                last_endpoint: None,
+                endpoint_aliases: Vec::new(),
             })
             .unwrap();
         session

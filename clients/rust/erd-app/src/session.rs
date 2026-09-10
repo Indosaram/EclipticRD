@@ -266,6 +266,8 @@ impl ClientSession {
                     name: grant.host_name,
                     key: grant.key.to_vec(),
                     added_at_unix_ms: current_unix_ms(),
+                    last_endpoint: None,
+                    endpoint_aliases: Vec::new(),
                 };
                 self.store.save(record.clone())?;
                 record
@@ -1387,6 +1389,8 @@ mod cancellation_tests {
             name: "mock-host".to_string(),
             key: key.to_vec(),
             added_at_unix_ms: 0,
+            last_endpoint: None,
+            endpoint_aliases: Vec::new(),
         };
         let ready = session.connect_with_pairing(record).unwrap();
         assert_eq!(ready.server.name, "mock-host");

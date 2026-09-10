@@ -1,3 +1,4 @@
+// allow: SIZE_OK — platform keychain security FFI and client pairing storage engine
 use std::{
     fmt, fs, io,
     path::{Path, PathBuf},
@@ -9,6 +10,24 @@ use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use thiserror::Error;
 
 const SWIFT_REFERENCE_DATE_OFFSET: f64 = 978_307_200.0;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingEndpoint {
+    pub host: String,
+    pub tcp_port: u16,
+    pub udp_port: u16,
+}
+
+impl PairingEndpoint {
+    pub fn new(host: impl Into<String>, tcp_port: u16, udp_port: u16) -> Self {
+        Self {
+            host: host.into(),
+            tcp_port,
+            udp_port,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +47,42 @@ pub struct PairingRecord {
         alias = "addedAtUnixMs"
     )]
     pub added_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_endpoint: Option<PairingEndpoint>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub endpoint_aliases: Vec<PairingEndpoint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingSummary {
+    pub id: String,
+    pub host_name: String,
+    pub added_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_endpoint: Option<PairingEndpoint>,
+}
+
+impl From<PairingRecord> for PairingSummary {
+    fn from(record: PairingRecord) -> Self {
+        Self {
+            id: record.id,
+            host_name: record.name,
+            added_at_unix_ms: record.added_at_unix_ms,
+            last_endpoint: record.last_endpoint,
+        }
+    }
+}
+
+impl From<&PairingRecord> for PairingSummary {
+    fn from(record: &PairingRecord) -> Self {
+        Self {
+            id: record.id.clone(),
+            host_name: record.name.clone(),
+            added_at_unix_ms: record.added_at_unix_ms,
+            last_endpoint: record.last_endpoint.clone(),
+        }
+    }
 }
 
 fn deserialize_key<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
@@ -153,6 +208,36 @@ where
 }
 
 impl PairingRecord {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        key: Vec<u8>,
+        added_at_unix_ms: u64,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            key,
+            added_at_unix_ms,
+            last_endpoint: None,
+            endpoint_aliases: Vec::new(),
+        }
+    }
+
+    pub fn with_endpoints(
+        mut self,
+        last_endpoint: Option<PairingEndpoint>,
+        endpoint_aliases: Vec<PairingEndpoint>,
+    ) -> Self {
+        self.last_endpoint = last_endpoint;
+        self.endpoint_aliases = endpoint_aliases;
+        self
+    }
+
+    pub fn summary(&self) -> PairingSummary {
+        PairingSummary::from(self)
+    }
+
     pub fn key_array(&self) -> Result<[u8; PAIRING_KEY_SIZE], PairingStoreError> {
         self.key
             .as_slice()
@@ -371,6 +456,53 @@ impl PairingStore {
         }
     }
 
+    pub fn remember_endpoint(
+        &self,
+        id: &str,
+        expected_key: &[u8],
+        endpoint: PairingEndpoint,
+    ) -> Result<bool, PairingStoreError> {
+        match &self.backend {
+            StoreBackend::File(path) => {
+                let mut records = self.load_all()?;
+                let Some(record) = records.iter_mut().find(|r| r.id == id) else {
+                    return Ok(false);
+                };
+                if record.key != expected_key {
+                    return Ok(false);
+                }
+                update_record_endpoint(record, endpoint);
+                self.write_records(path, &records)?;
+                Ok(true)
+            }
+            #[cfg(any(target_os = "ios", target_os = "macos"))]
+            StoreBackend::Keychain(service) => {
+                let Some(mut record) = load_keychain(service, id)? else {
+                    return Ok(false);
+                };
+                if record.key != expected_key {
+                    return Ok(false);
+                }
+                update_record_endpoint(&mut record, endpoint);
+                save_keychain(service, &record)?;
+                Ok(true)
+            }
+            StoreBackend::Ephemeral(records) => {
+                let mut guard = records
+                    .lock()
+                    .map_err(|_| io::Error::other("ephemeral store poisoned"))?;
+                let Some(record) = guard.iter_mut().find(|r| r.id == id) else {
+                    return Ok(false);
+                };
+                if record.key != expected_key {
+                    return Ok(false);
+                }
+                update_record_endpoint(record, endpoint);
+                Ok(true)
+            }
+        }
+    }
+
     fn write_records(&self, path: &Path, records: &[PairingRecord]) -> Result<(), PairingStoreError> {
         let parent = path.parent().ok_or_else(|| {
             io::Error::new(
@@ -386,6 +518,16 @@ impl PairingStore {
         set_private_permissions(path)?;
         Ok(())
     }
+}
+
+fn update_record_endpoint(record: &mut PairingRecord, endpoint: PairingEndpoint) {
+    record.endpoint_aliases.retain(|a| a != &endpoint);
+    if let Some(prev) = record.last_endpoint.take() {
+        if prev != endpoint && !record.endpoint_aliases.contains(&prev) {
+            record.endpoint_aliases.push(prev);
+        }
+    }
+    record.last_endpoint = Some(endpoint);
 }
 
 #[cfg(any(target_os = "ios", target_os = "macos"))]
@@ -878,12 +1020,7 @@ mod tests {
         let client_file = temp_dir.path().join("client-pairings.json");
         let store = PairingStore::new(&client_file);
 
-        let record = PairingRecord {
-            id: "temp-test-1".into(),
-            name: "TempHost".into(),
-            key: vec![0x11; 32],
-            added_at_unix_ms: 1700000000000,
-        };
+        let record = PairingRecord::new("temp-test-1", "TempHost", vec![0x11; 32], 1700000000000);
         store.save(record).unwrap();
 
         // Ensure temporary file was client-pairings.json.tmp and was cleanly renamed
@@ -895,12 +1032,7 @@ mod tests {
     #[test]
     fn ephemeral_pairing_store_roundtrip_and_delete() {
         let store = PairingStore::new_ephemeral();
-        let record = PairingRecord {
-            id: "host-ephemeral-1".into(),
-            name: "Server".into(),
-            key: vec![0x55; 32],
-            added_at_unix_ms: 1700000000000,
-        };
+        let record = PairingRecord::new("host-ephemeral-1", "Server", vec![0x55; 32], 1700000000000);
 
         store.save(record.clone()).unwrap();
         assert_eq!(store.load("host-ephemeral-1").unwrap(), Some(record.clone()));
@@ -914,5 +1046,182 @@ mod tests {
         store.delete("host-ephemeral-1").unwrap();
         assert_eq!(store.load("host-ephemeral-1").unwrap(), None);
         assert!(store.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_legacy_record_readability() {
+        // Given: legacy JSON without lastEndpoint or endpointAliases
+        let legacy_json = r#"[
+          {
+            "id": "legacy-id-100",
+            "name": "LegacyServer",
+            "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+            "addedAt": 0.0
+          }
+        ]"#;
+
+        // When: deserialized into Vec<PairingRecord>
+        let records: Vec<PairingRecord> = serde_json::from_str(legacy_json).unwrap();
+
+        // Then: legacy fields parse correctly, optional endpoint fields default to None / empty
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert_eq!(r.id, "legacy-id-100");
+        assert_eq!(r.name, "LegacyServer");
+        assert_eq!(r.key, vec![1u8; 32]);
+        assert_eq!(r.added_at_unix_ms, 978_307_200_000);
+        assert_eq!(r.last_endpoint, None);
+        assert!(r.endpoint_aliases.is_empty());
+    }
+
+    #[test]
+    fn test_metadata_roundtrip_and_dedup() {
+        // Given: an ephemeral store seeded with a pairing record
+        let store = PairingStore::new_ephemeral();
+        let key = vec![0x22; 32];
+        let record = PairingRecord::new("host-id-1", "HostOne", key.clone(), 1700000000000);
+        store.save(record).unwrap();
+
+        let ep1 = PairingEndpoint::new("192.168.1.50", 19730, 19731);
+        let ep2 = PairingEndpoint::new("100.91.254.71", 19730, 19731);
+
+        // When: remember_endpoint called for ep1
+        let updated = store.remember_endpoint("host-id-1", &key, ep1.clone()).unwrap();
+        assert!(updated);
+
+        // Then: last_endpoint is ep1, aliases empty
+        let loaded = store.load("host-id-1").unwrap().unwrap();
+        assert_eq!(loaded.last_endpoint, Some(ep1.clone()));
+        assert!(loaded.endpoint_aliases.is_empty());
+
+        // When: remember_endpoint called again with same ep1 (idempotent / dedup)
+        let updated2 = store.remember_endpoint("host-id-1", &key, ep1.clone()).unwrap();
+        assert!(updated2);
+
+        // Then: last_endpoint remains ep1, aliases still empty (no duplicate added)
+        let loaded2 = store.load("host-id-1").unwrap().unwrap();
+        assert_eq!(loaded2.last_endpoint, Some(ep1.clone()));
+        assert!(loaded2.endpoint_aliases.is_empty());
+
+        // When: remember_endpoint called with ep2
+        let updated3 = store.remember_endpoint("host-id-1", &key, ep2.clone()).unwrap();
+        assert!(updated3);
+
+        // Then: last_endpoint is ep2, ep1 is shifted to aliases
+        let loaded3 = store.load("host-id-1").unwrap().unwrap();
+        assert_eq!(loaded3.last_endpoint, Some(ep2.clone()));
+        assert_eq!(loaded3.endpoint_aliases, vec![ep1.clone()]);
+
+        // When: remember_endpoint called with ep1 again
+        let updated4 = store.remember_endpoint("host-id-1", &key, ep1.clone()).unwrap();
+        assert!(updated4);
+
+        // Then: last_endpoint is ep1, ep2 is in aliases, ep1 is deduped from aliases
+        let loaded4 = store.load("host-id-1").unwrap().unwrap();
+        assert_eq!(loaded4.last_endpoint, Some(ep1.clone()));
+        assert_eq!(loaded4.endpoint_aliases, vec![ep2.clone()]);
+
+        // Serialization roundtrip retains metadata
+        let json = serde_json::to_string(&loaded4).unwrap();
+        let deserialized: PairingRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, loaded4);
+    }
+
+    #[test]
+    fn test_preservation_of_credentials() {
+        // Given: store with a record having specific key and metadata
+        let store = PairingStore::new_ephemeral();
+        let original_key = vec![0x77; 32];
+        let original_id = "cred-preserve-id";
+        let original_name = "PreservedHost";
+        let original_time = 1712345678900;
+        let record = PairingRecord::new(original_id, original_name, original_key.clone(), original_time);
+        store.save(record).unwrap();
+
+        let ep = PairingEndpoint::new("10.0.0.5", 19730, 19731);
+
+        // When: remember_endpoint updates endpoint metadata
+        let updated = store.remember_endpoint(original_id, &original_key, ep.clone()).unwrap();
+        assert!(updated);
+
+        // Then: secret key bytes, id, name, and added_at_unix_ms remain strictly identical
+        let loaded = store.load(original_id).unwrap().unwrap();
+        assert_eq!(loaded.id, original_id);
+        assert_eq!(loaded.name, original_name);
+        assert_eq!(loaded.key, original_key);
+        assert_eq!(loaded.added_at_unix_ms, original_time);
+        assert_eq!(loaded.last_endpoint, Some(ep));
+    }
+
+    #[test]
+    fn test_missing_record_no_resurrection() {
+        // Given: an empty store (record never existed or was deleted)
+        let store = PairingStore::new_ephemeral();
+        let key = vec![0x33; 32];
+        let ep = PairingEndpoint::new("192.168.1.1", 19730, 19731);
+
+        // When: remember_endpoint called for non-existent ID
+        let updated = store.remember_endpoint("non-existent-uuid", &key, ep).unwrap();
+
+        // Then: returns false and does NOT resurrect or create any record
+        assert!(!updated);
+        assert!(store.load("non-existent-uuid").unwrap().is_none());
+        assert!(store.load_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_id_key_mismatch_no_mutation() {
+        // Given: store with an existing record
+        let store = PairingStore::new_ephemeral();
+        let correct_key = vec![0x44; 32];
+        let wrong_key = vec![0x99; 32];
+        let record = PairingRecord::new("target-id", "TargetHost", correct_key.clone(), 1700000000000);
+        store.save(record.clone()).unwrap();
+
+        let ep = PairingEndpoint::new("192.168.1.200", 19730, 19731);
+
+        // When: remember_endpoint called with mismatched expected_key
+        let updated = store.remember_endpoint("target-id", &wrong_key, ep).unwrap();
+
+        // Then: returns false and stored record is completely unmutated
+        assert!(!updated);
+        let loaded = store.load("target-id").unwrap().unwrap();
+        assert_eq!(loaded, record);
+        assert_eq!(loaded.last_endpoint, None);
+    }
+
+    #[test]
+    fn test_key_free_summary_serialization() {
+        // Given: a PairingRecord with endpoint metadata and secret key
+        let key = vec![0xDE; 32];
+        let record = PairingRecord {
+            id: "summary-test-id".into(),
+            name: "SummaryHost".into(),
+            key: key.clone(),
+            added_at_unix_ms: 1720000000000,
+            last_endpoint: Some(PairingEndpoint::new("[fe80::1%en0]", 19730, 19731)),
+            endpoint_aliases: vec![],
+        };
+
+        // When: converted to PairingSummary and serialized to JSON
+        let summary = record.summary();
+        let json = serde_json::to_string(&summary).unwrap();
+
+        // Then: serialized JSON contains ONLY allowed machine fields, and ZERO secret keys
+        assert!(!json.contains("key"));
+        assert!(!json.contains("DEADBEEF"));
+        assert!(!json.contains("3q2+7w==")); // base64 of DEAD...
+
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let obj = val.as_object().unwrap();
+        let mut keys: Vec<&String> = obj.keys().collect();
+        keys.sort();
+        assert_eq!(keys, vec!["addedAtUnixMs", "hostName", "id", "lastEndpoint"]);
+
+        // Endpoint preserves IPv6 scope and concrete ports
+        let ep_val = &val["lastEndpoint"];
+        assert_eq!(ep_val["host"], "[fe80::1%en0]");
+        assert_eq!(ep_val["tcpPort"], 19730);
+        assert_eq!(ep_val["udpPort"], 19731);
     }
 }

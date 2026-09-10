@@ -514,12 +514,16 @@ fn pairing_store_round_trip_and_deletion() {
         name: "host-1".into(),
         key: vec![1; 32],
         added_at_unix_ms: 1000,
+        last_endpoint: None,
+        endpoint_aliases: Vec::new(),
     };
     let record2 = erd_app::PairingRecord {
         id: "id-2".into(),
         name: "host-2".into(),
         key: vec![2; 32],
         added_at_unix_ms: 2000,
+        last_endpoint: None,
+        endpoint_aliases: Vec::new(),
     };
     store.save(record1.clone()).unwrap();
     store.save(record2.clone()).unwrap();

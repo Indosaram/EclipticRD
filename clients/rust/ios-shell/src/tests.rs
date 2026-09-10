@@ -319,6 +319,8 @@ mod tests {
             name: "Workstation".to_string(),
             key: vec![0x42; 32],
             added_at_unix_ms: 1000,
+            last_endpoint: None,
+            endpoint_aliases: Vec::new(),
         };
         store.save(paired_record).unwrap();
 
