@@ -390,10 +390,9 @@ impl SessionState {
                 PacketType::PairingRequest | PacketType::Handshake
             ),
             Self::PairingGranted => matches!(packet_type, PacketType::Handshake),
-            Self::Authenticated => matches!(
-                packet_type,
-                PacketType::Handshake | PacketType::InputEvent | PacketType::Control
-            ),
+            Self::Authenticated => {
+                matches!(packet_type, PacketType::InputEvent | PacketType::Control)
+            }
             Self::Closed => false,
         }
     }
@@ -425,6 +424,8 @@ pub enum SessionError {
     ConsentTimeout,
     #[error("peer is not authenticated")]
     PreAuth,
+    #[error("session is already authenticated")]
+    AlreadyAuthenticated,
     #[error("handshake pairing ID does not match the TLS identity")]
     IdentityMismatch,
     #[error("unknown pairing ID")]
@@ -2134,6 +2135,7 @@ impl HostServer {
             .unwrap_or_default()
             .to_owned();
         let mut state = SessionState::PreAuth;
+        let mut granted_pairing_id: Option<String> = None;
         let mut c2h_cipher = None;
         let mut h2c_cipher = None;
         let mut udp_peer = None;
@@ -2355,7 +2357,10 @@ impl HostServer {
                             io::ErrorKind::UnexpectedEof
                                 | io::ErrorKind::ConnectionReset
                                 | io::ErrorKind::BrokenPipe
-                        ) =>
+                        ) || error
+                            .get_ref()
+                            .and_then(|cause| cause.downcast_ref::<openssl::ssl::Error>())
+                            .is_some_and(|ssl_err| ssl_err.code() == openssl::ssl::ErrorCode::SYSCALL) =>
                     {
                         warn!(%error, "read_frame saw EOF/reset/broken pipe, closing connection");
                         break;
@@ -2367,7 +2372,12 @@ impl HostServer {
                 };
                 let (header, payload) = split_packet(&packet)?;
                 if !state.allows(header.packet_type) {
-                    debug!(?state, ?header.packet_type, "refusing pre-auth packet");
+                    debug!(?state, ?header.packet_type, "refusing packet for current state");
+                    if state == SessionState::Authenticated
+                        && header.packet_type == PacketType::Handshake
+                    {
+                        return Err(SessionError::AlreadyAuthenticated);
+                    }
                     continue;
                 }
 
@@ -2414,14 +2424,18 @@ impl HostServer {
                         };
                         self.config.pairing_store.save(record.clone())?;
                         let grant = PairingGrant {
-                            pairing_id: record.id,
+                            pairing_id: record.id.clone(),
                             host_name: self.config.host_name.clone(),
                             key: record.key,
                         };
                         send_tcp_packet(&mut stream, PacketType::PairingGrant, &grant.encode()?)?;
+                        granted_pairing_id = Some(record.id);
                         state = SessionState::PairingGranted;
                     }
                     PacketType::Handshake => {
+                        if state == SessionState::Authenticated {
+                            return Err(SessionError::AlreadyAuthenticated);
+                        }
                         let handshake = Handshake::decode(payload)?;
                         let record = self
                             .config
@@ -2434,7 +2448,14 @@ impl HostServer {
                             if identity_pairing_id != handshake.pairing_id {
                                 return Err(SessionError::IdentityMismatch);
                             }
-                        } else if negotiated_identity != BOOTSTRAP_IDENTITY {
+                        } else if negotiated_identity == BOOTSTRAP_IDENTITY {
+                            let Some(expected_id) = &granted_pairing_id else {
+                                return Err(SessionError::PreAuth);
+                            };
+                            if *expected_id != handshake.pairing_id {
+                                return Err(SessionError::IdentityMismatch);
+                            }
+                        } else {
                             return Err(SessionError::IdentityMismatch);
                         }
                         if handshake.version != PROTOCOL_VERSION {
@@ -2475,10 +2496,10 @@ impl HostServer {
                             pairing_id: String::new(),
                             session_salt: [0_u8; 16],
                         };
-                        send_tcp_packet(&mut stream, PacketType::HandshakeAck, &ack.encode()?)?;
                         let (media_tx, media_rx) = mpsc::sync_channel(16);
                         media_handle = Some(self.media_source.start(media_tx)?);
                         media_receiver = Some(media_rx);
+                        send_tcp_packet(&mut stream, PacketType::HandshakeAck, &ack.encode()?)?;
                         last_pong = Instant::now();
                         next_ping = Instant::now() + HEARTBEAT_INTERVAL;
                         info!(
@@ -3227,6 +3248,59 @@ mod tests {
         let disabled = server.current_psks().unwrap();
         assert_eq!(disabled.len(), 1);
         assert_eq!(disabled[0].identity(), "erd-disabled");
+    }
+
+    #[test]
+    fn host_default_store_path_and_current_psks_isolation() {
+        let default_path = PairingStore::default_path().unwrap();
+        assert_eq!(
+            default_path.file_name().and_then(|n| n.to_str()),
+            Some("host-authorizations.json"),
+            "Host default path must be host-authorizations.json"
+        );
+
+        let directory = tempdir().unwrap();
+        // Place a legacy pairing-keys.json in the directory
+        let legacy_file = directory.path().join("pairing-keys.json");
+        fs::write(
+            &legacy_file,
+            br#"[{"id":"legacy-peer-1","name":"Legacy","key":"AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=","addedAt":0.0}]"#,
+        )
+        .unwrap();
+
+        // Host store pointed to host-authorizations.json in that directory must NOT import legacy-peer-1
+        let host_file = directory.path().join("host-authorizations.json");
+        let store = PairingStore::new(&host_file);
+        assert!(store.load_all().unwrap().is_empty());
+
+        let (consent, _) = mpsc::channel();
+        let mut config = test_config(store.clone(), consent);
+        config.bootstrap_pin = None;
+        config.pairing_window = Duration::from_secs(0);
+        let server = HostServer::bind_synthetic(config, 0).unwrap();
+        let psks = server.current_psks().unwrap();
+        // Since no bootstrap PIN and store is empty, psks only has the disabled fallback psk, never legacy-peer-1
+        assert!(
+            psks.iter().all(|p| p.identity() != "erd-p1.legacy-peer-1"),
+            "Host current_psks must never contain legacy pairing records"
+        );
+
+        // Explicitly saved authorization in host store DOES appear in current_psks
+        store
+            .save(PairingRecord {
+                id: "approved-inbound".into(),
+                name: "Approved".into(),
+                key: [7; 32],
+                added_at_unix_ms: 1000,
+            })
+            .unwrap();
+        let updated_psks = server.current_psks().unwrap();
+        assert!(
+            updated_psks
+                .iter()
+                .any(|p| p.identity() == "erd-p1.approved-inbound"),
+            "Host current_psks must contain explicitly approved inbound authorization"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -4243,5 +4317,400 @@ mod tests {
 
         send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
         server_thread.join().unwrap();
+    }
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TrackingMediaSource {
+        started_count: Arc<AtomicUsize>,
+    }
+
+    struct TrackingMediaHandle;
+    impl MediaHandle for TrackingMediaHandle {
+        fn force_key_frame(&self) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn update_bitrate(&self, _bitrate: u32) -> Result<(), SessionError> {
+            Ok(())
+        }
+        fn stop(&mut self) {}
+    }
+
+    impl MediaSource for TrackingMediaSource {
+        fn start(
+            &self,
+            _sender: SyncSender<MediaEvent>,
+        ) -> Result<Box<dyn MediaHandle>, SessionError> {
+            self.started_count.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::new(TrackingMediaHandle))
+        }
+    }
+
+    fn make_handshake_packet(pairing_id: &str, session_salt: [u8; 16]) -> Vec<u8> {
+        let handshake = Handshake {
+            name: "test-client".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::empty(),
+            pairing_id: pairing_id.to_string(),
+            session_salt,
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        packet
+    }
+
+    #[test]
+    fn test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key_a = [0x42; 32];
+        store
+            .save(PairingRecord {
+                id: "PAIR_A".into(),
+                name: "client-A".into(),
+                key: key_a,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, _consent_rx) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let media_starts = Arc::new(AtomicUsize::new(0));
+        let server = HostServer::bind_with_media(
+            config,
+            Arc::new(TrackingMediaSource {
+                started_count: Arc::clone(&media_starts),
+            }),
+        )
+        .unwrap();
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1));
+
+        let client = TlsPskClient::new(PskIdentity::bootstrap("12345678").unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        tcp.ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        // Transmit unauthenticated Control and InputEvent packets before handshake; host must refuse them
+        let control_packet = {
+            let mut p = PacketHeader::new(PacketType::Control, 0, 0, 0)
+                .encode()
+                .unwrap();
+            p.extend_from_slice(&ControlMessage::Ping.encode().unwrap());
+            p
+        };
+        tcp.write_frame(&control_packet).unwrap();
+
+        let input_packet = {
+            let event = InputEvent {
+                event_type: erd_proto::InputEventType::MouseMove,
+                x: 100.0,
+                y: 100.0,
+                key_code: 0,
+                modifiers: erd_proto::Modifiers::empty(),
+                scroll_dx: 0.0,
+                scroll_dy: 0.0,
+            };
+            let mut p = PacketHeader::new(PacketType::InputEvent, 0, 0, 0)
+                .encode()
+                .unwrap();
+            p.extend_from_slice(&event.encode().unwrap());
+            p
+        };
+        tcp.write_frame(&input_packet).unwrap();
+
+        let handshake_packet = make_handshake_packet("PAIR_A", [0x11; 16]);
+        tcp.write_frame(&handshake_packet).unwrap();
+
+        let read_result = tcp.read_frame();
+        let _ = send_tcp_control(&mut tcp, ControlMessage::Disconnect);
+        drop(tcp);
+        let server_result = server_thread.join().unwrap();
+
+        assert!(
+            matches!(server_result, Err(SessionError::PreAuth)),
+            "server must reject unconsented bootstrap handshake with PreAuth, got: {server_result:?}"
+        );
+        assert_eq!(
+            media_starts.load(Ordering::SeqCst),
+            0,
+            "media capture must not start without consent"
+        );
+        if let Ok(frame) = read_result {
+            let (hdr, _) = decode_tcp_packet(&frame);
+            assert_ne!(
+                hdr.packet_type,
+                PacketType::HandshakeAck,
+                "server must not send HandshakeAck for unconsented handshake"
+            );
+            assert_ne!(
+                hdr.packet_type,
+                PacketType::Control,
+                "server must not send Control/InputAck for unauthenticated input"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_consent_b_cannot_use_a() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key_a = [0x42; 32];
+        store
+            .save(PairingRecord {
+                id: "PAIR_A".into(),
+                name: "client-A".into(),
+                key: key_a,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+        let (consent_tx, consent_rx) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let media_starts = Arc::new(AtomicUsize::new(0));
+        let server = HostServer::bind_with_media(
+            config,
+            Arc::new(TrackingMediaSource {
+                started_count: Arc::clone(&media_starts),
+            }),
+        )
+        .unwrap();
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1));
+        let consent_thread = thread::spawn(move || {
+            let prompt: ConsentPrompt = consent_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            assert_eq!(prompt.client_name, "client-B");
+            prompt.approve();
+        });
+
+        let client = TlsPskClient::new(PskIdentity::bootstrap("12345678").unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        tcp.ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        let request = PairingRequest {
+            name: "client-B".into(),
+        };
+        let mut req_packet = PacketHeader::new(PacketType::PairingRequest, 0, 0, 0)
+            .encode()
+            .unwrap();
+        req_packet.extend_from_slice(&request.encode().unwrap());
+        tcp.write_frame(&req_packet).unwrap();
+
+        let grant_frame = tcp.read_frame().unwrap();
+        let (grant_hdr, grant_payload) = decode_tcp_packet(&grant_frame);
+        assert_eq!(grant_hdr.packet_type, PacketType::PairingGrant);
+        let _grant = PairingGrant::decode(grant_payload).unwrap();
+        consent_thread.join().unwrap();
+
+        let handshake_packet = make_handshake_packet("PAIR_A", [0x22; 16]);
+        tcp.write_frame(&handshake_packet).unwrap();
+
+        let read_result = tcp.read_frame();
+        let _ = send_tcp_control(&mut tcp, ControlMessage::Disconnect);
+        drop(tcp);
+        let server_result = server_thread.join().unwrap();
+
+        assert!(
+            matches!(server_result, Err(SessionError::IdentityMismatch)),
+            "server must reject handshake with mismatched pairing ID with IdentityMismatch, got: {server_result:?}"
+        );
+        assert_eq!(
+            media_starts.load(Ordering::SeqCst),
+            0,
+            "media capture must not start on mismatched ID"
+        );
+        if let Ok(frame) = read_result {
+            let (hdr, _) = decode_tcp_packet(&frame);
+            assert_ne!(
+                hdr.packet_type,
+                PacketType::HandshakeAck,
+                "server must not send HandshakeAck for mismatched pairing ID"
+            );
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_normal_b_and_paired_a_work() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key_a = [0x42; 32];
+        store
+            .save(PairingRecord {
+                id: "PAIR_A".into(),
+                name: "client-A".into(),
+                key: key_a,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        // Part 1: Normal B works over bootstrap TLS
+        {
+            let (consent_tx, consent_rx) = mpsc::channel();
+            let config = test_config(store.clone(), consent_tx);
+            let media_starts = Arc::new(AtomicUsize::new(0));
+            let server = HostServer::bind_with_media(
+                config,
+                Arc::new(TrackingMediaSource {
+                    started_count: Arc::clone(&media_starts),
+                }),
+            )
+            .unwrap();
+            let tcp_addr = server.tcp_addr().unwrap();
+            let server_thread = thread::spawn(move || server.serve_n(1));
+            let consent_thread = thread::spawn(move || {
+                let prompt: ConsentPrompt =
+                    consent_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                assert_eq!(prompt.client_name, "client-B");
+                prompt.approve();
+            });
+
+            let client = TlsPskClient::new(PskIdentity::bootstrap("12345678").unwrap()).unwrap();
+            let mut tcp = client.connect(tcp_addr).unwrap();
+            tcp.ssl_stream()
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+
+            let request = PairingRequest {
+                name: "client-B".into(),
+            };
+            let mut req_packet = PacketHeader::new(PacketType::PairingRequest, 0, 0, 0)
+                .encode()
+                .unwrap();
+            req_packet.extend_from_slice(&request.encode().unwrap());
+            tcp.write_frame(&req_packet).unwrap();
+
+            let grant_frame = tcp.read_frame().unwrap();
+            let (grant_hdr, grant_payload) = decode_tcp_packet(&grant_frame);
+            assert_eq!(grant_hdr.packet_type, PacketType::PairingGrant);
+            let grant = PairingGrant::decode(grant_payload).unwrap();
+            consent_thread.join().unwrap();
+
+            let handshake_packet = make_handshake_packet(&grant.pairing_id, [0x33; 16]);
+            tcp.write_frame(&handshake_packet).unwrap();
+
+            let ack_frame = tcp.read_frame().unwrap();
+            let (ack_hdr, _) = decode_tcp_packet(&ack_frame);
+            assert_eq!(ack_hdr.packet_type, PacketType::HandshakeAck);
+            assert_eq!(media_starts.load(Ordering::SeqCst), 1);
+
+            send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+            assert!(server_thread.join().unwrap().is_ok());
+        }
+
+        // Part 2: Paired A works over pairing TLS
+        {
+            let (consent_tx, _consent_rx) = mpsc::channel();
+            let config = test_config(store.clone(), consent_tx);
+            let media_starts = Arc::new(AtomicUsize::new(0));
+            let server = HostServer::bind_with_media(
+                config,
+                Arc::new(TrackingMediaSource {
+                    started_count: Arc::clone(&media_starts),
+                }),
+            )
+            .unwrap();
+            let tcp_addr = server.tcp_addr().unwrap();
+            let server_thread = thread::spawn(move || server.serve_n(1));
+
+            let client =
+                TlsPskClient::new(PskIdentity::pairing("PAIR_A", &key_a).unwrap()).unwrap();
+            let mut tcp = client.connect(tcp_addr).unwrap();
+            tcp.ssl_stream()
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+
+            let handshake_packet = make_handshake_packet("PAIR_A", [0x44; 16]);
+            tcp.write_frame(&handshake_packet).unwrap();
+
+            let ack_frame = tcp.read_frame().unwrap();
+            let (ack_hdr, _) = decode_tcp_packet(&ack_frame);
+            assert_eq!(ack_hdr.packet_type, PacketType::HandshakeAck);
+            assert_eq!(media_starts.load(Ordering::SeqCst), 1);
+
+            send_tcp_control(&mut tcp, ControlMessage::Disconnect).unwrap();
+            assert!(server_thread.join().unwrap().is_ok());
+        }
+    }
+
+    #[test]
+    fn test_bootstrap_authenticated_session_rejects_duplicate_handshake() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key_a = [0x42; 32];
+        store
+            .save(PairingRecord {
+                id: "PAIR_A".into(),
+                name: "client-A".into(),
+                key: key_a,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let (consent_tx, _consent_rx) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let media_starts = Arc::new(AtomicUsize::new(0));
+        let server = HostServer::bind_with_media(
+            config,
+            Arc::new(TrackingMediaSource {
+                started_count: Arc::clone(&media_starts),
+            }),
+        )
+        .unwrap();
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1));
+
+        let client = TlsPskClient::new(PskIdentity::pairing("PAIR_A", &key_a).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        tcp.ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        // 1. First Handshake: must succeed
+        let handshake_packet = make_handshake_packet("PAIR_A", [0x55; 16]);
+        tcp.write_frame(&handshake_packet).unwrap();
+        let ack_frame = tcp.read_frame().unwrap();
+        assert_eq!(
+            decode_tcp_packet(&ack_frame).0.packet_type,
+            PacketType::HandshakeAck
+        );
+        assert_eq!(media_starts.load(Ordering::SeqCst), 1);
+
+        // 2. Second Handshake on authenticated session: must be rejected with error and closed
+        let duplicate_handshake = make_handshake_packet("PAIR_A", [0x66; 16]);
+        tcp.write_frame(&duplicate_handshake).unwrap();
+
+        let read_second = tcp.read_frame();
+        let _ = send_tcp_control(&mut tcp, ControlMessage::Disconnect);
+        drop(tcp);
+        let server_result = server_thread.join().unwrap();
+
+        assert!(
+            matches!(server_result, Err(SessionError::AlreadyAuthenticated)),
+            "server must reject duplicate handshake with AlreadyAuthenticated, got: {server_result:?}"
+        );
+        assert_eq!(
+            media_starts.load(Ordering::SeqCst),
+            1,
+            "media capture must not restart on duplicate handshake"
+        );
+        if let Ok(frame) = read_second {
+            let (hdr, _) = decode_tcp_packet(&frame);
+            assert_ne!(
+                hdr.packet_type,
+                PacketType::HandshakeAck,
+                "server must not send HandshakeAck for duplicate handshake"
+            );
+        }
     }
 }

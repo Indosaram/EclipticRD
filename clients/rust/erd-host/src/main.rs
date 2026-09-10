@@ -50,6 +50,22 @@ struct Cli {
     output: Option<String>,
 }
 
+pub fn select_pin<F>(
+    bootstrap_pin: Option<String>,
+    pin_opt: Option<&str>,
+    mut generator: F,
+) -> Result<String>
+where
+    F: FnMut() -> String,
+{
+    match (bootstrap_pin, pin_opt) {
+        (Some(pin), None) => validate_pin(pin),
+        (None, Some("generate")) | (None, None) => Ok(generator()),
+        (None, Some(other)) => bail!("--pin accepts only 'generate', got '{other}'"),
+        (Some(_), Some(_)) => unreachable!("clap enforces conflicts"),
+    }
+}
+
 fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -83,12 +99,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let pin = match (cli.bootstrap_pin, cli.pin.as_deref()) {
-        (Some(pin), None) => validate_pin(pin)?,
-        (None, Some("generate")) | (None, None) => random_pin(),
-        (None, Some(other)) => bail!("--pin accepts only 'generate', got '{other}'"),
-        (Some(_), Some(_)) => unreachable!("clap enforces conflicts"),
-    };
+    let pin = select_pin(cli.bootstrap_pin, cli.pin.as_deref(), random_pin)?;
 
     onboard_permissions();
 
@@ -211,5 +222,67 @@ fn onboard_permissions() {
     #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         eprintln!("erd-host capture and input are not wired for this platform yet.");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pin_default_selects_injected_generator_branch() {
+        let mut call_count = 0;
+        let pin = select_pin(None, None, || {
+            call_count += 1;
+            "GENERATED_8888".to_string()
+        })
+        .unwrap();
+        assert_eq!(call_count, 1, "default invocation must invoke generator");
+        assert_eq!(pin, "GENERATED_8888");
+    }
+
+    #[test]
+    fn test_pin_generate_flag_selects_injected_generator_branch() {
+        let mut call_count = 0;
+        let pin = select_pin(None, Some("generate"), || {
+            call_count += 1;
+            "GENERATED_7777".to_string()
+        })
+        .unwrap();
+        assert_eq!(call_count, 1, "--pin generate must invoke generator");
+        assert_eq!(pin, "GENERATED_7777");
+    }
+
+    #[test]
+    fn test_pin_explicit_bootstrap_pin_bypasses_generator() {
+        let mut call_count = 0;
+        let pin = select_pin(Some("87654321".into()), None, || {
+            call_count += 1;
+            "GENERATED_FAIL".to_string()
+        })
+        .unwrap();
+        assert_eq!(
+            call_count, 0,
+            "explicit bootstrap PIN must bypass generator"
+        );
+        assert_eq!(pin, "87654321");
+    }
+
+    #[test]
+    fn test_pin_validation_accepts_8_digits_and_rejects_invalid() {
+        assert!(validate_pin("12345678".into()).is_ok());
+        assert!(validate_pin("00000000".into()).is_ok());
+        assert!(validate_pin("99999999".into()).is_ok());
+        assert!(validate_pin("1234567".into()).is_err());
+        assert!(validate_pin("123456789".into()).is_err());
+        assert!(validate_pin("1234abcd".into()).is_err());
+        assert!(validate_pin(" 1234567".into()).is_err());
+    }
+
+    #[test]
+    fn test_random_pin_retained_and_format_valid() {
+        let pin = random_pin();
+        assert_eq!(pin.len(), 8);
+        assert!(pin.bytes().all(|b| b.is_ascii_digit()));
     }
 }
