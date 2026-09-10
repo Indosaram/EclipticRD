@@ -63,7 +63,8 @@ fn mock_server_pairing_handshake_and_input_round_trip() {
             height: 1080,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: Capabilities::TEXT_CLIPBOARD_SYNC,
+            capabilities: Capabilities::TEXT_CLIPBOARD_SYNC
+                | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_id: String::new(),
             session_salt: [0; 16],
         };
@@ -74,9 +75,11 @@ fn mock_server_pairing_handshake_and_input_round_trip() {
             ))
             .unwrap();
 
-        let mut ping = [0_u8; 1];
-        udp.recv_from(&mut ping).unwrap();
-        assert_eq!(ping, [0xff]);
+        let mut ping = [0_u8; 1024];
+        let (ping_len, _) = udp.recv_from(&mut ping).unwrap();
+        let mut c2h = erd_net::DatagramCipher::derive(&grant.key, &handshake.session_salt, erd_net::Direction::ClientToHost).unwrap();
+        let (ping_hdr, _) = c2h.open_datagram(&ping[..ping_len]).unwrap();
+        assert_eq!(ping_hdr.packet_type, PacketType::Ping);
 
         let input_packet = stream.read_frame().unwrap();
         let (header, payload) = split_packet(&input_packet);
@@ -91,7 +94,8 @@ fn mock_server_pairing_handshake_and_input_round_trip() {
         tcp_port: tcp_address.port(),
         udp_port,
         client_name: "rust-client".to_owned(),
-        capabilities: Capabilities::TEXT_CLIPBOARD_SYNC,
+        capabilities: Capabilities::TEXT_CLIPBOARD_SYNC
+            | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
         pairing_store_path: Some(pairing_path.clone()),
         connect_timeout: erd_app::CONNECT_TIMEOUT,
         handshake_ack_timeout: erd_app::HANDSHAKE_ACK_TIMEOUT,
@@ -197,7 +201,7 @@ fn connect_with_pairing_direct_round_trip() {
             height: 1080,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: Capabilities::empty(),
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_id: String::new(),
             session_salt: [0; 16],
         };
@@ -208,9 +212,11 @@ fn connect_with_pairing_direct_round_trip() {
             ))
             .unwrap();
 
-        let mut ping = [0_u8; 1];
-        udp.recv_from(&mut ping).unwrap();
-        assert_eq!(ping, [0xff]);
+        let mut ping = [0_u8; 1024];
+        let (ping_len, _) = udp.recv_from(&mut ping).unwrap();
+        let mut c2h = erd_net::DatagramCipher::derive(&key, &handshake.session_salt, erd_net::Direction::ClientToHost).unwrap();
+        let (ping_hdr, _) = c2h.open_datagram(&ping[..ping_len]).unwrap();
+        assert_eq!(ping_hdr.packet_type, PacketType::Ping);
     });
 
     let config = SessionConfig {
@@ -218,7 +224,7 @@ fn connect_with_pairing_direct_round_trip() {
         tcp_port: tcp_address.port(),
         udp_port,
         client_name: "rust-client".to_owned(),
-        capabilities: Capabilities::empty(),
+        capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
         pairing_store_path: None,
         connect_timeout: Duration::from_secs(1),
         handshake_ack_timeout: Duration::from_secs(1),
@@ -383,7 +389,7 @@ fn mock_server_abr_bitrate_adjust_round_trip() {
             .write_frame(&packet(PacketType::HandshakeAck, payload))
             .unwrap();
 
-        let mut probe = [0_u8; 1];
+        let mut probe = [0_u8; 1024];
         udp.recv_from(&mut probe).unwrap();
 
         let control_packet = stream.read_frame().unwrap();
@@ -403,7 +409,7 @@ fn mock_server_abr_bitrate_adjust_round_trip() {
         tcp_port: tcp_address.port(),
         udp_port,
         client_name: "abr-client".to_owned(),
-        capabilities: Capabilities::empty(),
+        capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
         pairing_store_path: Some(temporary.path().join("pairings.json")),
         connect_timeout: Duration::from_secs(5),
         handshake_ack_timeout: Duration::from_secs(5),
@@ -456,7 +462,7 @@ fn mock_server_stream_config_negotiation_round_trip() {
             .write_frame(&packet(PacketType::HandshakeAck, payload))
             .unwrap();
 
-        let mut probe = [0_u8; 1];
+        let mut probe = [0_u8; 1024];
         udp.recv_from(&mut probe).unwrap();
 
         let req_frame = stream.read_frame().unwrap();
@@ -485,7 +491,7 @@ fn mock_server_stream_config_negotiation_round_trip() {
         tcp_port: tcp_address.port(),
         udp_port,
         client_name: "config-client".to_owned(),
-        capabilities: Capabilities::empty(),
+        capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
         pairing_store_path: Some(temporary.path().join("pairings.json")),
         connect_timeout: Duration::from_secs(5),
         handshake_ack_timeout: Duration::from_secs(5),
@@ -521,4 +527,163 @@ fn mock_server_stream_config_negotiation_round_trip() {
 
     server.join().unwrap();
     session.disconnect().unwrap();
+}
+
+#[test]
+fn udp_client_rejects_host_missing_authenticated_registration_capability() {
+    let pairing_id = "test-caps-id";
+    let key = [0x55; 32];
+    let psk = PskIdentity::pairing(pairing_id, &key).unwrap();
+    let listener = TlsPskServer::new([psk])
+        .unwrap()
+        .bind("127.0.0.1:0")
+        .unwrap();
+    let tcp_address = listener.local_addr().unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_port = udp.local_addr().unwrap().port();
+
+    let server = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap();
+        let handshake_packet = stream.read_frame().unwrap();
+        let (header, payload) = split_packet(&handshake_packet);
+        assert_eq!(header.packet_type, PacketType::Handshake);
+        let handshake = Handshake::decode(payload).unwrap();
+        assert_eq!(handshake.pairing_id, pairing_id);
+
+        // Host sends acknowledgement with Capabilities::empty() (missing AUTHENTICATED_UDP_REGISTRATION)
+        let acknowledgement = Handshake {
+            name: "mock-host".to_owned(),
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::empty(),
+            pairing_id: String::new(),
+            session_salt: [0; 16],
+        };
+        stream
+            .write_frame(&packet(
+                PacketType::HandshakeAck,
+                &acknowledgement.encode().unwrap(),
+            ))
+            .unwrap();
+    });
+
+    let config = SessionConfig {
+        host: "127.0.0.1".to_owned(),
+        tcp_port: tcp_address.port(),
+        udp_port,
+        client_name: "rust-client".to_owned(),
+        capabilities: Capabilities::STREAM_CONFIGURATION | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+        pairing_store_path: None,
+        connect_timeout: Duration::from_secs(2),
+        handshake_ack_timeout: Duration::from_secs(2),
+    };
+    let session = ClientSession::new(config).unwrap();
+    let record = erd_app::PairingRecord {
+        id: pairing_id.to_string(),
+        name: "mock-host".to_string(),
+        key: key.to_vec(),
+        added_at_unix_ms: 0,
+    };
+    let result = session.connect_with_pairing(record);
+    assert!(
+        matches!(result, Err(SessionError::MissingAuthenticatedRegistration)),
+        "client must fail before Ready when host lacks authenticated registration capability, got: {result:?}"
+    );
+    assert_ne!(
+        session.state().unwrap(),
+        SessionState::Ready,
+        "session must not be Ready"
+    );
+    server.join().unwrap();
+}
+
+#[test]
+fn udp_client_sends_authenticated_registration_and_preserves_nonce() {
+    let pairing_id = "test-reg-nonce-id";
+    let key = [0x66; 32];
+    let psk = PskIdentity::pairing(pairing_id, &key).unwrap();
+    let listener = TlsPskServer::new([psk])
+        .unwrap()
+        .bind("127.0.0.1:0")
+        .unwrap();
+    let tcp_address = listener.local_addr().unwrap();
+    let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let udp_port = udp.local_addr().unwrap().port();
+
+    let server = thread::spawn(move || {
+        let mut stream = listener.accept().unwrap();
+        let handshake_packet = stream.read_frame().unwrap();
+        let (header, payload) = split_packet(&handshake_packet);
+        assert_eq!(header.packet_type, PacketType::Handshake);
+        let handshake = Handshake::decode(payload).unwrap();
+        let salt = handshake.session_salt;
+
+        let acknowledgement = Handshake {
+            name: "mock-host".to_owned(),
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::STREAM_CONFIGURATION | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+            pairing_id: String::new(),
+            session_salt: [0; 16],
+        };
+        stream
+            .write_frame(&packet(
+                PacketType::HandshakeAck,
+                &acknowledgement.encode().unwrap(),
+            ))
+            .unwrap();
+
+        // Host receives registration datagram from client
+        let mut reg_buf = [0_u8; 1024];
+        let (reg_len, _client_udp_addr) = udp.recv_from(&mut reg_buf).unwrap();
+
+        // Must open cleanly with ClientToHost cipher (consuming nonce counter 1)
+        let mut c2h_cipher = erd_net::DatagramCipher::derive(&key, &salt, erd_net::Direction::ClientToHost).unwrap();
+        let (reg_header, reg_payload) = c2h_cipher.open_datagram(&reg_buf[..reg_len]).unwrap();
+        assert_eq!(reg_header.packet_type, PacketType::Ping, "registration must be PacketType::Ping");
+        assert!(reg_payload.is_empty(), "registration ping payload must be empty");
+
+        // The nonce counter 1 was consumed by registration. Replaying counter 1 must fail.
+        assert!(c2h_cipher.open(&reg_buf[PacketHeader::SIZE..reg_len], &reg_buf[..PacketHeader::SIZE]).is_err(), "replayed counter 1 must be rejected by host replay window");
+
+        // Next, host awaits subsequent session UDP datagram sent by the client.
+        // If the client preserved cipher nonce ownership, this packet uses nonce counter 2,
+        // which the SAME host c2h_cipher cleanly opens and verifies.
+        let mut subseq_buf = [0_u8; 1024];
+        let (subseq_len, _) = udp.recv_from(&mut subseq_buf).unwrap();
+        let (subseq_header, subseq_payload) = c2h_cipher.open_datagram(&subseq_buf[..subseq_len]).unwrap();
+        assert_eq!(subseq_header.packet_type, PacketType::Ping);
+        assert_eq!(subseq_payload, b"subsequent-session-packet");
+        assert_eq!(subseq_header.sequence, 1);
+    });
+
+    let config = SessionConfig {
+        host: "127.0.0.1".to_owned(),
+        tcp_port: tcp_address.port(),
+        udp_port,
+        client_name: "rust-client".to_owned(),
+        capabilities: Capabilities::STREAM_CONFIGURATION | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
+        pairing_store_path: None,
+        connect_timeout: Duration::from_secs(2),
+        handshake_ack_timeout: Duration::from_secs(2),
+    };
+    let session = ClientSession::new(config).unwrap();
+    let record = erd_app::PairingRecord {
+        id: pairing_id.to_string(),
+        name: "mock-host".to_string(),
+        key: key.to_vec(),
+        added_at_unix_ms: 0,
+    };
+    let ready = session.connect_with_pairing(record).unwrap();
+    assert_eq!(ready.server.name, "mock-host");
+    assert_eq!(session.state().unwrap(), SessionState::Ready);
+
+    // Exercise actual subsequent session UDP send to prove client sender was not re-derived
+    session.send_udp(PacketType::Ping, b"subsequent-session-packet").unwrap();
+
+    server.join().unwrap();
 }

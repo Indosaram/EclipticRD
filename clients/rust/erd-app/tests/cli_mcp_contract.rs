@@ -68,7 +68,7 @@ async fn owned_session(shutdown: Shutdown) {
                 height: 64,
                 scale: 1.0,
                 version: PROTOCOL_VERSION,
-                capabilities: Capabilities::empty(),
+                capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
                 pairing_id: String::new(),
                 session_salt: [0; 16],
             };

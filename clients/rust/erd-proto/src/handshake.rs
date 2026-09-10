@@ -20,6 +20,7 @@ impl Capabilities {
     pub const COLOR_HDR: Self = Self(1 << 4);
     pub const GAMEPAD: Self = Self(1 << 5);
     pub const PEN_INPUT: Self = Self(1 << 6);
+    pub const AUTHENTICATED_UDP_REGISTRATION: Self = Self(1 << 7);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -33,7 +34,8 @@ impl Capabilities {
                 | Self::COLOR_444.0
                 | Self::COLOR_HDR.0
                 | Self::GAMEPAD.0
-                | Self::PEN_INPUT.0,
+                | Self::PEN_INPUT.0
+                | Self::AUTHENTICATED_UDP_REGISTRATION.0,
         )
     }
 

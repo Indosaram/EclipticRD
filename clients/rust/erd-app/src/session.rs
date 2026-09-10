@@ -66,7 +66,9 @@ impl SessionConfig {
             tcp_port: DEFAULT_TCP_PORT,
             udp_port: DEFAULT_UDP_PORT,
             client_name: client_name.into(),
-            capabilities: Capabilities::STREAM_CONFIGURATION | Capabilities::TEXT_CLIPBOARD_SYNC,
+            capabilities: Capabilities::STREAM_CONFIGURATION
+                | Capabilities::TEXT_CLIPBOARD_SYNC
+                | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_store_path: None,
             connect_timeout: CONNECT_TIMEOUT,
             handshake_ack_timeout: HANDSHAKE_ACK_TIMEOUT,
@@ -128,6 +130,8 @@ pub enum SessionError {
     PairingStore(#[from] PairingStoreError),
     #[error("I/O failed: {0}")]
     Io(#[from] io::Error),
+    #[error("host lacks authenticated UDP registration capability")]
+    MissingAuthenticatedRegistration,
 }
 
 struct SessionStateInner {
@@ -216,7 +220,7 @@ impl ClientSession {
 
     /// Returns the most recently received input acknowledgement (sequence, success, error_code).
     pub fn last_input_ack(&self) -> Option<(u32, bool, u8)> {
-        self.last_input_ack.lock().ok()?.clone()
+        *self.last_input_ack.lock().ok()?
     }
 
     /// Configure before connecting; clones made later share this endpoint trace.
@@ -812,8 +816,14 @@ impl ClientSession {
             });
         }
         let server = Handshake::decode(&payload)?;
+        if !server
+            .capabilities
+            .contains(Capabilities::AUTHENTICATED_UDP_REGISTRATION)
+        {
+            return Err(SessionError::MissingAuthenticatedRegistration);
+        }
         let key = pairing.key_array()?;
-        let udp_send = DatagramCipher::derive(&key, &salt, Direction::ClientToHost)?;
+        let mut udp_send = DatagramCipher::derive(&key, &salt, Direction::ClientToHost)?;
         let udp_receive = DatagramCipher::derive(&key, &salt, Direction::HostToClient)?;
         let udp_address = resolve_one((&*self.config.host, self.config.udp_port))?;
         let udp = UdpSocket::bind(if udp_address.is_ipv6() {
@@ -836,7 +846,9 @@ impl ClientSession {
         let _ = rustix::net::sockopt::set_socket_send_buffer_size(&udp, 4 * 1024 * 1024);
         udp.connect(udp_address)?;
         udp.set_read_timeout(Some(HEARTBEAT_INTERVAL * 3))?;
-        udp.send(&[0xff])?;
+        let reg_header = PacketHeader::new(PacketType::Ping, 0, current_unix_ms() as u32, 0);
+        let reg_packet = udp_send.seal_datagram(&reg_header, &[])?;
+        udp.send(&reg_packet)?;
         {
             let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
             if let Some(tcp) = tcp.as_mut() {
@@ -1339,7 +1351,7 @@ mod cancellation_tests {
                 height: 1080,
                 scale: 1.0,
                 version: PROTOCOL_VERSION,
-                capabilities: Capabilities::empty(),
+                capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
                 pairing_id: String::new(),
                 session_salt: [0; 16],
             };
@@ -1350,9 +1362,11 @@ mod cancellation_tests {
                 ))
                 .unwrap();
 
-            let mut ping = [0_u8; 1];
-            let (_, client_udp_addr) = udp.recv_from(&mut ping).unwrap();
-            assert_eq!(ping, [0xff]);
+            let mut ping = [0_u8; 1024];
+            let (reg_len, client_udp_addr) = udp.recv_from(&mut ping).unwrap();
+            let mut c2h = DatagramCipher::derive(&key, &salt, Direction::ClientToHost).unwrap();
+            let (reg_hdr, _) = c2h.open_datagram(&ping[..reg_len]).unwrap();
+            assert_eq!(reg_hdr.packet_type, PacketType::Ping);
 
             (udp, client_udp_addr, key, salt, stream)
         });
@@ -1362,7 +1376,7 @@ mod cancellation_tests {
             tcp_port: tcp_address.port(),
             udp_port,
             client_name: "rust-client".to_owned(),
-            capabilities: Capabilities::empty(),
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_store_path: None,
             connect_timeout: Duration::from_secs(2),
             handshake_ack_timeout: Duration::from_secs(2),

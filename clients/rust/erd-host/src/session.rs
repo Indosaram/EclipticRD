@@ -438,6 +438,8 @@ pub enum SessionError {
     Discovery(#[from] erd_net::discovery::DiscoveryError),
     #[error("media pipeline stopped")]
     MediaStopped,
+    #[error("peer lacks authenticated UDP registration capability")]
+    MissingAuthenticatedRegistration,
 }
 
 #[derive(Debug)]
@@ -2466,6 +2468,12 @@ impl HostServer {
                         clipboard_sync = handshake
                             .capabilities
                             .contains(Capabilities::TEXT_CLIPBOARD_SYNC);
+                        if !handshake
+                            .capabilities
+                            .contains(Capabilities::AUTHENTICATED_UDP_REGISTRATION)
+                        {
+                            return Err(SessionError::MissingAuthenticatedRegistration);
+                        }
                         debug!(
                             clipboard_sync,
                             bits = handshake.capabilities.bits(),
@@ -2492,7 +2500,8 @@ impl HostServer {
                             height: self.config.display.logical_height.min(u16::MAX as u32) as u16,
                             scale: self.config.display.scale_factor(),
                             version: PROTOCOL_VERSION,
-                            capabilities: Capabilities::STREAM_CONFIGURATION,
+                            capabilities: Capabilities::STREAM_CONFIGURATION
+                                | Capabilities::AUTHENTICATED_UDP_REGISTRATION,
                             pairing_id: String::new(),
                             session_salt: [0_u8; 16],
                         };
@@ -2673,17 +2682,30 @@ impl HostServer {
         udp_peer: &mut Option<SocketAddr>,
         receive_cipher: Option<&mut DatagramCipher>,
     ) -> Result<(), SessionError> {
+        let Some(cipher) = receive_cipher else {
+            return Ok(());
+        };
         let mut buffer = [0_u8; 2_048];
-        loop {
+        for _ in 0..MAX_UDP_DISCOVERY_BURST {
             match self.udp_socket.recv_from(&mut buffer) {
                 Ok((length, peer)) if peer.ip() == tcp_peer.ip() => {
-                    if length == 1 && buffer[0] == 0xff {
-                        *udp_peer = Some(peer);
-                    } else if let Some(cipher) = receive_cipher {
-                        let _ = cipher.open_datagram(&buffer[..length]);
-                        *udp_peer = Some(peer);
+                    if udp_peer.is_some() {
+                        continue;
                     }
-                    return Ok(());
+                    if length < 40 {
+                        continue;
+                    }
+                    match cipher.open_datagram(&buffer[..length]) {
+                        Ok((header, payload)) => {
+                            if header.packet_type == PacketType::Ping && payload.is_empty() {
+                                *udp_peer = Some(peer);
+                                return Ok(());
+                            }
+                        }
+                        Err(_) => {
+                            continue;
+                        }
+                    }
                 }
                 Ok(_) => continue,
                 Err(error)
@@ -2696,8 +2718,13 @@ impl HostServer {
                 Err(error) => return Err(SessionError::Io(error)),
             }
         }
+        Ok(())
     }
 }
+
+/// Maximum number of UDP registration datagrams processed per discovery step
+/// before yielding back to the outer session loop to prevent TCP control starvation.
+pub const MAX_UDP_DISCOVERY_BURST: usize = 32;
 
 /// Explicit conservative UDP payload budget ensuring datagrams never exceed
 /// the 1280-byte MTU standard for IPv6 and Tailscale / WireGuard virtual interfaces.
@@ -3534,7 +3561,7 @@ mod tests {
             height: 0,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: Capabilities::empty(),
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_id: "deadline-client".into(),
             session_salt: [9; 16],
         };
@@ -3736,7 +3763,7 @@ mod tests {
             height: 0,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: Capabilities::empty(),
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_id: "lifecycle".into(),
             session_salt: [5; 16],
         };
@@ -3758,7 +3785,11 @@ mod tests {
         udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         // When: disconnect before discovery, or corrupt control after real UDP output.
         if malformed {
-            udp.send_to(&[0xff], udp_addr).unwrap();
+            let mut c2h =
+                DatagramCipher::derive(&key, &[5; 16], Direction::ClientToHost).unwrap();
+            let reg =
+                c2h.seal_datagram(&PacketHeader::new(PacketType::Ping, 0, 0, 0), &[]).unwrap();
+            udp.send_to(&reg, udp_addr).unwrap();
             let mut buffer = [0; 2048];
             let (length, _) = udp.recv_from(&mut buffer).unwrap();
             let mut cipher =
@@ -4035,7 +4066,7 @@ mod tests {
             height: 0,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: Capabilities::empty(),
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_id: grant.pairing_id,
             session_salt: salt,
         };
@@ -4052,7 +4083,11 @@ mod tests {
 
         let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
         udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        udp.send_to(&[0xff], udp_addr).unwrap();
+        let mut c2h =
+            DatagramCipher::derive(&grant.key, &salt, Direction::ClientToHost).unwrap();
+        let reg =
+            c2h.seal_datagram(&PacketHeader::new(PacketType::Ping, 0, 0, 0), &[]).unwrap();
+        udp.send_to(&reg, udp_addr).unwrap();
         let mut receive =
             DatagramCipher::derive(&grant.key, &salt, Direction::HostToClient).unwrap();
         let mut buffer = [0_u8; 2_048];
@@ -4140,7 +4175,7 @@ mod tests {
             height: 0,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: Capabilities::empty(),
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_id: "bitrate-test".into(),
             session_salt: [0x33; 16],
         };
@@ -4230,7 +4265,7 @@ mod tests {
             height: 0,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: Capabilities::empty(),
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_id: "config-test".into(),
             session_salt: [0x88; 16],
         };
@@ -4353,7 +4388,7 @@ mod tests {
             height: 0,
             scale: 1.0,
             version: PROTOCOL_VERSION,
-            capabilities: Capabilities::empty(),
+            capabilities: Capabilities::AUTHENTICATED_UDP_REGISTRATION,
             pairing_id: pairing_id.to_string(),
             session_salt,
         };
@@ -4712,5 +4747,262 @@ mod tests {
                 "server must not send HandshakeAck for duplicate handshake"
             );
         }
+    }
+
+    #[test]
+    fn test_udp_discover_peer_rejects_invalid_packets_and_fixes_endpoint() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let (consent_tx, _consent_rx) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let server = HostServer::bind(config).unwrap();
+        let host_udp_addr = server.udp_socket.local_addr().unwrap();
+
+        let key = [0x77; 32];
+        let salt = [0x88; 16];
+        let prior_salt = [0x33; 16];
+
+        // Independent client-send and host-receive cipher instances
+        let mut client_c2h = DatagramCipher::derive(&key, &salt, Direction::ClientToHost).unwrap();
+        let mut host_c2h = DatagramCipher::derive(&key, &salt, Direction::ClientToHost).unwrap();
+        let mut host_h2c = DatagramCipher::derive(&key, &salt, Direction::HostToClient).unwrap();
+        let mut client_h2c = DatagramCipher::derive(&key, &salt, Direction::HostToClient).unwrap();
+        let mut prior_client_c2h = DatagramCipher::derive(&key, &prior_salt, Direction::ClientToHost).unwrap();
+
+        let client_udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client_udp.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        let client_addr = client_udp.local_addr().unwrap();
+
+        let attacker_udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        attacker_udp.set_nonblocking(true).unwrap();
+        let attacker_addr = attacker_udp.local_addr().unwrap();
+
+        let tcp_peer = client_addr; // Same IP: 127.0.0.1
+        let mut udp_peer: Option<SocketAddr> = None;
+
+        let mut peek_buf = [0_u8; 2048];
+        let mut check_buf = [0_u8; 64];
+
+        // Stage 1a: Plaintext 0xff probe from attacker must be consumed but NOT set udp_peer
+        attacker_udp.send_to(&[0xff], host_udp_addr).unwrap();
+        let (peek_len, peek_from) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        assert_eq!(peek_len, 1);
+        assert_eq!(peek_from, attacker_addr);
+        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        assert_eq!(udp_peer, None, "plaintext probe must not register endpoint");
+        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "plaintext probe must have been consumed from socket");
+
+        // Stage 1b: Short malformed packet (< 40 bytes)
+        let malformed = [0x45, 0x52, 0x07, 0x00, 0x01, 0x02];
+        attacker_udp.send_to(&malformed, host_udp_addr).unwrap();
+        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        assert_eq!(peek_len, malformed.len());
+        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        assert_eq!(udp_peer, None, "short packet must not register endpoint");
+        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "short packet must have been consumed from socket");
+
+        // Stage 1c: Packet encrypted with wrong key
+        let wrong_key = [0x99; 32];
+        let mut wrong_cipher = DatagramCipher::derive(&wrong_key, &salt, Direction::ClientToHost).unwrap();
+        let ping_hdr = PacketHeader::new(PacketType::Ping, 0, 1000, 0);
+        let wrong_packet = wrong_cipher.seal_datagram(&ping_hdr, &[]).unwrap();
+        attacker_udp.send_to(&wrong_packet, host_udp_addr).unwrap();
+        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        assert_eq!(peek_len, wrong_packet.len());
+        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        assert_eq!(udp_peer, None, "wrong-key packet must not register endpoint");
+        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "wrong-key packet must have been consumed from socket");
+
+        // Stage 1d: Non-registration packet (valid encryption, but PacketType::InputEvent)
+        let input_hdr = PacketHeader::new(PacketType::InputEvent, 1, 1000, 0);
+        let non_reg_packet = client_c2h.seal_datagram(&input_hdr, &[]).unwrap();
+        client_udp.send_to(&non_reg_packet, host_udp_addr).unwrap();
+        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        assert_eq!(peek_len, non_reg_packet.len());
+        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        assert_eq!(udp_peer, None, "non-registration packet must not register endpoint");
+        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "non-registration packet must have been consumed from socket");
+
+        // Stage 1e: Ping with non-empty payload
+        let ping_payload_hdr = PacketHeader::new(PacketType::Ping, 2, 1000, 0);
+        let payload_packet = client_c2h.seal_datagram(&ping_payload_hdr, &[1, 2, 3]).unwrap();
+        client_udp.send_to(&payload_packet, host_udp_addr).unwrap();
+        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        assert_eq!(peek_len, payload_packet.len());
+        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        assert_eq!(udp_peer, None, "ping with non-empty payload must not register endpoint");
+        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "non-empty ping must have been consumed from socket");
+
+        // Stage 1f: Prior-session salt packet
+        let prior_hdr = PacketHeader::new(PacketType::Ping, 0, 1000, 0);
+        let prior_packet = prior_client_c2h.seal_datagram(&prior_hdr, &[]).unwrap();
+        client_udp.send_to(&prior_packet, host_udp_addr).unwrap();
+        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        assert_eq!(peek_len, prior_packet.len());
+        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        assert_eq!(udp_peer, None, "prior-session packet must not register endpoint");
+        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "prior-session packet must have been consumed from socket");
+
+        // Stage 2: Genuine registration packet from legitimate client (sealed empty Ping)
+        let reg_hdr = PacketHeader::new(PacketType::Ping, 3, 1000, 0);
+        let reg_packet = client_c2h.seal_datagram(&reg_hdr, &[]).unwrap();
+        client_udp.send_to(&reg_packet, host_udp_addr).unwrap();
+        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        assert_eq!(peek_len, reg_packet.len());
+        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        assert_eq!(udp_peer, Some(client_addr), "valid registration must register legitimate client endpoint");
+
+        // Stage 3: Controlled frame delivery to registered valid socket
+        let frame_hdr = PacketHeader::new(PacketType::FrameHeader, 1, 1000, 0);
+        let frame_payload = b"controlled-test-frame-content";
+        let sealed_frame = host_h2c.seal_datagram(&frame_hdr, frame_payload).unwrap();
+        server.udp_socket.send_to(&sealed_frame, udp_peer.unwrap()).unwrap();
+
+        let mut recv_buf = [0_u8; 1024];
+        let (recv_len, from_addr) = client_udp.recv_from(&mut recv_buf).unwrap();
+        assert_eq!(from_addr, host_udp_addr);
+        let (opened_hdr, opened_payload) = client_h2c.open_datagram(&recv_buf[..recv_len]).unwrap();
+        assert_eq!(opened_hdr.packet_type, PacketType::FrameHeader);
+        assert_eq!(opened_payload, frame_payload);
+
+        // Attacker received nothing
+        let mut attacker_buf = [0_u8; 1024];
+        assert!(matches!(attacker_udp.recv_from(&mut attacker_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock));
+
+        // Stage 4: Post-registration hijack attempt from attacker socket
+        let hijack_hdr = PacketHeader::new(PacketType::Ping, 4, 1000, 0);
+        let hijack_packet = client_c2h.seal_datagram(&hijack_hdr, &[]).unwrap();
+        attacker_udp.send_to(&hijack_packet, host_udp_addr).unwrap();
+        let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        assert_eq!(peek_len, hijack_packet.len());
+        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        assert_eq!(udp_peer, Some(client_addr), "post-registration packet must NOT change registered endpoint");
+        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "hijack packet must have been consumed from socket");
+
+        // Another frame sent still reaches legitimate client, not attacker
+        let frame_hdr2 = PacketHeader::new(PacketType::FrameHeader, 2, 2000, 0);
+        let sealed_frame2 = host_h2c.seal_datagram(&frame_hdr2, frame_payload).unwrap();
+        server.udp_socket.send_to(&sealed_frame2, udp_peer.unwrap()).unwrap();
+
+        let (recv_len2, _) = client_udp.recv_from(&mut recv_buf).unwrap();
+        let (opened_hdr2, _) = client_h2c.open_datagram(&recv_buf[..recv_len2]).unwrap();
+        assert_eq!(opened_hdr2.sequence, 2);
+        assert!(matches!(attacker_udp.recv_from(&mut attacker_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock));
+    }
+
+    #[test]
+    fn test_udp_registration_rejects_prior_session_datagram() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let (consent_tx, _consent_rx) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let server = HostServer::bind(config).unwrap();
+        let host_udp_addr = server.udp_socket.local_addr().unwrap();
+
+        let key = [0x77; 32];
+        let current_salt = [0x88; 16];
+        let prior_salt = [0x11; 16];
+
+        // Independent client-send with prior salt and host-receive with current salt
+        let mut prior_client_c2h = DatagramCipher::derive(&key, &prior_salt, Direction::ClientToHost).unwrap();
+        let mut host_c2h = DatagramCipher::derive(&key, &current_salt, Direction::ClientToHost).unwrap();
+
+        let client_udp = UdpSocket::bind("127.0.0.1:0").unwrap();
+        client_udp.set_nonblocking(true).unwrap();
+        let client_addr = client_udp.local_addr().unwrap();
+
+        let tcp_peer = client_addr;
+        let mut udp_peer: Option<SocketAddr> = None;
+
+        // Packet sealed with prior session's salt
+        let reg_hdr = PacketHeader::new(PacketType::Ping, 0, 1000, 0);
+        let prior_packet = prior_client_c2h.seal_datagram(&reg_hdr, &[]).unwrap();
+        client_udp.send_to(&prior_packet, host_udp_addr).unwrap();
+
+        // Prove packet arrived in host socket queue
+        let mut peek_buf = [0_u8; 2048];
+        let (peek_len, peek_from) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
+        assert_eq!(peek_len, prior_packet.len());
+        assert_eq!(peek_from, client_addr);
+
+        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        assert_eq!(udp_peer, None, "datagram from prior session must not register endpoint");
+
+        // Prove packet was consumed and discarded by discover_udp_peer
+        let mut check_buf = [0_u8; 64];
+        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "prior-session packet must have been consumed from socket");
+    }
+
+    #[test]
+    fn test_udp_host_rejects_client_missing_authenticated_registration_capability() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let key = [0x33; 32];
+        store
+            .save(PairingRecord {
+                id: "PAIR_TEST".into(),
+                name: "client-test".into(),
+                key,
+                added_at_unix_ms: 0,
+            })
+            .unwrap();
+
+        let (consent_tx, _consent_rx) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let media_starts = Arc::new(AtomicUsize::new(0));
+        let server = HostServer::bind_with_media(
+            config,
+            Arc::new(TrackingMediaSource {
+                started_count: Arc::clone(&media_starts),
+            }),
+        )
+        .unwrap();
+        let tcp_addr = server.tcp_addr().unwrap();
+        let server_thread = thread::spawn(move || server.serve_n(1));
+
+        let client = TlsPskClient::new(PskIdentity::pairing("PAIR_TEST", &key).unwrap()).unwrap();
+        let mut tcp = client.connect(tcp_addr).unwrap();
+        tcp.ssl_stream()
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+
+        // Client sends handshake with Capabilities::empty() (missing AUTHENTICATED_UDP_REGISTRATION)
+        let handshake = Handshake {
+            name: "test-client".into(),
+            width: 0,
+            height: 0,
+            scale: 1.0,
+            version: PROTOCOL_VERSION,
+            capabilities: Capabilities::empty(),
+            pairing_id: "PAIR_TEST".into(),
+            session_salt: [0x55; 16],
+        };
+        let mut packet = PacketHeader::new(PacketType::Handshake, 0, 0, 0)
+            .encode()
+            .unwrap();
+        packet.extend_from_slice(&handshake.encode().unwrap());
+        tcp.write_frame(&packet).unwrap();
+
+        // Host must terminate without sending HandshakeAck and without starting media
+        let read_res = tcp.read_frame();
+        if let Ok(frame) = read_res {
+            let (hdr, _) = decode_tcp_packet(&frame);
+            assert_ne!(
+                hdr.packet_type,
+                PacketType::HandshakeAck,
+                "host must NOT send HandshakeAck to client lacking authenticated UDP registration capability"
+            );
+        }
+        let server_res = server_thread.join().unwrap();
+        assert!(
+            server_res.is_err(),
+            "server must return error when client lacks capability"
+        );
+        assert_eq!(
+            media_starts.load(Ordering::SeqCst),
+            0,
+            "media capture must NOT start when client lacks capability"
+        );
     }
 }

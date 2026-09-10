@@ -852,3 +852,15 @@ fn capabilities_color_444_round_trip() {
     assert!(decoded.capabilities.contains(Capabilities::GAMEPAD));
     assert!(decoded.capabilities.contains(Capabilities::PEN_INPUT));
 }
+
+#[test]
+fn capabilities_authenticated_udp_registration_round_trip() {
+    let caps = Capabilities::AUTHENTICATED_UDP_REGISTRATION;
+    assert_eq!(caps.bits(), 1 << 7);
+    assert!(Capabilities::all().contains(Capabilities::AUTHENTICATED_UDP_REGISTRATION));
+
+    let handshake = sample_handshake(caps);
+    assert_round_trip(&handshake);
+    let decoded = Handshake::decode(&handshake.encode().unwrap()).unwrap();
+    assert!(decoded.capabilities.contains(Capabilities::AUTHENTICATED_UDP_REGISTRATION));
+}

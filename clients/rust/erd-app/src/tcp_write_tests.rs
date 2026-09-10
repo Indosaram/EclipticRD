@@ -48,9 +48,12 @@ fn fixture() -> Fixture {
         let hello = Handshake::decode(&hello[PacketHeader::SIZE..]).unwrap();
         peer.write_frame(&packet(PacketType::HandshakeAck, &hello.encode().unwrap()))
             .unwrap();
-        let mut wake = [0; 1];
-        server_udp.recv_from(&mut wake).unwrap();
-        assert_eq!(wake, [0xff]);
+        let mut wake = [0; 1024];
+        let (wake_len, _) = server_udp.recv_from(&mut wake).unwrap();
+        let mut c2h =
+            DatagramCipher::derive(&[19; 32], &hello.session_salt, Direction::ClientToHost).unwrap();
+        let (wake_hdr, _) = c2h.open_datagram(&wake[..wake_len]).unwrap();
+        assert_eq!(wake_hdr.packet_type, PacketType::Ping);
         peer_tx.send(peer).unwrap();
     });
     let directory = tempfile::tempdir().unwrap();

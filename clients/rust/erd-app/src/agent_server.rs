@@ -277,10 +277,8 @@ fn check_auth_header(auth_token: Option<&str>, headers_text: &str) -> bool {
                     }
                 }
             }
-            if name.eq_ignore_ascii_case("X-ERD-Token") {
-                if value == expected {
-                    return true;
-                }
+            if name.eq_ignore_ascii_case("X-ERD-Token") && value == expected {
+                return true;
             }
         }
         false
@@ -804,7 +802,7 @@ async fn handle_session_disconnect(
     });
     if let Some(error) = error {
         resp["error"] = error.into();
-        let response = send_response(
+        send_response(
             stream,
             500,
             "Internal Error",
@@ -813,7 +811,7 @@ async fn handle_session_disconnect(
         )
         .await?;
         done_tx.send_replace(true);
-        return Ok(response);
+        return Ok(());
     }
     // Teardown follows the bounded response attempt even if the client vanished.
     // No new input can appear between release, response, and backend stop.
