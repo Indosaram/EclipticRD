@@ -6,7 +6,9 @@ pub mod state;
 #[cfg(test)]
 mod tests;
 
-pub use state::{AppState, ConnectionState, SessionStats};
+pub use erd_app::{IpcError, IpcErrorCode, IpcErrorStage, PairingEndpoint, PairingSummary};
+pub use erd_render::AudioOutputEvent;
+pub use state::{AppState, ConnectionState, SessionStats, WorkerCompletion, WorkerKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -15,6 +17,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::list_hosts,
             commands::stop_discovery,
+            commands::list_pairings,
+            commands::forget_pairing,
             commands::connect,
             commands::disconnect,
             commands::stats,
