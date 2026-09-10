@@ -13,7 +13,7 @@ function deferred() {
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
-function harness({ webgl2 = true } = {}) {
+function harness({ webgl2 = true, webgl = false } = {}) {
   let now = 100, nextId = 0, lost = false;
   const raf = new Map(), calls = [], polls = [], alerts = [], draws = [], uploads = [], contexts = [], intervals = [];
   const gl = new Proxy({}, { get: (_, key) => {
@@ -31,7 +31,12 @@ function harness({ webgl2 = true } = {}) {
       setAttribute() {}, addEventListener() {}, focus() {}, closest() { return null; },
       replaceChildren(...nodes) { this.children = nodes; }, append(...nodes) { this.children.push(...nodes); },
       getBoundingClientRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
-      getContext: kind => { contexts.push(kind); return kind === 'webgl2' && !webgl2 ? null : gl; },
+      getContext: kind => {
+        contexts.push(kind);
+        if (kind === 'webgl2') return webgl2 ? gl : null;
+        if (kind === 'webgl' || kind === 'experimental-webgl') return webgl ? gl : null;
+        return null;
+      },
     });
     return elements.get(id);
   };
@@ -124,17 +129,24 @@ for (const reconnect of [false, true]) test(`old deferred poll after stop${recon
     assert.equal(h.draws.length, 1); assert.equal(h.raf.size, 1);
   }
 });
-test('unavailable WebGL2 rejects via connection error path without WebGL1 fallback', async () => {
-  const h = harness({ webgl2: false }); await h.connect();
+test('unavailable WebGL rejects via connection error path when all WebGL contexts fail', async () => {
+  const h = harness({ webgl2: false, webgl: false }); await h.connect();
   const tick = h.tick(); h.polls[0].resolve(frame());
   h.disconnect.resolve(); await tick;
-  assert.deepEqual(h.contexts, ['webgl2']); assert.equal(h.alerts.length, 0);
+  assert.deepEqual(h.contexts, ['webgl2', 'webgl']); assert.equal(h.alerts.length, 0);
   assert.equal(h.element('direct-error').hidden, false);
   assert.ok(h.element('direct-error').textContent.length > 0);
   assert.equal(h.run('connection.snapshot().phase'), 'error');
   assert.equal(h.calls.filter(c => c.cmd === 'disconnect').length, 1);
   assert.equal(h.draws.length, 0); assert.equal(h.raf.size, 0);
   assert.equal(h.run('isConnected'), false);
+});
+test('WebGL1 fallback renders successfully when WebGL2 is unavailable', async () => {
+  const h = harness({ webgl2: false, webgl: true }); await h.connect();
+  const tick = h.tick(); h.polls[0].resolve(frame()); await tick;
+  assert.deepEqual(h.contexts, ['webgl2', 'webgl']);
+  assert.equal(h.draws.length, 1);
+  assert.equal(h.run('connection.snapshot().phase'), 'streaming');
 });
 test('renderer reports draw status and preserves texture reuse; lost context never counts', async () => {
   const h = harness();

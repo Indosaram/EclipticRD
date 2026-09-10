@@ -4485,6 +4485,7 @@ version = "0.1.0"
 dependencies = [
  "erd-app",
  "erd-decode",
+ "erd-host",
  "erd-net",
  "erd-proto",
  "erd-render",

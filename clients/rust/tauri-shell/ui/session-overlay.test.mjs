@@ -258,3 +258,37 @@ test('styles.css guarantees min-width on overlay-badge and content-aware wrappin
   assert.match(stylesCss, /#session-overlay\s*\{[^}]*width:\s*min\(40rem/,
     'session-overlay width must scale with rem rather than rigid pixel width');
 });
+
+// ---------------------------------------------------------------------------
+// 6. Unified Client and Host: This Computer (Host) card and controls
+// ---------------------------------------------------------------------------
+test('index.html ships This Computer (Host) card markup and controls', () => {
+  assert.match(indexHtml, /<section class="this-computer-card" id="this-computer-card"/,
+    'this-computer-card section must exist');
+  assert.match(indexHtml, /id="this-computer-title"[^>]*>This Computer \(Host\)<\/h2>/,
+    'this-computer-title heading must exist');
+  assert.match(indexHtml, /id="this-computer-badge"/,
+    'this-computer-badge status badge must exist');
+  assert.match(indexHtml, /id="this-computer-ip"/,
+    'this-computer-ip element must exist');
+  assert.match(indexHtml, /id="this-computer-pin"/,
+    'this-computer-pin element must exist');
+  assert.match(indexHtml, /id="btn-toggle-host"/,
+    'btn-toggle-host toggle button must exist');
+  assert.match(indexHtml, /id="btn-copy-host-info"/,
+    'btn-copy-host-info copy button must exist');
+});
+
+test('styles.css styles This Computer (Host) card with status badge and button states', () => {
+  const stylesCss = readFileSync(new URL('./styles.css', import.meta.url), 'utf8');
+  assert.match(stylesCss, /\.this-computer-card\s*\{/,
+    'styles.css must include .this-computer-card styles');
+  assert.match(stylesCss, /\.badge-online\s*\{[^}]*color:\s*var\(--success\)/,
+    'badge-online must use success color for active state');
+  assert.match(stylesCss, /\.badge-paused\s*\{[^}]*color:\s*var\(--text-muted\)/,
+    'badge-paused must use muted color for paused state');
+  assert.match(stylesCss, /\.btn-host-toggle:not\(:disabled\):hover/,
+    'btn-host-toggle must specify hover styling');
+  assert.match(stylesCss, /\.btn-host-copy:not\(:disabled\):hover/,
+    'btn-host-copy must specify hover styling');
+});
