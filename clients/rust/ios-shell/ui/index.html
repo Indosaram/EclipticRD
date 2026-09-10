@@ -24,6 +24,16 @@
         <button id="btn-dismiss-alert" type="button" class="btn-icon" aria-label="Dismiss alert">✕</button>
       </div>
 
+      <section id="section-pairings" class="pairings-section" aria-label="Saved Connections">
+        <div class="pairings-header">
+          <span class="pairings-title">Saved Connections</span>
+        </div>
+        <div id="pairings-list" class="pairings-list" role="list"></div>
+        <div id="pairings-empty" class="pairings-empty" hidden>
+          No saved connections yet. Pair with a host using an 8-digit PIN below.
+        </div>
+      </section>
+
       <section id="section-discovery" class="discovery-section" aria-label="Discovered Nearby Hosts">
         <div class="discovery-header">
           <span class="discovery-title">Nearby Hosts</span>
@@ -73,15 +83,6 @@
   <section id="view-session" hidden>
     <canvas id="screen-canvas" aria-label="Remote desktop stream; touch to interact"></canvas>
     <div id="remote-cursor" class="remote-cursor" aria-hidden="true"></div>
-
-    <div id="modal-connecting" class="modal-overlay" role="dialog" aria-modal="true" hidden>
-      <div class="connecting-card">
-        <div class="spinner" aria-hidden="true"></div>
-        <div id="modal-status-text" role="status">Connecting...</div>
-        <p id="modal-host-name"></p>
-        <button id="btn-cancel-connect" type="button" class="btn-danger">Cancel</button>
-      </div>
-    </div>
 
     <aside id="overlay-pill" aria-label="Session Controls">
       <button id="btn-overlay-trigger" type="button" class="overlay-trigger" aria-expanded="false" aria-controls="overlay-bar" aria-label="Toggle Session Menu">
@@ -142,6 +143,15 @@
 
     <input id="soft-keyboard-proxy" type="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" inputmode="text" aria-hidden="true" tabindex="-1">
   </section>
+
+  <div id="modal-connecting" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="modal-status-text" hidden>
+    <div class="connecting-card">
+      <div class="spinner" aria-hidden="true"></div>
+      <div id="modal-status-text" role="status" aria-live="polite">Connecting...</div>
+      <p id="modal-host-name"></p>
+      <button id="btn-cancel-connect" type="button" class="btn-danger">Cancel</button>
+    </div>
+  </div>
 
   <script src="frame-parser.js"></script>
   <script src="touch-coords.js"></script>

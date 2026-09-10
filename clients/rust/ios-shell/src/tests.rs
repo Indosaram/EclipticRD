@@ -1,10 +1,9 @@
-#[cfg(test)]
-mod tests {
-    use erd_decode::Nv12Frame;
-    use erd_mobile::{TouchGestureHandler, TouchMode, TouchPhase, TouchPoint, ViewportState};
-    use erd_proto::{InputEventType, Modifiers};
-    use crate::frame::repack_nv12_frame;
-    use crate::state::{AppState, SessionStats};
+// allow: SIZE_OK — iOS shell unit and framing test suite
+use erd_decode::Nv12Frame;
+use erd_mobile::{TouchGestureHandler, TouchMode, TouchPhase, TouchPoint, ViewportState};
+use erd_proto::{InputEventType, Modifiers};
+use crate::frame::repack_nv12_frame;
+use crate::state::{AppState, SessionStats};
 
     #[test]
     fn frame_repacking_exact_layout_and_header() {
@@ -334,4 +333,207 @@ mod tests {
         let authentic_lookup = store.find_by_host("192.168.1.50").unwrap();
         assert!(authentic_lookup.is_some());
     }
-}
+
+    #[tokio::test]
+    async fn test_connect_missing_id_and_missing_pin_fails_before_transport() {
+        let state = AppState::new();
+        let result = state
+            .connect_async("127.0.0.1".to_string(), Some(19730), Some(19731), None, None)
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, erd_app::IpcErrorCode::PairingRequired);
+        assert_eq!(err.stage, erd_app::IpcErrorStage::Preauth);
+        assert!(!err.retryable);
+    }
+
+    #[tokio::test]
+    async fn test_connect_unknown_id_fails_before_transport_without_bootstrap() {
+        let state = AppState::new();
+        let result = state
+            .connect_async(
+                "127.0.0.1".to_string(),
+                Some(19730),
+                Some(19731),
+                None,
+                Some("NONEXISTENT-PAIRING-ID".to_string()),
+            )
+            .await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code, erd_app::IpcErrorCode::PairingRequired);
+        assert_eq!(err.stage, erd_app::IpcErrorStage::Preauth);
+        assert!(err.message.contains("NONEXISTENT-PAIRING-ID"));
+    }
+
+    #[test]
+    fn test_connect_exact_id_loads_correct_stored_pairing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("client-pairings.json");
+        let store = erd_app::PairingStore::new(&store_path);
+
+        let record_a = erd_app::PairingRecord::new(
+            "ID-TARGET-HOST-A",
+            "SharedHostName",
+            vec![0xAA; 32],
+            1000,
+        );
+        let record_b = erd_app::PairingRecord::new(
+            "ID-TARGET-HOST-B",
+            "SharedHostName",
+            vec![0xBB; 32],
+            2000,
+        );
+        store.save(record_a).unwrap();
+        store.save(record_b).unwrap();
+
+        let loaded_a = store.load("ID-TARGET-HOST-A").unwrap().unwrap();
+        assert_eq!(loaded_a.id, "ID-TARGET-HOST-A");
+        assert_eq!(loaded_a.key, vec![0xAA; 32]);
+
+        let loaded_b = store.load("ID-TARGET-HOST-B").unwrap().unwrap();
+        assert_eq!(loaded_b.id, "ID-TARGET-HOST-B");
+        assert_eq!(loaded_b.key, vec![0xBB; 32]);
+
+        let loaded_unknown = store.load("UNKNOWN-ID").unwrap();
+        assert!(loaded_unknown.is_none());
+    }
+
+    #[test]
+    fn test_list_pairings_excludes_secret_key_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("client-pairings.json");
+        let store = erd_app::PairingStore::new(&store_path);
+
+        let mut secret_key = vec![0x42; 32];
+        secret_key[0..8].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44]);
+        let record = erd_app::PairingRecord::new(
+            "PAIRING-EXCLUDE-KEY-TEST",
+            "TestSecureHost",
+            secret_key,
+            1725900000000,
+        )
+        .with_endpoints(
+            Some(erd_app::PairingEndpoint::new("100.91.254.71", 19730, 19731)),
+            Vec::new(),
+        );
+        store.save(record).unwrap();
+
+        let records = store.load_all().unwrap();
+        let summaries: Vec<erd_app::PairingSummary> =
+            records.into_iter().map(erd_app::PairingSummary::from).collect();
+
+        assert_eq!(summaries.len(), 1);
+        let summary_json = serde_json::to_string(&summaries[0]).unwrap();
+
+        assert!(summary_json.contains("\"id\":\"PAIRING-EXCLUDE-KEY-TEST\""));
+        assert!(summary_json.contains("\"hostName\":\"TestSecureHost\""));
+        assert!(summary_json.contains("\"addedAtUnixMs\":1725900000000"));
+        assert!(summary_json.contains("\"lastEndpoint\":{\"host\":\"100.91.254.71\""));
+
+        assert!(!summary_json.contains("\"key\""));
+        assert!(!summary_json.contains("3q2+7xEi"));
+    }
+
+    #[test]
+    fn test_remember_endpoint_survives_store_reload() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store_path = tmp.path().join("client-pairings.json");
+        let store = erd_app::PairingStore::new(&store_path);
+
+        let key = vec![0x55; 32];
+        let record = erd_app::PairingRecord::new(
+            "ID-PERSISTENCE-TEST",
+            "PersistHost",
+            key.clone(),
+            5000,
+        );
+        store.save(record).unwrap();
+
+        let ep1 = erd_app::PairingEndpoint::new("192.168.1.50", 19730, 19731);
+        let ok = store.remember_endpoint("ID-PERSISTENCE-TEST", &key, ep1.clone()).unwrap();
+        assert!(ok);
+
+        let store2 = erd_app::PairingStore::new(&store_path);
+        let reloaded = store2.load("ID-PERSISTENCE-TEST").unwrap().unwrap();
+        assert_eq!(reloaded.last_endpoint, Some(ep1));
+
+        let ep2 = erd_app::PairingEndpoint::new("100.91.254.71", 19730, 19731);
+        let ok2 = store2.remember_endpoint("ID-PERSISTENCE-TEST", &key, ep2.clone()).unwrap();
+        assert!(ok2);
+
+        let store3 = erd_app::PairingStore::new(&store_path);
+        let reloaded2 = store3.load("ID-PERSISTENCE-TEST").unwrap().unwrap();
+        assert_eq!(reloaded2.last_endpoint, Some(ep2));
+        assert_eq!(reloaded2.endpoint_aliases.len(), 1);
+        assert_eq!(reloaded2.endpoint_aliases[0].host, "192.168.1.50");
+    }
+
+    #[test]
+    fn test_qa_provisioning_imports_and_propagates_pairing_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let docs_dir = tmp.path().join("Documents");
+        std::fs::create_dir_all(&docs_dir).unwrap();
+
+        let qa_file = docs_dir.join("erd-device-qa.json");
+        let unique_id = "QA-PROVISIONED-UNIQUE-UUID";
+        let qa_json = serde_json::json!({
+            "host": "192.168.1.188",
+            "tcpPort": 29730,
+            "udpPort": 29731,
+            "pairingId": unique_id,
+            "pairing": {
+                "id": unique_id,
+                "name": "DifferentFriendlyHostName",
+                "key": vec![0x77; 32],
+                "addedAt": 1725900000000u64,
+                "lastEndpoint": {
+                    "host": "192.168.1.188",
+                    "tcpPort": 29730,
+                    "udpPort": 29731
+                }
+            }
+        });
+        std::fs::write(&qa_file, serde_json::to_vec(&qa_json).unwrap()).unwrap();
+
+        let resp = crate::qa::check_qa_provisioning_in_dir(tmp.path());
+        assert_eq!(resp.host, Some("192.168.1.188".to_string()));
+        assert_eq!(resp.tcp_port, Some(29730));
+        assert_eq!(resp.udp_port, Some(29731));
+        assert_eq!(resp.pairing_id, Some(unique_id.to_string()));
+        assert!(resp.auto_connect);
+
+        // File must be deleted after consumption
+        assert!(!qa_file.exists());
+
+        // Prove zero secret keys in StartupResponse
+        let resp_json = serde_json::to_string(&resp).unwrap();
+        assert!(!resp_json.contains("key"));
+        assert!(!resp_json.contains("pin"));
+    }
+
+    #[test]
+    fn test_inject_audio_event_seam_and_error_handling() {
+        let app_state = AppState::new();
+        // Without active sender, injecting returns error:
+        let res = app_state.inject_audio_event_for_test(erd_render::AudioOutputEvent::Error("test".into()));
+        assert!(res.is_err());
+
+        // Set up active sender channel:
+        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        {
+            let inner = app_state.inner.lock().unwrap();
+            *inner.audio_events_sender.lock().unwrap() = Some(tx);
+        }
+
+        let send_res = app_state.inject_audio_event_for_test(erd_render::AudioOutputEvent::Error("real-audio-failure".into()));
+        assert!(send_res.is_ok());
+
+        let received = rx.recv_timeout(std::time::Duration::from_millis(500)).unwrap();
+        match received {
+            erd_render::AudioOutputEvent::Error(msg) => assert_eq!(msg, "real-audio-failure"),
+            _ => panic!("Expected Error event"),
+        }
+    }
+
+

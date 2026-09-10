@@ -79,11 +79,19 @@ test('hidden during connecting invokes input release and disconnect', async () =
   documentTarget.hidden = false;
 
   let disconnectCalled = false;
+  let settleConnect;
   const connection = createConnectionManager({
     invoke: (cmd) => {
-      if (cmd === 'connect') return new Promise(() => {});
+      if (cmd === 'connect') {
+        return new Promise((resolve, reject) => {
+          settleConnect = reject;
+        });
+      }
       if (cmd === 'disconnect') {
         disconnectCalled = true;
+        if (settleConnect) {
+          settleConnect(new Error('cancelled'));
+        }
         return Promise.resolve(true);
       }
       return Promise.resolve(null);

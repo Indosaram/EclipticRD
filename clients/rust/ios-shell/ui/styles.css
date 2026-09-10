@@ -57,6 +57,11 @@
   display: none !important;
 }
 
+[inert] {
+  pointer-events: none !important;
+  user-select: none !important;
+}
+
 html, body {
   margin: 0;
   padding: 0;
@@ -344,7 +349,7 @@ input[type="password"]:disabled {
 }
 
 .modal-overlay {
-  position: absolute;
+  position: fixed;
   inset: 0;
   background: rgba(20, 21, 23, 0.85);
   backdrop-filter: blur(8px);
@@ -353,7 +358,7 @@ input[type="password"]:disabled {
   align-items: center;
   justify-content: center;
   padding: var(--space-4);
-  z-index: 50;
+  z-index: 100;
 }
 
 .connecting-card {
@@ -712,6 +717,111 @@ input[type="password"]:disabled {
 }
 
 .host-chevron {
+  color: var(--text-muted);
+  font-size: 1.125rem;
+}
+
+.pairings-section {
+  margin-bottom: var(--space-2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pairings-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.pairings-title {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+}
+
+.pairings-empty {
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  padding: var(--space-2) 0;
+  text-align: center;
+}
+
+.pairings-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 200px;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.pairing-card {
+  min-height: var(--touch-min);
+  padding: var(--space-2) var(--space-3);
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  text-align: left;
+  width: 100%;
+  box-sizing: border-box;
+  transition: border-color 0.15s, background 0.15s;
+  color: inherit;
+}
+
+.pairing-card:active,
+.pairing-card.selected {
+  border-color: var(--accent);
+  background: var(--card-hover);
+}
+
+.pairing-card-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pairing-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pairing-name {
+  font-weight: 600;
+  color: var(--text);
+  font-size: 0.9375rem;
+}
+
+.pairing-badge {
+  font-size: 0.6875rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  background: rgba(46, 160, 67, 0.2);
+  color: #3fb950;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.pairing-id-label {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  color: var(--text-muted);
+}
+
+.pairing-meta {
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+.pairing-chevron {
   color: var(--text-muted);
   font-size: 1.125rem;
 }

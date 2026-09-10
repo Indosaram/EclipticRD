@@ -1344,7 +1344,7 @@ mod tests {
         assert_eq!(screen.monitors.len(), 1);
         assert_eq!(screen.monitors[0].id, 1);
         assert_eq!(screen.monitors[0].name, "HDMI");
-        assert_eq!(screen.monitors[0].is_primary, true);
+        assert!(screen.monitors[0].is_primary);
     }
 
     #[test]

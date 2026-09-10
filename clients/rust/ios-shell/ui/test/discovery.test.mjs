@@ -725,3 +725,50 @@ test('card-initiated connect requires PIN for unpaired host: asserts missing-PIN
     cleanup();
   }
 });
+
+test('unpaired discovered host with identical name does not choose saved credential', async () => {
+  const { manager, getCalls, setResponse } = createFixture();
+
+  setResponse('list_pairings', [
+    {
+      id: 'SAVED-MATCHING-NAME',
+      hostName: 'IdenticalHost',
+      addedAtUnixMs: 1725900000000,
+      lastEndpoint: { host: '192.168.1.150', tcpPort: 19730, udpPort: 19731 }
+    }
+  ]);
+
+  await manager.refreshPairings();
+  assert.equal(manager.snapshot().savedPairings.length, 1);
+
+  // An untrusted discovered host advertises the EXACT SAME name
+  const discoveredHost = {
+    id: 'disc-id-999',
+    name: 'IdenticalHost',
+    ip: '192.168.1.199',
+    os: 'Linux',
+    tcp_port: 19730,
+    udp_port: 19731
+  };
+
+  manager.selectDiscoveredHost(discoveredHost);
+
+  // Verify that discovered host selection does NOT bind or select the saved credential
+  const snap = manager.snapshot();
+  assert.equal(snap.selectedHost.name, 'IdenticalHost');
+  assert.equal(snap.selectedPairing, null, 'Discovered host must not select or bind saved pairing');
+
+  // Attempting to connect without PIN MUST fail and not fall back to saved credential
+  const connectWithoutPin = await manager.connectSelectedHost(null);
+  assert.equal(connectWithoutPin, false, 'Connecting unpaired discovered host without PIN must fail');
+  assert.equal(getCalls('connect').length, 0, 'No connect invoke when PIN is absent on discovered host');
+
+  // Connecting with PIN passes explicit PIN and DOES NOT pass pairingId
+  const connectWithPin = await manager.connectSelectedHost('87654321');
+  assert.equal(connectWithPin, true);
+  const calls = getCalls('connect');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].args.pin, '87654321');
+  assert.equal(calls[0].args.pairingId, undefined, 'Must not pass pairingId when pairing discovered host with PIN');
+});
+

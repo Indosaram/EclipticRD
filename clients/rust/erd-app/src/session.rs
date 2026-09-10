@@ -1,8 +1,12 @@
+// allow: SIZE_OK — core client session state machine and network driver
 use std::{
     io,
     net::{SocketAddr, ToSocketAddrs, UdpSocket},
     path::PathBuf,
-    sync::{mpsc, Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Condvar, Mutex,
+    },
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -132,6 +136,8 @@ pub enum SessionError {
     Io(#[from] io::Error),
     #[error("host lacks authenticated UDP registration capability")]
     MissingAuthenticatedRegistration,
+    #[error("operation cancelled")]
+    Cancelled,
 }
 
 struct SessionStateInner {
@@ -166,11 +172,40 @@ impl Default for SessionStateInner {
 
 /// Thread-safe client session orchestrator. Network reads are explicit so callers can own their runtime.
 #[derive(Clone)]
+pub struct SessionInterruptHandle {
+    socket: Arc<Mutex<Option<std::net::TcpStream>>>,
+    cancelled: Arc<AtomicBool>,
+    udp: Arc<Mutex<Option<Arc<UdpTransport>>>>,
+}
+
+impl SessionInterruptHandle {
+    pub fn interrupt(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        if let Ok(guard) = self.socket.lock() {
+            if let Some(ref socket) = *guard {
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            }
+        }
+        if let Ok(guard) = self.udp.lock() {
+            if let Some(udp) = guard.as_ref() {
+                udp.cancel.send_replace(true);
+            }
+        }
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+#[derive(Clone)]
 pub struct ClientSession {
     config: SessionConfig,
     store: PairingStore,
     state: Arc<Mutex<SessionStateInner>>,
     tcp: Arc<Mutex<Option<TlsPskStream<std::net::TcpStream>>>>,
+    interrupt_socket: Arc<Mutex<Option<std::net::TcpStream>>>,
+    cancelled: Arc<AtomicBool>,
     // Lock before state/tcp when admitting sends or changing runtime ownership.
     tcp_runtime: Arc<Mutex<Option<Arc<tokio::sync::Notify>>>>,
     udp: Arc<Mutex<Option<Arc<UdpTransport>>>>,
@@ -195,6 +230,8 @@ impl ClientSession {
             store,
             state: Arc::new(Mutex::new(SessionStateInner::default())),
             tcp: Arc::new(Mutex::new(None)),
+            interrupt_socket: Arc::new(Mutex::new(None)),
+            cancelled: Arc::new(AtomicBool::new(false)),
             tcp_runtime: Arc::new(Mutex::new(None)),
             udp: Arc::new(Mutex::new(None)),
             udp_send: Arc::new(Mutex::new(None)),
@@ -654,7 +691,24 @@ impl ClientSession {
         self.handle_packet(header, payload, Some((received_at, count)))
     }
 
+    pub fn interrupt_handle(&self) -> SessionInterruptHandle {
+        SessionInterruptHandle {
+            socket: self.interrupt_socket.clone(),
+            cancelled: self.cancelled.clone(),
+            udp: self.udp.clone(),
+        }
+    }
+
+    pub fn interrupt(&self) {
+        self.interrupt_handle().interrupt();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
     pub fn disconnect(&self) -> Result<(), SessionError> {
+        self.interrupt();
         let trace_result = self
             .receiver_snapshot()
             .and_then(|snapshot| self.trace.write(&snapshot).map_err(SessionError::Io));
@@ -744,6 +798,9 @@ impl ClientSession {
         if owner.is_some() {
             return Err(SessionError::TcpRuntimeAlreadyRunning);
         }
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(SessionError::Cancelled);
+        }
         {
             let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
             state.state = SessionState::Connecting;
@@ -751,6 +808,9 @@ impl ClientSession {
             state.receiver = crate::receiver_stats::ReceiverStats::default();
         }
         let address = resolve_one((&*self.config.host, self.config.tcp_port))?;
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(SessionError::Cancelled);
+        }
         self.state
             .lock()
             .map_err(|_| SessionError::Poisoned)?
@@ -765,7 +825,30 @@ impl ClientSession {
         tcp.set_read_timeout(Some(self.config.connect_timeout))?;
         tcp.set_write_timeout(Some(self.config.connect_timeout))?;
         tcp.set_nodelay(true)?;
-        let stream = TlsPskClient::new(psk)?.connect_stream(tcp)?;
+
+        let interrupt_clone = tcp.try_clone()?;
+        *self.interrupt_socket.lock().map_err(|_| SessionError::Poisoned)? = Some(interrupt_clone);
+
+        if self.cancelled.load(Ordering::SeqCst) {
+            let _ = tcp.shutdown(std::net::Shutdown::Both);
+            return Err(SessionError::Cancelled);
+        }
+
+        let stream = match TlsPskClient::new(psk)?.connect_stream(tcp) {
+            Ok(s) => s,
+            Err(e) => {
+                if self.cancelled.load(Ordering::SeqCst) {
+                    return Err(SessionError::Cancelled);
+                }
+                return Err(SessionError::Tls(e));
+            }
+        };
+
+        if self.cancelled.load(Ordering::SeqCst) {
+            let _ = stream.ssl_stream().get_ref().shutdown(std::net::Shutdown::Both);
+            return Err(SessionError::Cancelled);
+        }
+
         *self.tcp.lock().map_err(|_| SessionError::Poisoned)? = Some(stream);
         let mut state = self.state.lock().map_err(|_| SessionError::Poisoned)?;
         state.state = next_state;
@@ -918,9 +1001,25 @@ impl ClientSession {
     }
 
     fn read_tcp_packet(&self) -> Result<(PacketHeader, Vec<u8>), SessionError> {
-        let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
-        let frame = tcp.as_mut().ok_or(SessionError::NotReady)?.read_frame()?;
-        drop(tcp);
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(SessionError::Cancelled);
+        }
+        let read_result = {
+            let mut tcp = self.tcp.lock().map_err(|_| SessionError::Poisoned)?;
+            tcp.as_mut().ok_or(SessionError::NotReady)?.read_frame()
+        };
+        let frame = match read_result {
+            Ok(f) => f,
+            Err(e) => {
+                if self.cancelled.load(Ordering::SeqCst) {
+                    return Err(SessionError::Cancelled);
+                }
+                return Err(e.into());
+            }
+        };
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(SessionError::Cancelled);
+        }
         if frame.len() < PacketHeader::SIZE {
             return Err(SessionError::Io(io::Error::new(
                 io::ErrorKind::InvalidData,

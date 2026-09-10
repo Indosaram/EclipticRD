@@ -2045,7 +2045,7 @@ mod tests {
         }
 
         fn get_latest_frame_metadata(&self) -> Option<FrameMetadata> {
-            self.frame_metadata.lock().unwrap().clone()
+            *self.frame_metadata.lock().unwrap()
         }
     }
 

@@ -34,6 +34,9 @@
   const discoveryHostsList = byId('discovery-hosts-list');
   const discoveryEmpty = byId('discovery-empty');
 
+  const pairingsList = byId('pairings-list');
+  const pairingsEmpty = byId('pairings-empty');
+
   const canvas = byId('screen-canvas');
   const remoteCursor = byId('remote-cursor');
   const modalConnecting = byId('modal-connecting');
@@ -119,20 +122,47 @@
 
     if (hasNative) {
       try {
-        const packet = await invoke('next_frame');
-        if (connection.isCurrent(generation) && packet) {
-          const parsed = FrameParser.parseFramePacket(packet);
-          if (parsed && renderer) {
-            renderer.drawFrame(parsed);
-            connection.markFrameRendered(generation);
-            updateFpsCounter();
-            if (statResolution) {
-              statResolution.textContent = `${parsed.width}x${parsed.height}`;
+        const packet = await invoke('poll_frame');
+        if (!connection.isCurrent(generation)) {
+          return;
+        }
+        if (packet) {
+          const byteLength = packet.byteLength !== undefined
+            ? packet.byteLength
+            : packet.length !== undefined
+            ? packet.length
+            : 0;
+
+          if (byteLength >= 16) {
+            const parsed = FrameParser.parseNv12Frame(packet);
+            if (parsed && parsed.ok && renderer) {
+              const success = renderer.render(parsed);
+              if (success) {
+                connection.markFrameRendered(generation);
+                updateFpsCounter();
+                if (statResolution) {
+                  statResolution.textContent = `${parsed.width}x${parsed.height}`;
+                }
+              } else {
+                console.error('Renderer failed to draw frame; initiating session cleanup');
+                if (connection.isCurrent(generation)) {
+                  stopPresentation();
+                  connection.disconnect().catch(() => {});
+                  return;
+                }
+              }
+            } else if (parsed && !parsed.ok) {
+              console.warn('Frame parse error:', parsed.error);
             }
           }
         }
       } catch (err) {
-        console.warn('next_frame poll error:', err);
+        console.error('poll_frame unrecoverable error:', err);
+        if (connection.isCurrent(generation)) {
+          stopPresentation();
+          connection.disconnect().catch(() => {});
+          return;
+        }
       }
     }
 
@@ -174,6 +204,97 @@
   }
 
   const renderedCards = new Map();
+  const renderedPairingCards = new Map();
+
+  function updatePairingsUI(snap) {
+    if (!pairingsList) return;
+
+    const pairings = snap.savedPairings || [];
+    const isEmpty = pairings.length === 0;
+    if (pairingsEmpty) {
+      pairingsEmpty.hidden = !isEmpty;
+    }
+
+    const activeIds = new Set();
+    const selectedId = snap.selectedPairing ? snap.selectedPairing.id : null;
+
+    for (const pairing of pairings) {
+      activeIds.add(pairing.id);
+      let card = renderedPairingCards.get(pairing.id);
+      const isSelected = selectedId === pairing.id;
+
+      if (!card) {
+        card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'pairing-card' + (isSelected ? ' selected' : '');
+        card.setAttribute('role', 'listitem');
+        card.dataset.pairingId = pairing.id;
+
+        card.innerHTML = [
+          '<div class="pairing-card-info">',
+          '  <div class="pairing-name-row">',
+          '    <span class="pairing-name"></span>',
+          '    <span class="pairing-badge">Saved</span>',
+          '  </div>',
+          '  <span class="pairing-id-label"></span>',
+          '  <span class="pairing-meta"></span>',
+          '</div>',
+          '<span class="pairing-chevron" aria-hidden="true">›</span>'
+        ].join('');
+
+        card.addEventListener('click', () => {
+          const pId = card.dataset.pairingId;
+          const currentPairing = (connection.snapshot().savedPairings || []).find(
+            (p) => p && p.id === pId
+          );
+          if (!currentPairing) return;
+          connection.selectPairing(currentPairing);
+          if (currentPairing.lastEndpoint && currentPairing.lastEndpoint.host) {
+            hostInput.value = currentPairing.lastEndpoint.host;
+          }
+          pinInput.value = '';
+          hostError.textContent = '';
+          pinError.textContent = '';
+        });
+
+        renderedPairingCards.set(pairing.id, card);
+        pairingsList.appendChild(card);
+      }
+
+      const nameEl = card.querySelector('.pairing-name');
+      if (nameEl && nameEl.textContent !== pairing.hostName) {
+        nameEl.textContent = pairing.hostName;
+      }
+
+      const idEl = card.querySelector('.pairing-id-label');
+      const idText = `ID: ${pairing.id}`;
+      if (idEl && idEl.textContent !== idText) {
+        idEl.textContent = idText;
+      }
+
+      const metaEl = card.querySelector('.pairing-meta');
+      const ep = pairing.lastEndpoint;
+      const metaText = ep
+        ? `${ep.host}:${ep.tcpPort} (UDP ${ep.udpPort})`
+        : 'Endpoint not yet recorded';
+      if (metaEl && metaEl.textContent !== metaText) {
+        metaEl.textContent = metaText;
+      }
+
+      if (isSelected && !card.classList.contains('selected')) {
+        card.classList.add('selected');
+      } else if (!isSelected && card.classList.contains('selected')) {
+        card.classList.remove('selected');
+      }
+    }
+
+    for (const [id, card] of renderedPairingCards.entries()) {
+      if (!activeIds.has(id)) {
+        card.remove();
+        renderedPairingCards.delete(id);
+      }
+    }
+  }
 
   function updateDiscoveryUI(snap) {
     if (!discoveryHostsList) return;
@@ -271,11 +392,15 @@
     }
   }
 
+  let previousActiveElement = null;
+  let wasModalVisible = false;
+
   function renderState(snap) {
     const phase = snap.state;
     const isBusy = phase === 'connecting' || phase === 'waiting-video' || phase === 'streaming';
     const isStreaming = phase === 'streaming';
     const isConnectingModalVisible = phase === 'connecting' || phase === 'waiting-video' || phase === 'disconnecting';
+    const isLocked = phase === 'cleanup-failed';
 
     if (phase === 'streaming' || phase === 'waiting-video') {
       connectView.hidden = true;
@@ -284,6 +409,11 @@
       connectView.hidden = false;
       sessionView.hidden = true;
     }
+
+    btnSubmit.disabled = isBusy || isLocked || !hasNative;
+    btnSubmit.textContent = isBusy ? 'Connecting…' : isLocked ? 'Cleanup Required' : 'Connect';
+    hostInput.disabled = isBusy || isLocked || !hasNative;
+    pinInput.disabled = isBusy || isLocked || !hasNative;
 
     modalConnecting.hidden = !isConnectingModalVisible;
     if (isConnectingModalVisible) {
@@ -294,14 +424,55 @@
           : 'Connecting to host...';
       modalHostName.textContent = snap.host || '';
       btnCancelConnect.disabled = phase === 'disconnecting';
+
+      connectView.inert = true;
+      connectView.setAttribute('aria-hidden', 'true');
+      sessionView.inert = true;
+      sessionView.setAttribute('aria-hidden', 'true');
+
+      if (!wasModalVisible) {
+        wasModalVisible = true;
+        const currentActive = document.activeElement;
+        if (currentActive && currentActive !== document.body && !modalConnecting.contains(currentActive)) {
+          previousActiveElement = currentActive;
+        } else if (!previousActiveElement) {
+          previousActiveElement = btnSubmit;
+        }
+        if (!btnCancelConnect.disabled) {
+          btnCancelConnect.focus();
+          if (document.activeElement !== btnCancelConnect) {
+            queueMicrotask(() => {
+              if (!modalConnecting.hidden && !btnCancelConnect.disabled) {
+                btnCancelConnect.focus();
+              }
+            });
+          }
+        }
+      }
+    } else {
+      connectView.inert = false;
+      connectView.removeAttribute('aria-hidden');
+      sessionView.inert = false;
+      sessionView.removeAttribute('aria-hidden');
+
+      if (wasModalVisible) {
+        wasModalVisible = false;
+        const targetToFocus = previousActiveElement || btnSubmit;
+        if (
+          targetToFocus &&
+          typeof targetToFocus.focus === 'function' &&
+          document.body.contains(targetToFocus)
+        ) {
+          targetToFocus.focus();
+        }
+        previousActiveElement = null;
+      }
     }
 
-    btnSubmit.disabled = isBusy || !hasNative;
-    btnSubmit.textContent = isBusy ? 'Connecting…' : 'Connect';
-    hostInput.disabled = isBusy || !hasNative;
-    pinInput.disabled = isBusy || !hasNative;
-
-    if (snap.lastError) {
+    if (snap.cleanupError) {
+      alertText.textContent = `Cleanup failed: ${snap.cleanupError}${snap.lastError ? ` (${snap.lastError})` : ''}`;
+      alertBanner.hidden = false;
+    } else if (snap.lastError) {
       alertText.textContent = snap.lastError;
       alertBanner.hidden = false;
     } else {
@@ -323,6 +494,7 @@
       if (statAudioSamples) statAudioSamples.textContent = String(snap.stats.audio_samples_played || 0);
     }
 
+    updatePairingsUI(snap);
     updateDiscoveryUI(snap);
 
     if ((phase === 'waiting-video' || phase === 'streaming') && !renderLoopActive) {
@@ -349,6 +521,7 @@
 
   connectForm.addEventListener('submit', (e) => {
     e.preventDefault();
+    previousActiveElement = e.submitter || btnSubmit;
     hostError.textContent = '';
     pinError.textContent = '';
     const host = hostInput.value.trim();
@@ -361,11 +534,26 @@
         pinInput.focus();
         return;
       }
+      pinInput.value = '';
       try {
         localStorage.setItem('eclipticrd.ios.last_host', host);
       } catch (_) {}
       connection.connectSelectedHost(pin);
       return;
+    }
+
+    const selectedPairing = connection.getSelectedPairing();
+    if (selectedPairing) {
+      const ep = selectedPairing.lastEndpoint;
+      const epHost = ep ? ep.host : '';
+      if (!host || host === epHost) {
+        pinInput.value = '';
+        try {
+          localStorage.setItem('eclipticrd.ios.last_host', epHost || host);
+        } catch (_) {}
+        connection.connectSavedPairing(selectedPairing.id);
+        return;
+      }
     }
 
     const val = ConnectionState.validateConnectRequest({ host, pin });
@@ -375,6 +563,7 @@
       return;
     }
 
+    pinInput.value = '';
     try {
       localStorage.setItem('eclipticrd.ios.last_host', host);
     } catch (_) {}
@@ -438,6 +627,44 @@
   accessoryBar.addEventListener('pointerdown', stopLocalPropagation);
   statsSheet.addEventListener('pointerdown', stopLocalPropagation);
   modalConnecting.addEventListener('pointerdown', stopLocalPropagation);
+
+  modalConnecting.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') {
+      const focusables = Array.from(
+        modalConnecting.querySelectorAll('button:not(:disabled), [tabindex]:not([tabindex="-1"])')
+      );
+      if (focusables.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first || !modalConnecting.contains(document.activeElement)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last || !modalConnecting.contains(document.activeElement)) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    } else if (e.key === 'Escape') {
+      if (!btnCancelConnect.disabled) {
+        e.preventDefault();
+        connection.disconnect();
+      }
+    }
+  });
+
+  document.addEventListener('focusin', (e) => {
+    if (!modalConnecting.hidden && !modalConnecting.contains(e.target)) {
+      if (!btnCancelConnect.disabled) {
+        btnCancelConnect.focus();
+      }
+    }
+  });
 
   accessoryBar.addEventListener('click', (e) => {
     const btn = e.target.closest('.key-btn');
@@ -600,6 +827,7 @@
     } catch (_) {}
 
     if (hasNative) {
+      connection.refreshPairings().catch(() => {});
       connection.startDiscovery().catch(() => {});
       connection.startPeriodicDiscovery(3000);
 
@@ -609,8 +837,27 @@
           if (startupInfo.host) {
             hostInput.value = startupInfo.host;
           }
-          if (startupInfo.auto_connect && startupInfo.host) {
-            connection.connect({ host: startupInfo.host, pin: null });
+          const isAutoConnect = Boolean(startupInfo.auto_connect || startupInfo.autoConnect);
+          if (isAutoConnect && startupInfo.host) {
+            const req = {
+              host: startupInfo.host,
+              pin: null
+            };
+            if (startupInfo.tcpPort !== undefined && startupInfo.tcpPort !== null) {
+              req.tcpPort = startupInfo.tcpPort;
+            } else if (startupInfo.tcp_port !== undefined && startupInfo.tcp_port !== null) {
+              req.tcpPort = startupInfo.tcp_port;
+            }
+            if (startupInfo.udpPort !== undefined && startupInfo.udpPort !== null) {
+              req.udpPort = startupInfo.udpPort;
+            } else if (startupInfo.udp_port !== undefined && startupInfo.udp_port !== null) {
+              req.udpPort = startupInfo.udp_port;
+            }
+            const pId = startupInfo.pairingId || startupInfo.pairing_id;
+            if (pId) {
+              req.pairingId = pId;
+            }
+            connection.connect(req);
           }
         }
       } catch (err) {
