@@ -113,11 +113,15 @@ struct DiskPairingRecord {
 }
 
 impl PairingStore {
-    pub fn host_default() -> Result<Self, SessionError> {
+    pub fn default_path() -> Result<PathBuf, SessionError> {
         let directory = dirs::data_dir()
             .ok_or_else(|| SessionError::Store("Application Support is unavailable".into()))?
             .join("EclipticRD");
-        Ok(Self::new(directory.join("pairing-keys.json")))
+        Ok(directory.join("host-authorizations.json"))
+    }
+
+    pub fn host_default() -> Result<Self, SessionError> {
+        Ok(Self::new(Self::default_path()?))
     }
 
     pub fn new(path: impl Into<PathBuf>) -> Self {

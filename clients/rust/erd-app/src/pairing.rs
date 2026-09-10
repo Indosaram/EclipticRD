@@ -223,14 +223,14 @@ impl PairingStore {
                 .join("Library")
                 .join("Application Support")
                 .join("EclipticRD")
-                .join("pairing-keys.json"))
+                .join("client-pairings.json"))
         }
         #[cfg(target_os = "windows")]
         {
             let app_data = std::env::var_os("APPDATA")
                 .map(PathBuf::from)
                 .ok_or(PairingStoreError::NoApplicationDataDirectory)?;
-            return Ok(app_data.join("EclipticRD").join("pairing-keys.json"));
+            return Ok(app_data.join("EclipticRD").join("client-pairings.json"));
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
@@ -240,8 +240,13 @@ impl PairingStore {
                     std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
                 })
                 .ok_or(PairingStoreError::NoApplicationDataDirectory)?;
-            Ok(base.join("EclipticRD").join("pairing-keys.json"))
+            Ok(base.join("EclipticRD").join("client-pairings.json"))
         }
+    }
+
+    pub fn legacy_default_path() -> Result<PathBuf, PairingStoreError> {
+        let default = Self::default_path()?;
+        Ok(default.with_file_name("pairing-keys.json"))
     }
 
     pub fn open_default() -> Result<Self, PairingStoreError> {
@@ -264,17 +269,22 @@ impl PairingStore {
 
     pub fn load_all(&self) -> Result<Vec<PairingRecord>, PairingStoreError> {
         match &self.backend {
-            StoreBackend::File(path) => match fs::read(path) {
-                Ok(bytes) => {
-                    let records: Vec<PairingRecord> = serde_json::from_slice(&bytes)?;
-                    for record in &records {
-                        record.key_array()?;
+            StoreBackend::File(path) => {
+                if !path.exists() {
+                    // Safe legacy client migration: if client-pairings.json does not exist
+                    // and pairing-keys.json is present, migrate valid entries into client-pairings.json.
+                    // The legacy file is preserved intact and never overwritten or deleted.
+                    let legacy_path = path.with_file_name("pairing-keys.json");
+                    if legacy_path.exists() && legacy_path != *path {
+                        let legacy_records = Self::read_file_records(&legacy_path)?;
+                        if !legacy_records.is_empty() {
+                            self.write_records(path, &legacy_records)?;
+                            return Ok(legacy_records);
+                        }
                     }
-                    Ok(records)
                 }
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
-                Err(error) => Err(error.into()),
-            },
+                Self::read_file_records(path)
+            }
             #[cfg(any(target_os = "ios", target_os = "macos"))]
             StoreBackend::Keychain(service) => load_all_keychain(service),
             StoreBackend::Ephemeral(records) => {
@@ -283,6 +293,20 @@ impl PairingStore {
                     .map_err(|_| io::Error::other("ephemeral store poisoned"))?;
                 Ok(guard.clone())
             }
+        }
+    }
+
+    fn read_file_records(path: &Path) -> Result<Vec<PairingRecord>, PairingStoreError> {
+        match fs::read(path) {
+            Ok(bytes) => {
+                let records: Vec<PairingRecord> = serde_json::from_slice(&bytes)?;
+                for record in &records {
+                    record.key_array()?;
+                }
+                Ok(records)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -727,6 +751,146 @@ fn set_private_permissions(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_client_default_path_filename() {
+        let path = PairingStore::default_path().unwrap();
+        assert_eq!(
+            path.file_name().and_then(|n| n.to_str()),
+            Some("client-pairings.json"),
+            "Client default path must be client-pairings.json"
+        );
+        let legacy_path = PairingStore::legacy_default_path().unwrap();
+        assert_eq!(
+            legacy_path.file_name().and_then(|n| n.to_str()),
+            Some("pairing-keys.json"),
+            "Client legacy path must be pairing-keys.json"
+        );
+        assert_eq!(
+            path.parent(),
+            legacy_path.parent(),
+            "Client default and legacy files reside in the same EclipticRD directory"
+        );
+    }
+
+    #[test]
+    fn test_legacy_client_migration_preserves_legacy_and_writes_client_pairings() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let legacy_file = temp_dir.path().join("pairing-keys.json");
+        let client_file = temp_dir.path().join("client-pairings.json");
+
+        let legacy_json = serde_json::json!([
+            {
+                "id": "legacy-id-42",
+                "name": "LegacyDesktop",
+                "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+                "addedAt": 0.0
+            }
+        ]);
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy_json).unwrap();
+        fs::write(&legacy_file, &legacy_bytes).unwrap();
+
+        assert!(!client_file.exists());
+        let store = PairingStore::new(&client_file);
+        let records = store.load_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "legacy-id-42");
+        assert_eq!(records[0].name, "LegacyDesktop");
+        assert_eq!(records[0].key, vec![1u8; 32]);
+
+        // client-pairings.json was created
+        assert!(client_file.exists());
+
+        // legacy pairing-keys.json is preserved completely intact
+        let current_legacy_bytes = fs::read(&legacy_file).unwrap();
+        assert_eq!(
+            current_legacy_bytes, legacy_bytes,
+            "Legacy file must be preserved byte-for-byte during migration"
+        );
+    }
+
+    #[test]
+    fn test_legacy_client_migration_skips_when_client_pairings_already_exists() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let legacy_file = temp_dir.path().join("pairing-keys.json");
+        let client_file = temp_dir.path().join("client-pairings.json");
+
+        let legacy_json = serde_json::json!([
+            {
+                "id": "legacy-id-old",
+                "name": "OldHost",
+                "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+                "addedAt": 0.0
+            }
+        ]);
+        fs::write(&legacy_file, serde_json::to_vec(&legacy_json).unwrap()).unwrap();
+
+        let client_json = serde_json::json!([
+            {
+                "id": "client-id-new",
+                "name": "NewHost",
+                "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+                "addedAt": 100.0
+            }
+        ]);
+        fs::write(&client_file, serde_json::to_vec(&client_json).unwrap()).unwrap();
+
+        let store = PairingStore::new(&client_file);
+        let records = store.load_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].id, "client-id-new");
+        assert_eq!(records[0].name, "NewHost");
+    }
+
+    #[test]
+    fn test_deletion_isolated_from_legacy() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let legacy_file = temp_dir.path().join("pairing-keys.json");
+        let client_file = temp_dir.path().join("client-pairings.json");
+
+        let legacy_json = serde_json::json!([
+            {
+                "id": "legacy-to-delete",
+                "name": "DeleteMe",
+                "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=",
+                "addedAt": 0.0
+            }
+        ]);
+        let legacy_bytes = serde_json::to_vec_pretty(&legacy_json).unwrap();
+        fs::write(&legacy_file, &legacy_bytes).unwrap();
+
+        let store = PairingStore::new(&client_file);
+        assert_eq!(store.load_all().unwrap().len(), 1);
+
+        // Delete from client store
+        store.delete("legacy-to-delete").unwrap();
+        assert!(store.load_all().unwrap().is_empty());
+        assert_eq!(store.load("legacy-to-delete").unwrap(), None);
+
+        // Legacy file must remain untouched
+        let remaining_legacy = fs::read(&legacy_file).unwrap();
+        assert_eq!(remaining_legacy, legacy_bytes);
+    }
+
+    #[test]
+    fn test_temporary_file_naming_isolated() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let client_file = temp_dir.path().join("client-pairings.json");
+        let store = PairingStore::new(&client_file);
+
+        let record = PairingRecord {
+            id: "temp-test-1".into(),
+            name: "TempHost".into(),
+            key: vec![0x11; 32],
+            added_at_unix_ms: 1700000000000,
+        };
+        store.save(record).unwrap();
+
+        // Ensure temporary file was client-pairings.json.tmp and was cleanly renamed
+        let tmp_file = client_file.with_extension("json.tmp");
+        assert!(!tmp_file.exists(), "Temporary file must be cleaned up / renamed");
+        assert!(client_file.exists());
+    }
 
     #[test]
     fn ephemeral_pairing_store_roundtrip_and_delete() {

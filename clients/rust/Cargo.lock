@@ -1106,6 +1106,7 @@ dependencies = [
  "dirs",
  "dispatch2",
  "dxgi-capture-rs",
+ "erd-app",
  "erd-net",
  "erd-proto",
  "evdev",
