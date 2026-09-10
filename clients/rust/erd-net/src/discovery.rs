@@ -1,6 +1,13 @@
 pub mod tracker;
 pub use tracker::DiscoveryTracker;
 
+pub mod endpoint;
+pub use endpoint::{
+    choose_and_format_address, choose_preferred_endpoint, choose_preferred_ip_with_scope,
+    decide_service_state_action, is_usable_endpoint, is_usable_ipv6_with_scope,
+    validate_resolved_service, DiscoveredEndpoint, ServiceStateAction,
+};
+
 #[cfg(any(target_os = "macos", target_os = "ios"))]
 pub mod apple;
 
@@ -65,126 +72,35 @@ pub enum DiscoveryError {
 
 pub fn parse_service_metadata(
     fullname: &str,
-    _host_target: &str,
+    host_target: &str,
     srv_port: u16,
     txt: &[(String, Vec<u8>)],
     addresses: &[IpAddr],
 ) -> Result<DiscoveredHost, DiscoveryError> {
-    if fullname.is_empty() || fullname.len() > 255 {
-        return Err(DiscoveryError::InvalidPayload(
-            "fullname must be between 1 and 255 bytes".into(),
-        ));
-    }
-    if !fullname.contains("._erd._tcp.") {
-        return Err(DiscoveryError::InvalidPayload(
-            "fullname must contain service type ._erd._tcp.".into(),
-        ));
-    }
-    if srv_port == 0 {
-        return Err(DiscoveryError::InvalidPayload(
-            "SRV port must be nonzero".into(),
-        ));
-    }
-
     if addresses.is_empty() {
         return Err(DiscoveryError::InvalidPayload("no addresses found".into()));
     }
+    let addr_tuples: Vec<(IpAddr, Option<u32>)> = addresses.iter().map(|&ip| (ip, None)).collect();
+    let endpoint = choose_preferred_endpoint(&addr_tuples).ok_or_else(|| {
+        DiscoveryError::InvalidPayload("no usable unicast address found".into())
+    })?;
+    validate_resolved_service(fullname, host_target, srv_port, txt, &endpoint)
+}
 
-    let mut total_len = 0;
-    for (k, v) in txt {
-        total_len += k.len() + v.len();
-        if k.is_empty() || k.len() > 255 || v.len() > 255 {
-            return Err(DiscoveryError::InvalidPayload(
-                "TXT key or value length invalid".into(),
-            ));
-        }
-        if !k.is_ascii() || k.contains('=') {
-            return Err(DiscoveryError::InvalidPayload(
-                "TXT key must be ASCII without '='".into(),
-            ));
-        }
+pub fn parse_service_metadata_scoped(
+    fullname: &str,
+    host_target: &str,
+    srv_port: u16,
+    txt: &[(String, Vec<u8>)],
+    addresses: &[(IpAddr, Option<u32>)],
+) -> Result<DiscoveredHost, DiscoveryError> {
+    if addresses.is_empty() {
+        return Err(DiscoveryError::InvalidPayload("no addresses found".into()));
     }
-    if total_len > 1300 {
-        return Err(DiscoveryError::InvalidPayload(
-            "total TXT length exceeds bounded limit".into(),
-        ));
-    }
-
-    let proto_entry = txt
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("protocol"))
-        .ok_or_else(|| DiscoveryError::InvalidPayload("missing protocol in TXT".into()))?;
-
-    if proto_entry.1.as_slice() != b"3" {
-        return Err(DiscoveryError::InvalidPayload(
-            "unsupported protocol version".into(),
-        ));
-    }
-
-    let name_entry = txt
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("name"))
-        .ok_or_else(|| DiscoveryError::InvalidPayload("missing name in TXT".into()))?;
-
-    let name = std::str::from_utf8(&name_entry.1)
-        .map_err(|_| DiscoveryError::InvalidPayload("name must be valid UTF-8".into()))?
-        .to_string();
-    if name.is_empty() || name.len() > 255 {
-        return Err(DiscoveryError::InvalidPayload(
-            "name must be between 1 and 255 bytes".into(),
-        ));
-    }
-
-    let os_entry = txt
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("os"))
-        .ok_or_else(|| DiscoveryError::InvalidPayload("missing os in TXT".into()))?;
-
-    let os = std::str::from_utf8(&os_entry.1)
-        .map_err(|_| DiscoveryError::InvalidPayload("os must be valid UTF-8".into()))?
-        .to_string();
-    if os.is_empty() || os.len() > 64 {
-        return Err(DiscoveryError::InvalidPayload(
-            "os must be between 1 and 64 bytes".into(),
-        ));
-    }
-
-    let udp_entry = txt
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("udp_port"))
-        .ok_or_else(|| DiscoveryError::InvalidPayload("missing udp_port in TXT".into()))?;
-
-    let udp_str = std::str::from_utf8(&udp_entry.1)
-        .map_err(|_| DiscoveryError::InvalidPayload("udp_port must be valid ASCII".into()))?;
-
-    let udp_port: u16 = udp_str
-        .parse()
-        .map_err(|_| DiscoveryError::InvalidPayload("udp_port is not a valid integer".into()))?;
-
-    if udp_port == 0 {
-        return Err(DiscoveryError::InvalidPayload(
-            "udp_port must be nonzero".into(),
-        ));
-    }
-
-    let chosen_ip = addresses
-        .iter()
-        .find(|ip| ip.is_ipv4() && is_usable_ipv4(ip))
-        .or_else(|| addresses.iter().find(|ip| ip.is_ipv6() && is_usable_ipv6(ip)))
-        .ok_or_else(|| {
-            DiscoveryError::InvalidPayload("no usable unicast address found".into())
-        })?;
-
-    let ip_str = chosen_ip.to_string();
-
-    Ok(DiscoveredHost {
-        id: fullname.to_string(),
-        name,
-        ip: ip_str,
-        os,
-        tcp_port: srv_port,
-        udp_port,
-    })
+    let endpoint = choose_preferred_endpoint(addresses).ok_or_else(|| {
+        DiscoveryError::InvalidPayload("no usable unicast address found".into())
+    })?;
+    validate_resolved_service(fullname, host_target, srv_port, txt, &endpoint)
 }
 
 pub struct LanDiscovery {

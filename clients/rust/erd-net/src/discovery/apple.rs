@@ -1,4 +1,8 @@
-use super::{parse_service_metadata, DiscoveredHost, DiscoveryError, DiscoveryTracker};
+pub use super::{
+    choose_and_format_address, choose_preferred_endpoint, choose_preferred_ip_with_scope,
+    decide_service_state_action, ServiceStateAction,
+};
+use super::{DiscoveredHost, DiscoveryError, DiscoveryTracker};
 use std::{
     collections::{HashMap, HashSet},
     ffi::{CStr, CString},
@@ -153,64 +157,6 @@ pub fn construct_full_name(service: &str, regtype: &str, domain: &str) -> Option
         Some(c_str.to_string_lossy().into_owned())
     } else {
         None
-    }
-}
-
-pub fn choose_and_format_address(addresses: &[(IpAddr, Option<u32>)]) -> Option<(IpAddr, String)> {
-    if let Some(&(IpAddr::V4(v4), _)) = addresses.iter().find(|(ip, _)| ip.is_ipv4()) {
-        return Some((IpAddr::V4(v4), v4.to_string()));
-    }
-
-    if let Some(&(IpAddr::V6(v6), _)) = addresses.iter().find(|(ip, _)| {
-        if let IpAddr::V6(v6) = ip {
-            (v6.segments()[0] & 0xffc0) != 0xfe80
-        } else {
-            false
-        }
-    }) {
-        return Some((IpAddr::V6(v6), v6.to_string()));
-    }
-
-    for &(ip, scope) in addresses {
-        if let IpAddr::V6(v6) = ip {
-            if (v6.segments()[0] & 0xffc0) == 0xfe80 {
-                if let Some(scope_id) = scope.filter(|&s| s > 0) {
-                    return Some((IpAddr::V6(v6), format!("{v6}%{scope_id}")));
-                }
-            }
-        }
-    }
-
-    None
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub enum ServiceStateAction {
-    Publish(DiscoveredHost),
-    Retract,
-}
-
-pub fn decide_service_state_action(
-    fullname: &str,
-    hosttarget: Option<&str>,
-    srv_port: u16,
-    txt_items: &[(String, Vec<u8>)],
-    addresses: &[(IpAddr, Option<u32>)],
-) -> ServiceStateAction {
-    let target = match hosttarget {
-        Some(t) => t,
-        None => return ServiceStateAction::Retract,
-    };
-    let (selected_ip, formatted_ip) = match choose_and_format_address(addresses) {
-        Some(res) => res,
-        None => return ServiceStateAction::Retract,
-    };
-    match parse_service_metadata(fullname, target, srv_port, txt_items, &[selected_ip]) {
-        Ok(mut host) => {
-            host.ip = formatted_ip;
-            ServiceStateAction::Publish(host)
-        }
-        Err(_) => ServiceStateAction::Retract,
     }
 }
 
@@ -1284,5 +1230,26 @@ mod tests {
             &[],
         );
         assert_eq!(no_addr_action, ServiceStateAction::Retract);
+
+        let scoped_v6_addrs = vec![(
+            IpAddr::V6(Ipv6Addr::new(0xfe80, 0, 0, 0, 0, 0, 0, 1)),
+            Some(5),
+        )];
+        let scoped_action = decide_service_state_action(
+            "desk._erd._tcp.local.",
+            Some("desk.local."),
+            19730,
+            &valid_txt,
+            &scoped_v6_addrs,
+        );
+        match scoped_action {
+            ServiceStateAction::Publish(host) => {
+                assert_eq!(host.id, "desk._erd._tcp.local.");
+                assert_eq!(host.ip, "fe80::1%5");
+                assert_eq!(host.tcp_port, 19730);
+                assert_eq!(host.udp_port, 19731);
+            }
+            ServiceStateAction::Retract => panic!("expected publish for fe80::1%5"),
+        }
     }
 }
