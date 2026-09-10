@@ -196,6 +196,57 @@ fn source_dedup_prioritizes_lan_over_tailscale() {
 }
 
 #[test]
+fn source_dedup_keeps_identical_name_distinct_endpoints_and_does_not_inherit_pairing() {
+    let lan = Ok(vec![lan_host(
+        "desktop-lan._erd._tcp.local.",
+        "DESKTOP-1LAPJMP",
+        "192.168.0.60",
+        "windows",
+        19730,
+        19731,
+    )]);
+    let tailscale = Ok(vec![super::HostItem {
+        id: "paired-uuid-1234".into(),
+        name: "DESKTOP-1LAPJMP".into(),
+        ip: "100.126.171.58".into(),
+        os: "windows".into(),
+        online: true,
+        paired: true,
+        last_seen: None,
+        tcp_port: None,
+        udp_port: None,
+    }]);
+    let records = [record("paired-uuid-1234", "DESKTOP-1LAPJMP")];
+    let merged = super::commands::merge_discovery_results(lan, tailscale, &records).unwrap();
+    // Discovery remains untrusted; keep identical-name distinct endpoints and do not inherit trust through dedup
+    assert_eq!(
+        merged.len(),
+        2,
+        "identical-name distinct endpoints must NOT be deduplicated into one card"
+    );
+    let lan_card = merged
+        .iter()
+        .find(|h| h.ip == "192.168.0.60")
+        .expect("lan card present");
+    assert_eq!(lan_card.name, "DESKTOP-1LAPJMP");
+    assert!(
+        !lan_card.paired,
+        "LAN card must remain unpaired; must not inherit pairing trust from Tailscale"
+    );
+    assert_eq!(lan_card.id, "desktop-lan._erd._tcp.local.");
+    assert_eq!(lan_card.tcp_port, Some(19730));
+    assert_eq!(lan_card.udp_port, Some(19731));
+
+    let ts_card = merged
+        .iter()
+        .find(|h| h.ip == "100.126.171.58")
+        .expect("ts card present");
+    assert_eq!(ts_card.name, "DESKTOP-1LAPJMP");
+    assert!(ts_card.paired);
+    assert_eq!(ts_card.id, "paired-uuid-1234");
+}
+
+#[test]
 fn empty_successful_lan_with_failed_tailscale_yields_empty_success() {
     let lan = Ok(vec![]);
     let tailscale = Err("Tailscale status execution failed: not found".to_string());

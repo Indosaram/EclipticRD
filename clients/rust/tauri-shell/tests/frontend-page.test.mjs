@@ -308,3 +308,68 @@ test('C3 middle button, extra button rejection, focus-loss release and relative 
     await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase === 'idle', () => fixture.settle('disconnect', null))`);
   } finally { await page.close(); }
 }, 20000);
+
+test('R8 saved credentials display separately, click connect passes explicit pairingId without PIN, and forget removes card', async () => {
+  const page = await openPage();
+  try {
+    await page.inventory();
+    const mockPairings = [
+      {
+        id: 'SAVED-DESKTOP-1',
+        hostName: 'Studio-Mac',
+        addedAtUnixMs: 1725900000000,
+        lastEndpoint: { host: '192.168.1.120', tcpPort: 19730, udpPort: 19731 }
+      },
+      {
+        id: 'SAVED-DESKTOP-2',
+        hostName: 'Studio-Mac',
+        addedAtUnixMs: 1725900005000,
+        lastEndpoint: { host: '100.91.254.71', tcpPort: 19730, udpPort: 19731 }
+      }
+    ];
+
+    // Populate saved pairings
+    await page.evaluate(`(async () => {
+      fixture.pairings = ${JSON.stringify(mockPairings)};
+      await refreshSavedPairings();
+    })()`);
+
+    // Verify separate section renders both cards, distinguishable by ID and endpoint
+    const cardCount = await page.evaluate(`document.querySelectorAll('.saved-pairing-card').length`);
+    expect(cardCount).toBe(2);
+
+    const names = await page.evaluate(`[...document.querySelectorAll('.saved-pairing-card .host-name')].map(e => e.textContent)`);
+    expect(names).toEqual(['Studio-Mac', 'Studio-Mac']);
+
+    const ids = await page.evaluate(`[...document.querySelectorAll('.saved-pairing-card')].map(e => e.dataset.pairingId)`);
+    expect(ids).toEqual(['SAVED-DESKTOP-1', 'SAVED-DESKTOP-2']);
+
+    const endpoints = await page.evaluate(`[...document.querySelectorAll('.saved-pairing-card .pairing-endpoint-meta')].map(e => e.textContent)`);
+    expect(endpoints[0]).toContain('192.168.1.120:19730');
+    expect(endpoints[1]).toContain('100.91.254.71:19730');
+
+    // Click Connect on first saved card: must pass explicit pairingId without PIN
+    const connectCall = await page.evaluate(`fixture.command('connect', () => {
+      document.querySelector('[data-pairing-id="SAVED-DESKTOP-1"] [data-action="connect-saved"]').click();
+    })`);
+    expect(connectCall.args.host).toBe('192.168.1.120');
+    expect(connectCall.args.pairingId).toBe('SAVED-DESKTOP-1');
+    expect(connectCall.args.pin).toBeNull();
+    expect(connectCall.args.tcpPort).toBe(19730);
+    expect(connectCall.args.udpPort).toBe(19731);
+
+    // Settle connect and disconnect to return to idle
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase === 'waiting-video', () => fixture.settle('connect', null))`);
+    await page.evaluate(`fixture.command('disconnect', () => { fixture.stop = doDisconnect(); })`);
+    await page.evaluate(`fixture.until(() => document.getElementById('viewport-container').dataset.phase === 'idle', () => fixture.settle('disconnect', null))`);
+
+    // Click Forget on first card: must call forget_pairing with id and remove from DOM
+    await page.evaluate(`(async () => {
+      await forgetSavedPairing('SAVED-DESKTOP-1');
+    })()`);
+    const remainingCount = await page.evaluate(`document.querySelectorAll('.saved-pairing-card').length`);
+    expect(remainingCount).toBe(1);
+    const remainingId = await page.evaluate(`document.querySelector('.saved-pairing-card').dataset.pairingId`);
+    expect(remainingId).toBe('SAVED-DESKTOP-2');
+  } finally { await page.close(); }
+}, 20000);

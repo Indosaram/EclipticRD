@@ -57,37 +57,7 @@ pub struct ConnectResponse {
     pub server_name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PairingSummary {
-    pub id: String,
-    pub host_name: String,
-    pub added_at_unix_ms: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_endpoint: Option<String>,
-}
-
-impl From<erd_app::PairingRecord> for PairingSummary {
-    fn from(record: erd_app::PairingRecord) -> Self {
-        Self {
-            id: record.id,
-            host_name: record.name,
-            added_at_unix_ms: record.added_at_unix_ms,
-            last_endpoint: None,
-        }
-    }
-}
-
-impl From<&erd_app::PairingRecord> for PairingSummary {
-    fn from(record: &erd_app::PairingRecord) -> Self {
-        Self {
-            id: record.id.clone(),
-            host_name: record.name.clone(),
-            added_at_unix_ms: record.added_at_unix_ms,
-            last_endpoint: None,
-        }
-    }
-}
+pub use erd_app::{IpcError, IpcErrorCode, IpcErrorStage, PairingEndpoint, PairingSummary};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionStats {
@@ -195,6 +165,63 @@ impl LatencyTracker {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostStatus {
+    pub running: bool,
+    pub ip: String,
+    pub port: u16,
+    pub pin: String,
+    pub auto_approve: bool,
+}
+
+pub struct HostRuntime {
+    pub running: Arc<AtomicBool>,
+    pub pin: Arc<Mutex<String>>,
+    pub port: u16,
+    pub stop_flag: Arc<AtomicBool>,
+    pub thread_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+    pub auto_approve: Arc<AtomicBool>,
+}
+
+impl Default for HostRuntime {
+    fn default() -> Self {
+        Self {
+            running: Arc::new(AtomicBool::new(false)),
+            pin: Arc::new(Mutex::new(erd_host::random_pin())),
+            port: erd_host::session::DEFAULT_TCP_PORT,
+            stop_flag: Arc::new(AtomicBool::new(false)),
+            thread_handle: Mutex::new(None),
+            auto_approve: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+impl Drop for HostRuntime {
+    fn drop(&mut self) {
+        self.stop_flag.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = self.thread_handle.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+        self.running.store(false, Ordering::SeqCst);
+    }
+}
+
+pub fn get_local_ip() -> String {
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                let ip = addr.ip();
+                if !ip.is_unspecified() && !ip.is_loopback() {
+                    return ip.to_string();
+                }
+            }
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
 pub struct AppState {
     lifecycle: tokio::sync::Mutex<()>,
     pub session: Arc<Mutex<Option<ClientSession>>>,
@@ -214,6 +241,7 @@ pub struct AppState {
     audio_playback: Arc<Mutex<AudioPlayback>>,
     audio_runtime: Mutex<Option<AudioRuntime>>,
     pub discovery: Arc<DesktopDiscoveryState>,
+    pub host_runtime: Arc<HostRuntime>,
 }
 
 pub struct DesktopDiscoveryState {
@@ -565,6 +593,7 @@ impl Default for AppState {
             audio_playback: Arc::new(Mutex::new(AudioPlayback::default())),
             audio_runtime: Mutex::new(None),
             discovery: Arc::new(DesktopDiscoveryState::default()),
+            host_runtime: Arc::new(HostRuntime::default()),
         }
     }
 }
@@ -636,6 +665,131 @@ impl AppState {
         if let Ok(mut frame) = self.latest_raw_frame.lock() {
             *frame = FrameMailbox::default();
         }
+    }
+
+    pub fn get_host_status(&self) -> Result<HostStatus, String> {
+        let pin = self
+            .host_runtime
+            .pin
+            .lock()
+            .map_err(|e| format!("Failed to lock PIN: {e}"))?
+            .clone();
+
+        Ok(HostStatus {
+            running: self.host_runtime.running.load(Ordering::SeqCst),
+            ip: get_local_ip(),
+            port: self.host_runtime.port,
+            pin,
+            auto_approve: self.host_runtime.auto_approve.load(Ordering::SeqCst),
+        })
+    }
+
+    pub fn start_host(&self) -> Result<HostStatus, String> {
+        if self.host_runtime.running.load(Ordering::SeqCst) {
+            return self.get_host_status();
+        }
+
+        if let Ok(mut guard) = self.host_runtime.thread_handle.lock() {
+            if let Some(old_handle) = guard.take() {
+                let _ = old_handle.join();
+            }
+        }
+
+        let pin = {
+            let mut guard = self
+                .host_runtime
+                .pin
+                .lock()
+                .map_err(|e| format!("Failed to lock PIN: {e}"))?;
+            if guard.is_empty() {
+                let fresh = erd_host::random_pin();
+                *guard = fresh.clone();
+                fresh
+            } else {
+                guard.clone()
+            }
+        };
+
+        let store = erd_host::PairingStore::host_default()
+            .map_err(|e| format!("Failed to open host pairing store: {e}"))?;
+
+        #[cfg(target_os = "macos")]
+        let mut config = erd_host::HostConfig::macos_default(Some(pin), store)
+            .map_err(|e| format!("Failed to create macOS host config: {e}"))?;
+
+        #[cfg(target_os = "windows")]
+        let mut config = erd_host::HostConfig::windows_default(Some(pin), store)
+            .map_err(|e| format!("Failed to create Windows host config: {e}"))?;
+
+        #[cfg(target_os = "linux")]
+        let mut config = {
+            let monitors = erd_host::probe_hyprland_monitors();
+            let output = erd_host::resolve_output_target(
+                None,
+                std::env::var("ERD_OUTPUT").ok(),
+                monitors.as_ref(),
+            );
+            erd_host::HostConfig::linux_default(Some(pin), store, output)
+                .map_err(|e| format!("Failed to create Linux host config: {e}"))?
+        };
+
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        return Err("Host server is not supported on this platform".to_string());
+
+        let auto_approve = self.host_runtime.auto_approve.clone();
+        let (consent_tx, consent_rx) = std::sync::mpsc::channel::<erd_host::ConsentPrompt>();
+        let _ = std::thread::Builder::new()
+            .name("erd-host-consent".into())
+            .spawn(move || {
+                while let Ok(prompt) = consent_rx.recv() {
+                    let approved = auto_approve.load(Ordering::SeqCst);
+                    if approved {
+                        tracing::info!(client = %prompt.client_name, "Pairing request auto-approved by host policy");
+                        prompt.respond(true);
+                    } else {
+                        tracing::warn!(client = %prompt.client_name, "Pairing request denied: host auto_approve disabled");
+                        prompt.respond(false);
+                    }
+                }
+            });
+        config.consent_sender = Some(consent_tx);
+        config.tcp_addr = std::net::SocketAddr::from(([0, 0, 0, 0], self.host_runtime.port));
+
+        let server = erd_host::HostServer::bind(config).map_err(|e| e.to_string())?;
+
+        self.host_runtime.stop_flag.store(false, Ordering::SeqCst);
+        self.host_runtime.running.store(true, Ordering::SeqCst);
+
+        let stop_flag = Arc::clone(&self.host_runtime.stop_flag);
+        let running_flag = Arc::clone(&self.host_runtime.running);
+
+        let handle = std::thread::Builder::new()
+            .name("erd-host-server".into())
+            .spawn(move || {
+                let _ = server.serve_with_stop(stop_flag);
+                running_flag.store(false, Ordering::SeqCst);
+            })
+            .map_err(|e| {
+                self.host_runtime.running.store(false, Ordering::SeqCst);
+                format!("Failed to spawn host server thread: {e}")
+            })?;
+
+        if let Ok(mut guard) = self.host_runtime.thread_handle.lock() {
+            *guard = Some(handle);
+        }
+
+        self.get_host_status()
+    }
+
+    pub fn stop_host(&self) -> Result<HostStatus, String> {
+        self.host_runtime.stop_flag.store(true, Ordering::SeqCst);
+        if let Ok(mut guard) = self.host_runtime.thread_handle.lock() {
+            if let Some(handle) = guard.take() {
+                let _ = handle.join();
+            }
+        }
+        self.host_runtime.running.store(false, Ordering::SeqCst);
+        self.get_host_status()
     }
 }
 
@@ -975,6 +1129,65 @@ pub mod commands {
         }
     }
 
+    pub fn classify_session_error(err: &erd_app::SessionError) -> IpcError {
+        match err {
+            erd_app::SessionError::PairingRejected(reason) => match reason {
+                erd_proto::PairingRejectReason::DeniedByHost => {
+                    IpcError::new(IpcErrorCode::PairingDenied, IpcErrorStage::Preauth, "Connection rejected by host")
+                }
+                erd_proto::PairingRejectReason::LockedOut => {
+                    IpcError::new(IpcErrorCode::PairingLockedOut, IpcErrorStage::Preauth, "Host locked out pairing due to excessive attempts")
+                }
+                erd_proto::PairingRejectReason::PairingDisabled => {
+                    IpcError::new(IpcErrorCode::PairingDisabled, IpcErrorStage::Preauth, "Host pairing window expired or pairing disabled")
+                }
+            },
+            erd_app::SessionError::PairingNotFound(id) => {
+                IpcError::pairing_required(format!("No saved pairing credential found for '{id}'"))
+            }
+            erd_app::SessionError::HandshakeAckTimeout => {
+                IpcError::new(IpcErrorCode::HandshakeTimeout, IpcErrorStage::Handshake, "Host did not acknowledge handshake within deadline")
+            }
+            erd_app::SessionError::MissingAuthenticatedRegistration => {
+                IpcError::incompatible_peer("Host lacks authenticated UDP registration capability")
+            }
+            erd_app::SessionError::Tls(erd_net::tls_psk::TlsPskError::Io(io_err)) => {
+                classify_io_error(io_err, IpcErrorStage::TlsPsk)
+            }
+            erd_app::SessionError::Tls(tls_err) => {
+                IpcError::new(IpcErrorCode::ConnectionFailed, IpcErrorStage::TlsPsk, format!("TLS connection failed: {tls_err}"))
+            }
+            erd_app::SessionError::Io(io_err) => {
+                classify_io_error(io_err, IpcErrorStage::Connect)
+            }
+            erd_app::SessionError::NoAddress => {
+                IpcError::new(IpcErrorCode::NetworkUnreachable, IpcErrorStage::Connect, "Address resolution returned no endpoints")
+            }
+            other => {
+                IpcError::new(IpcErrorCode::ConnectionFailed, IpcErrorStage::Connect, format!("Connection failed: {other}"))
+            }
+        }
+    }
+
+    pub fn classify_io_error(err: &std::io::Error, default_stage: IpcErrorStage) -> IpcError {
+        match err.kind() {
+            std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::HostUnreachable
+            | std::io::ErrorKind::NetworkUnreachable => {
+                IpcError::new(IpcErrorCode::NetworkUnreachable, IpcErrorStage::Connect, err.to_string())
+            }
+            std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::BrokenPipe => {
+                IpcError::new(IpcErrorCode::RemoteClosed, default_stage, err.to_string())
+            }
+            std::io::ErrorKind::TimedOut => {
+                IpcError::new(IpcErrorCode::HandshakeTimeout, default_stage, err.to_string())
+            }
+            _ => IpcError::new(IpcErrorCode::ConnectionFailed, default_stage, err.to_string()),
+        }
+    }
+
     #[tauri::command]
     pub async fn connect(
         state: State<'_, AppState>,
@@ -982,18 +1195,100 @@ pub mod commands {
         tcp_port: Option<u16>,
         udp_port: Option<u16>,
         pin: Option<String>,
-    ) -> Result<ConnectResponse, String> {
+        pairing_id: Option<String>,
+    ) -> Result<ConnectResponse, IpcError> {
         let _lifecycle = state.lifecycle.lock().await;
-        disconnect_internal(&state).await?;
+        if let Err(cleanup_err) = disconnect_internal(&state).await {
+            return Err(IpcError::new(IpcErrorCode::CleanupFailed, IpcErrorStage::Cleanup, cleanup_err));
+        }
         state.clear_metrics();
 
-        match connect_session(&state, host, tcp_port, udp_port, pin).await {
-            Ok(response) => Ok(response),
-            Err(error) => match disconnect_internal(&state).await {
-                Ok(()) => Err(error),
-                Err(cleanup) => Err(format!("{error}\n{cleanup}")),
-            },
+        if let Some(ref p) = pin {
+            let trimmed_pin = p.trim();
+            if !trimmed_pin.is_empty() && (trimmed_pin.len() != 8 || !trimmed_pin.chars().all(|c| c.is_ascii_digit())) {
+                return Err(IpcError::invalid_pin("PIN must be exactly 8 ASCII digits"));
+            }
         }
+        let trimmed_pin = pin.as_deref().map(str::trim).filter(|s| !s.is_empty());
+        let trimmed_id = pairing_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        if trimmed_pin.is_none() && trimmed_id.is_none() {
+            return Err(IpcError::pairing_required("PIN required for initial authorization"));
+        }
+
+        if trimmed_pin.is_none() {
+            if let Some(id) = trimmed_id {
+                let store = PairingStore::open_default().map_err(|e| {
+                    IpcError::connection_failed(IpcErrorStage::Client, format!("Pairing store error: {e}"))
+                })?;
+                match store.load(id) {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        return Err(IpcError::pairing_required(format!("Unknown pairing ID '{id}'; PIN required")));
+                    }
+                    Err(e) => {
+                        return Err(IpcError::connection_failed(IpcErrorStage::Client, format!("Pairing store error: {e}")));
+                    }
+                }
+            }
+        }
+
+        match connect_session(&state, host, tcp_port, udp_port, pin, pairing_id).await {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                let cleanup_result = disconnect_internal(&state).await;
+                if let Err(cleanup_err) = cleanup_result {
+                    Err(IpcError::new(
+                        error.code,
+                        IpcErrorStage::Cleanup,
+                        format!("{}\nCleanup failed: {}", error.message, cleanup_err),
+                    ))
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn authenticate_client_session(
+        session: &ClientSession,
+        pin: Option<&str>,
+        store: &PairingStore,
+        pairing_id: Option<&str>,
+    ) -> Result<ReadySession, IpcError> {
+        if let Some(pin_str) = pin.map(str::trim).filter(|s| !s.is_empty()) {
+            if pin_str.len() != 8 || !pin_str.chars().all(|c| c.is_ascii_digit()) {
+                return Err(IpcError::invalid_pin("PIN must be exactly 8 ASCII digits"));
+            }
+            return session
+                .pair_with_pin(pin_str)
+                .map_err(|e| classify_session_error(&e));
+        }
+
+        let id = match pairing_id.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(id) => id,
+            None => {
+                return Err(IpcError::pairing_required(
+                    "No PIN provided and no previous pairing found in store",
+                ));
+            }
+        };
+
+        let record = store
+            .load(id)
+            .map_err(|e| {
+                IpcError::connection_failed(
+                    IpcErrorStage::Client,
+                    format!("Pairing store error: {e}"),
+                )
+            })?
+            .ok_or_else(|| {
+                IpcError::pairing_required(format!("Unknown pairing ID '{id}'; PIN required"))
+            })?;
+
+        session
+            .connect_with_pairing(record)
+            .map_err(|e| classify_session_error(&e))
     }
 
     async fn connect_session(
@@ -1002,7 +1297,8 @@ pub mod commands {
         tcp_port: Option<u16>,
         udp_port: Option<u16>,
         pin: Option<String>,
-    ) -> Result<ConnectResponse, String> {
+        pairing_id: Option<String>,
+    ) -> Result<ConnectResponse, IpcError> {
         let tcp = tcp_port.unwrap_or(DEFAULT_TCP_PORT);
         let udp = udp_port.unwrap_or(DEFAULT_UDP_PORT);
 
@@ -1010,51 +1306,60 @@ pub mod commands {
         config.tcp_port = tcp;
         config.udp_port = udp;
 
-        let session =
-            ClientSession::new(config).map_err(|e| format!("Failed to init session: {e}"))?;
+        let session = ClientSession::new(config.clone())
+            .map_err(|e| classify_session_error(&e))?;
         // Publish cleanup ownership before any fallible connect/start work.
-        *state.session.lock().map_err(|e| e.to_string())? = Some(session.clone());
+        *state.session.lock().map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, e.to_string()))? = Some(session.clone());
 
         let session_for_connect = session.clone();
         let pin_clone = pin.clone();
-        let host_for_connect = host.clone();
+        let pairing_id_clone = pairing_id.clone();
+
         let ready_session: ReadySession =
-            tokio::task::spawn_blocking(move || -> Result<ReadySession, String> {
-                if let Some(ref pin_str) = pin_clone {
-                    if !pin_str.trim().is_empty() {
-                        return session_for_connect
-                            .pair_with_pin(pin_str.trim())
-                            .map_err(|e| format!("Pairing error: {e}"));
-                    }
-                }
+            tokio::task::spawn_blocking(move || -> Result<ReadySession, IpcError> {
                 let store = PairingStore::open_default()
-                    .map_err(|e| format!("Pairing store error: {e}"))?;
-                let records = store
-                    .load_all()
-                    .map_err(|e| format!("Load pairings error: {e}"))?;
-
-                let matched = records.iter().rev().find(|r| {
-                    host_for_connect.eq_ignore_ascii_case(&r.name)
-                        || host_for_connect.starts_with(&r.name)
-                        || (host_for_connect == "100.91.254.71" && r.name == "indo")
-                        || (host_for_connect == "100.126.171.58" && r.name.contains("DESKTOP"))
-                });
-
-                if let Some(record) = matched {
-                    session_for_connect
-                        .reconnect(&record.id)
-                        .map_err(|e| format!("Reconnect error: {e}"))
-                } else {
-                    Err("No PIN provided and no previous pairing found in store".to_string())
-                }
+                    .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, format!("Pairing store error: {e}")))?;
+                authenticate_client_session(
+                    &session_for_connect,
+                    pin_clone.as_deref(),
+                    &store,
+                    pairing_id_clone.as_deref(),
+                )
             })
             .await
-            .map_err(|e| format!("Tokio join error: {e}"))??;
+            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, format!("Tokio join error: {e}")))??;
+
+        // Persist verified endpoint metadata through shared API:
+        let endpoint = PairingEndpoint::new(host.clone(), tcp, udp);
+        let store = match PairingStore::open_default() {
+            Ok(s) => s,
+            Err(e) => {
+                let _ = session.disconnect();
+                return Err(IpcError::connection_failed(
+                    IpcErrorStage::Client,
+                    format!("Failed to open pairing store for endpoint persistence: {e}"),
+                ));
+            }
+        };
+        match store.remember_endpoint(&ready_session.pairing.id, &ready_session.pairing.key, endpoint) {
+            Ok(persisted) => {
+                if !persisted {
+                    tracing::warn!(id = %ready_session.pairing.id, "remember_endpoint returned false (key mismatch or deleted record)");
+                }
+            }
+            Err(e) => {
+                let _ = session.disconnect();
+                return Err(IpcError::connection_failed(
+                    IpcErrorStage::Client,
+                    format!("Failed to persist endpoint metadata: {e}"),
+                ));
+            }
+        }
 
         let tcp_runtime = session
             .spawn_tcp_runtime()
-            .map_err(|e| format!("Failed to spawn TCP runtime: {e}"))?;
-        *state.tcp_runtime.lock().map_err(|e| e.to_string())? = Some(tcp_runtime);
+            .map_err(|e| classify_session_error(&e))?;
+        *state.tcp_runtime.lock().map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, e.to_string()))? = Some(tcp_runtime);
         state.start_session_audio().await;
 
         // Ask for an immediate keyframe so the canvas paints as soon as the
@@ -1151,7 +1456,7 @@ pub mod commands {
                     },
                 );
             })
-            .map_err(|e| format!("Failed to spawn media thread: {e}"))?;
+            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Runtime, format!("Failed to spawn media thread: {e}")))?;
 
         if let Ok(mut media_lock) = state.media_handle.lock() {
             *media_lock = Some(media_thread);
@@ -1403,26 +1708,28 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub fn list_pairings() -> Result<Vec<PairingSummary>, String> {
-        let store =
-            PairingStore::open_default().map_err(|e| format!("Pairing store error: {e}"))?;
+    pub fn list_pairings() -> Result<Vec<PairingSummary>, IpcError> {
+        let store = PairingStore::open_default().map_err(|e| {
+            IpcError::connection_failed(IpcErrorStage::Client, format!("Pairing store error: {e}"))
+        })?;
         list_pairings_internal(&store)
     }
 
-    pub fn list_pairings_internal(store: &PairingStore) -> Result<Vec<PairingSummary>, String> {
+    pub fn list_pairings_internal(store: &PairingStore) -> Result<Vec<PairingSummary>, IpcError> {
         let records = store
             .load_all()
-            .map_err(|e| format!("Load pairings error: {e}"))?;
+            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, format!("Load pairings error: {e}")))?;
         Ok(records.into_iter().map(PairingSummary::from).collect())
     }
 
     #[tauri::command]
-    pub fn forget_pairing(id: String) -> Result<(), String> {
-        let store =
-            PairingStore::open_default().map_err(|e| format!("Pairing store error: {e}"))?;
+    pub fn forget_pairing(id: String) -> Result<(), IpcError> {
+        let store = PairingStore::open_default().map_err(|e| {
+            IpcError::connection_failed(IpcErrorStage::Client, format!("Pairing store error: {e}"))
+        })?;
         store
             .delete(&id)
-            .map_err(|e| format!("Delete pairing error: {e}"))
+            .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, format!("Delete pairing error: {e}")))
     }
 
     #[tauri::command]
@@ -1631,7 +1938,24 @@ pub mod commands {
         }
         Ok(count)
     }
+
+    #[tauri::command]
+    pub fn get_host_status(state: State<'_, AppState>) -> Result<HostStatus, String> {
+        state.get_host_status()
+    }
+
+    #[tauri::command]
+    pub fn start_host(state: State<'_, AppState>) -> Result<HostStatus, String> {
+        state.start_host()
+    }
+
+    #[tauri::command]
+    pub fn stop_host(state: State<'_, AppState>) -> Result<HostStatus, String> {
+        state.stop_host()
+    }
 }
+
+pub use commands::{get_host_status, start_host, stop_host};
 
 // Shared by the actual connect worker and media integration tests.
 fn dispatch_media_event(
@@ -1873,8 +2197,12 @@ async fn disconnect_with_stop(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let state = AppState::default();
+    if let Err(err) = state.start_host() {
+        tracing::warn!("Failed to auto-start host daemon: {err}");
+    }
     tauri::Builder::default()
-        .manage(AppState::default())
+        .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::list_hosts,
             commands::list_pairings,
@@ -1894,7 +2222,10 @@ pub fn run() {
             commands::agent_release_all,
             commands::get_cursor_position,
             commands::poll_frame_raw,
-            commands::set_bitrate
+            commands::set_bitrate,
+            commands::get_host_status,
+            commands::start_host,
+            commands::stop_host
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2140,6 +2471,54 @@ mod tests {
         assert_eq!(state.frames_received.load(Ordering::Relaxed), 0);
         assert_eq!(state.frames_decoded.load(Ordering::Relaxed), 0);
         assert!(disconnect_internal(&state).await.is_ok());
+    }
+
+    #[test]
+    fn test_host_status_defaults() {
+        let state = AppState::default();
+        let status = state.get_host_status().unwrap();
+        assert!(!status.running);
+        assert_eq!(status.pin.len(), 8);
+        assert!(status.pin.bytes().all(|b| b.is_ascii_digit()));
+        assert_ne!(status.pin, "12345678");
+        assert_eq!(status.port, erd_host::session::DEFAULT_TCP_PORT);
+        assert!(!status.auto_approve);
+        assert!(!status.ip.is_empty());
+    }
+
+    #[test]
+    fn test_host_runtime_lifecycle() {
+        let state = AppState::default();
+        assert!(!state.host_runtime.running.load(Ordering::SeqCst));
+        let initial_status = state.get_host_status().unwrap();
+        assert!(!initial_status.running);
+
+        let stopped_status = state.stop_host().unwrap();
+        assert!(!stopped_status.running);
+        assert!(!state.host_runtime.running.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn test_host_start_and_stop() {
+        let state = AppState::default();
+        match state.start_host() {
+            Ok(status) => {
+                assert!(status.running);
+                assert!(state.host_runtime.running.load(Ordering::SeqCst));
+
+                // Calling start_host again when already running is idempotent
+                let status2 = state.start_host().unwrap();
+                assert!(status2.running);
+
+                // Stop host
+                let stopped = state.stop_host().unwrap();
+                assert!(!stopped.running);
+                assert!(!state.host_runtime.running.load(Ordering::SeqCst));
+            }
+            Err(e) => {
+                eprintln!("start_host skipped in this runner: {e}");
+            }
+        }
     }
 }
 

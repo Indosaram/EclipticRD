@@ -6,9 +6,10 @@
 })(typeof window !== 'undefined' ? window : globalThis, function () {
   'use strict';
 
-  function validateConnection({ host = '', pin = null, tcpPort = null, udpPort = null }) {
+  function validateConnection({ host = '', pin = null, tcpPort = null, udpPort = null, pairingId = null }) {
     host = host.trim();
     pin = pin == null ? '' : pin.trim();
+    pairingId = pairingId == null ? null : (typeof pairingId === 'string' ? pairingId.trim() || null : null);
     const errors = {};
     if (!host) errors.host = 'required';
     if (pin && !/^[0-9]{8}$/.test(pin)) errors.pin = 'invalid-pin';
@@ -38,12 +39,14 @@
 
     const finalTcp = checkPort(tcpPort, 'tcpPort', 19730);
     const finalUdp = checkPort(udpPort, 'udpPort', 19731);
+    const args = { host, tcpPort: finalTcp, udpPort: finalUdp, pin: pin || null };
+    if (pairingId) args.pairingId = pairingId;
     return Object.keys(errors).length
       ? { ok: false, errors }
-      : { ok: true, args: { host, tcpPort: finalTcp, udpPort: finalUdp, pin: pin || null } };
+      : { ok: true, args };
   }
 
-  const errorText = error => error instanceof Error ? error.message : String(error);
+  const errorText = error => error instanceof Error ? error.message : (typeof error === 'object' && error !== null && error.message ? error.message : String(error));
 
   function createConnection({ invoke, nativeAvailable, releaseInputs }) {
     const state = {

@@ -10,8 +10,10 @@ export const hosts = [
 ];
 
 function bootstrap({ noGl, fullscreenFailure }) {
-  window.fixture = { calls: [], pending: [], raf: new Map(), intervals: [], draws: 0, next: 0 };
+  window.fixture = { calls: [], hostCalls: [], pending: [], raf: new Map(), intervals: [], draws: 0, next: 0 };
   const f = window.fixture;
+  f.pairings = [];
+  f.hostStatus = { running: true, ip: '127.0.0.1', port: 19730, pin: '87654321', auto_approve: false };
   f.ready = new Promise(resolve => document.addEventListener('DOMContentLoaded', resolve, { once: true }));
   f.until = (predicate, action) => new Promise((resolve, reject) => {
     const finish = () => { if (predicate()) { observer.disconnect(); clearTimeout(timeout); resolve(true); } };
@@ -43,15 +45,47 @@ function bootstrap({ noGl, fullscreenFailure }) {
   f.tick = () => { const callbacks = [...f.raf.values()]; f.raf.clear(); return Promise.all(callbacks.map(fn => fn(performance.now()))); };
   const getContext = HTMLCanvasElement.prototype.getContext;
   HTMLCanvasElement.prototype.getContext = function(kind, ...args) {
-    if (noGl && kind === 'webgl2') return null;
+    if (noGl && (kind === 'webgl2' || kind === 'webgl' || kind === 'experimental-webgl')) return null;
     const gl = getContext.call(this, kind, ...args);
-    if (gl && kind === 'webgl2') {
+    if (gl && (kind === 'webgl2' || kind === 'webgl')) {
       const draw = gl.drawArrays.bind(gl);
       gl.drawArrays = (...values) => { f.draws++; return draw(...values); };
     }
     return gl;
   };
   window.__TAURI__ = { core: { invoke(cmd, args) {
+    if (cmd === 'get_host_status') {
+      const call = { cmd, args }; f.hostCalls.push(call);
+      window.dispatchEvent(new CustomEvent('fixture-call', { detail: call }));
+      return Promise.resolve({ ...f.hostStatus });
+    }
+    if (cmd === 'start_host') {
+      f.hostStatus.running = true;
+      const call = { cmd, args }; f.hostCalls.push(call); f.calls.push(call);
+      window.dispatchEvent(new CustomEvent('fixture-call', { detail: call }));
+      return Promise.resolve({ ...f.hostStatus });
+    }
+    if (cmd === 'stop_host') {
+      f.hostStatus.running = false;
+      const call = { cmd, args }; f.hostCalls.push(call); f.calls.push(call);
+      window.dispatchEvent(new CustomEvent('fixture-call', { detail: call }));
+      return Promise.resolve({ ...f.hostStatus });
+    }
+    if (cmd === 'list_pairings') {
+      const call = { cmd, args };
+      f.pairingCalls = f.pairingCalls || [];
+      f.pairingCalls.push(call);
+      window.dispatchEvent(new CustomEvent('fixture-call', { detail: call }));
+      return Promise.resolve(f.pairings ? [...f.pairings] : []);
+    }
+    if (cmd === 'forget_pairing') {
+      const call = { cmd, args }; f.calls.push(call);
+      if (f.pairings) {
+        f.pairings = f.pairings.filter(p => p.id !== args.id);
+      }
+      window.dispatchEvent(new CustomEvent('fixture-call', { detail: call }));
+      return Promise.resolve();
+    }
     const call = { cmd, args }; f.calls.push(call);
     const result = new Promise((resolve, reject) => f.pending.push({ ...call, resolve, reject }));
     window.dispatchEvent(new CustomEvent('fixture-call', { detail: call }));

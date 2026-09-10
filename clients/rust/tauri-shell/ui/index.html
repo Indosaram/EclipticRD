@@ -27,12 +27,41 @@
   </nav>
   <main id="main-view" data-ui-scope>
     <header class="dashboard-header"><div class="dash-titles"><h1>Computers</h1><p>Find a computer or connect by address.</p></div><button id="btn-refresh">Refresh</button></header>
+    <section class="this-computer-card" id="this-computer-card" aria-labelledby="this-computer-title">
+      <div class="this-computer-icon">
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      </div>
+      <div class="this-computer-body">
+        <div class="this-computer-header">
+          <h2 id="this-computer-title" class="this-computer-name">This Computer (Host)</h2>
+          <span id="this-computer-badge" class="status-badge badge-online">Ready</span>
+        </div>
+        <p class="this-computer-meta">
+          <span id="this-computer-ip">IP: Loading...</span>
+          <span class="meta-sep">&bull;</span>
+          <span>PIN: <strong id="this-computer-pin">--------</strong></span>
+        </p>
+      </div>
+      <div class="this-computer-actions">
+        <button id="btn-toggle-host" class="btn-host-toggle">Pause Sharing</button>
+        <button id="btn-copy-host-info" class="btn-host-copy">Copy Info</button>
+      </div>
+    </section>
     <div class="library-toolbar">
       <label for="host-search">Search computers</label>
       <input id="host-search" type="search" placeholder="Name, address or OS" spellcheck="false">
       <button id="btn-clear-search">Clear search</button>
       <div class="filter-group" aria-label="Filter computers"><button id="filter-all" aria-pressed="true">All</button><button id="filter-available" aria-pressed="false">Available</button><button id="filter-favorites" aria-pressed="false">Favorites</button></div>
     </div>
+    <section class="saved-pairings-section" id="saved-pairings-section" aria-labelledby="saved-pairings-heading">
+      <div class="saved-pairings-header">
+        <h2 id="saved-pairings-heading">Saved credentials <span id="saved-pairings-count">0</span></h2>
+        <button id="btn-refresh-pairings" class="btn-refresh-pairings" type="button" title="Refresh saved credentials">Refresh credentials</button>
+      </div>
+      <p class="saved-pairings-help">Saved credentials connect directly without a PIN. Same-name credentials are distinguished by ID and endpoint metadata.</p>
+      <div id="saved-pairings-list" class="saved-pairings-grid" role="list"></div>
+      <div id="saved-pairings-empty" class="saved-pairings-empty" hidden>No saved credentials. Connect with a PIN below to pair a new host.</div>
+    </section>
     <section class="computers-section" aria-labelledby="library-heading">
       <h2 id="library-heading">Listed computers <span id="library-count">0</span></h2>
       <div id="library-status" role="status"></div>
@@ -268,41 +297,104 @@
     document.addEventListener('pointerlockchange', updatePointerLockUi);
     document.addEventListener('pointerlockerror', updatePointerLockUi);
 
-    let gl = canvas.getContext('webgl2');
+    let gl = null;
+    let isWebGL2 = false;
     let program = null;
     let yTexture = null;
     let uvTexture = null;
     let lastRenderWidth = 0;
     let lastRenderHeight = 0;
+    let glInitFailed = false;
 
-    if (gl) {
-      const vsSource = `#version 300 es
-        in vec2 a_pos;
-        in vec2 a_texCoord;
-        out vec2 v_texCoord;
-        void main() {
-          gl_Position = vec4(a_pos, 0.0, 1.0);
-          v_texCoord = a_texCoord;
-        }
-      `;
-      const fsSource = `#version 300 es
-        precision highp float;
-        in vec2 v_texCoord;
-        out vec4 fragColor;
-        uniform sampler2D u_yPlane;
-        uniform sampler2D u_uvPlane;
-        void main() {
-          float y = (texture(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
-          vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(128.0 / 255.0, 128.0 / 255.0);
-          float u = uv.r * (255.0 / 224.0);
-          float v = uv.g * (255.0 / 224.0);
+    function initGl(force = false) {
+      if (gl && !gl.isContextLost() && program && gl.getProgramParameter(program, gl.LINK_STATUS)) {
+        return true;
+      }
+      if (glInitFailed && !force) return false;
 
-          float r = y + 1.402 * v;
-          float g = y - 0.344136 * u - 0.714136 * v;
-          float b = y + 1.772 * u;
-          fragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
-        }
-      `;
+      program = null;
+      yTexture = null;
+      uvTexture = null;
+      lastRenderWidth = 0;
+      lastRenderHeight = 0;
+
+      const glOpts = {
+        alpha: false,
+        depth: false,
+        antialias: false,
+        preserveDrawingBuffer: false,
+        powerPreference: 'high-performance'
+      };
+
+      gl = canvas.getContext('webgl2', glOpts);
+      isWebGL2 = !!gl;
+      if (!gl) {
+        gl = canvas.getContext('webgl', glOpts);
+        isWebGL2 = false;
+      }
+      if (!gl) {
+        glInitFailed = true;
+        return false;
+      }
+      glInitFailed = false;
+
+      let vsSource, fsSource;
+      if (isWebGL2) {
+        vsSource = `#version 300 es
+          in vec2 a_pos;
+          in vec2 a_texCoord;
+          out vec2 v_texCoord;
+          void main() {
+            gl_Position = vec4(a_pos, 0.0, 1.0);
+            v_texCoord = a_texCoord;
+          }
+        `;
+        fsSource = `#version 300 es
+          precision highp float;
+          in vec2 v_texCoord;
+          out vec4 fragColor;
+          uniform sampler2D u_yPlane;
+          uniform sampler2D u_uvPlane;
+          void main() {
+            float y = (texture(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
+            vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(128.0 / 255.0, 128.0 / 255.0);
+            float u = uv.r * (255.0 / 224.0);
+            float v = uv.g * (255.0 / 224.0);
+
+            float r = y + 1.402 * v;
+            float g = y - 0.344136 * u - 0.714136 * v;
+            float b = y + 1.772 * u;
+            fragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
+          }
+        `;
+      } else {
+        vsSource = `
+          attribute vec2 a_pos;
+          attribute vec2 a_texCoord;
+          varying vec2 v_texCoord;
+          void main() {
+            gl_Position = vec4(a_pos, 0.0, 1.0);
+            v_texCoord = a_texCoord;
+          }
+        `;
+        fsSource = `
+          precision highp float;
+          varying vec2 v_texCoord;
+          uniform sampler2D u_yPlane;
+          uniform sampler2D u_uvPlane;
+          void main() {
+            float y = (texture2D(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
+            vec2 uv = texture2D(u_uvPlane, v_texCoord).ra - vec2(128.0 / 255.0, 128.0 / 255.0);
+            float u = uv.r * (255.0 / 224.0);
+            float v = uv.g * (255.0 / 224.0);
+
+            float r = y + 1.402 * v;
+            float g = y - 0.344136 * u - 0.714136 * v;
+            float b = y + 1.772 * u;
+            gl_FragColor = vec4(clamp(vec3(r, g, b), 0.0, 1.0), 1.0);
+          }
+        `;
+      }
 
       function createShader(type, src) {
         const s = gl.createShader(type);
@@ -322,6 +414,7 @@
       gl.linkProgram(program);
       if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
         console.error("Program link error:", gl.getProgramInfoLog(program));
+        return false;
       }
       gl.useProgram(program);
 
@@ -363,10 +456,29 @@
 
       gl.uniform1i(gl.getUniformLocation(program, "u_yPlane"), 0);
       gl.uniform1i(gl.getUniformLocation(program, "u_uvPlane"), 1);
+      return true;
     }
 
+    canvas.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      gl = null;
+      program = null;
+      glInitFailed = false;
+    }, false);
+
+    canvas.addEventListener('webglcontextrestored', () => {
+      initGl(true);
+    }, false);
+
+    // Initial setup
+    initGl(true);
+
     function renderNv12(width, height, yData, uvData) {
-      if (!gl || gl.isContextLost() || !gl.getProgramParameter(program, gl.LINK_STATUS)) return false;
+      if (!initGl() || !gl || gl.isContextLost() || !program || !gl.getProgramParameter(program, gl.LINK_STATUS)) return false;
+
+      const uvWidth = Math.floor(width / 2);
+      const uvHeight = Math.ceil(height / 2);
+
       if (lastRenderWidth !== width || lastRenderHeight !== height) {
         canvas.width = width;
         canvas.height = height;
@@ -376,22 +488,38 @@
 
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, yTexture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+        if (isWebGL2) {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, width, height, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+        } else {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, width, height, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, null);
+        }
 
         gl.activeTexture(gl.TEXTURE1);
         gl.bindTexture(gl.TEXTURE_2D, uvTexture);
-        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, width / 2, height / 2, 0, gl.RG, gl.UNSIGNED_BYTE, null);
+        if (isWebGL2) {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.RG8, uvWidth, uvHeight, 0, gl.RG, gl.UNSIGNED_BYTE, null);
+        } else {
+          gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE_ALPHA, uvWidth, uvHeight, 0, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, null);
+        }
       }
 
       gl.activeTexture(gl.TEXTURE0);
       gl.bindTexture(gl.TEXTURE_2D, yTexture);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, yData);
+      if (isWebGL2) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RED, gl.UNSIGNED_BYTE, yData);
+      } else {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.LUMINANCE, gl.UNSIGNED_BYTE, yData);
+      }
 
       gl.activeTexture(gl.TEXTURE1);
       gl.bindTexture(gl.TEXTURE_2D, uvTexture);
       gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width / 2, height / 2, gl.RG, gl.UNSIGNED_BYTE, uvData);
+      if (isWebGL2) {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, gl.RG, gl.UNSIGNED_BYTE, uvData);
+      } else {
+        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, uvWidth, uvHeight, gl.LUMINANCE_ALPHA, gl.UNSIGNED_BYTE, uvData);
+      }
 
       gl.drawArrays(gl.TRIANGLES, 0, 6);
       return true;
@@ -433,7 +561,9 @@
           const width = view.getUint32(0, true);
           const height = view.getUint32(4, true);
           const yLen = width * height;
-          const uvLen = width * (height / 2);
+          const uvWidth = Math.floor(width / 2);
+          const uvHeight = Math.ceil(height / 2);
+          const uvLen = uvWidth * uvHeight * 2;
 
           if (rawBuf.byteLength >= 16 + yLen + uvLen) {
             const yData = new Uint8Array(rawBuf, 16, yLen);
@@ -442,7 +572,7 @@
               frameCount++;
               connection.markFrameRendered(generation);
             } else {
-              await connection.reportFrameError(generation, 'WebGL2 video rendering is unavailable');
+              await connection.reportFrameError(generation, 'Video rendering is unavailable (WebGL context could not be created)');
             }
 
             if (rawBuf.byteLength >= 16 + yLen + uvLen + 9) {
@@ -598,8 +728,10 @@
         favorite.setAttribute('aria-pressed', String(state.favoriteIps.includes(LibraryModel.normalizeHostKey(host.ip))));
         const actions = document.createElement('div'); actions.className = 'card-actions';
         const connect = button('Connect', () => {
-          if (host.paired) connectToHost(host.ip, host.name, null, host.tcp_port, host.udp_port);
-          else {
+          if (host.paired) {
+            connectToHost(host.ip, host.name, null, host.tcp_port, host.udp_port, host.id);
+          } else {
+            selectedSavedPairingId = null;
             selectedHostPorts = { ip: host.ip, tcpPort: host.tcp_port, udpPort: host.udp_port };
             byId('direct-ip').value = host.ip;
             byId('direct-pin').value = '';
@@ -642,15 +774,253 @@
     }
     function clearSearch() { byId('host-search').value = ''; library.setQuery(''); byId('host-search').focus(); }
     function refreshHosts() { return library.refresh(); }
+    let currentHostStatus = null;
+
+    function updateHostStatus(status) {
+      currentHostStatus = status;
+      const badge = byId('this-computer-badge');
+      const ipEl = byId('this-computer-ip');
+      const pinEl = byId('this-computer-pin');
+      const toggleBtn = byId('btn-toggle-host');
+      const copyBtn = byId('btn-copy-host-info');
+
+      if (!status) {
+        if (badge) {
+          text('this-computer-badge', tauriApi ? 'Paused' : 'Unavailable');
+          badge.className = 'status-badge badge-paused';
+        }
+        if (toggleBtn) {
+          text('btn-toggle-host', 'Resume Sharing');
+          toggleBtn.disabled = !tauriApi;
+        }
+        if (ipEl && !tauriApi) {
+          text('this-computer-ip', 'IP: Unavailable');
+        }
+        if (copyBtn) {
+          copyBtn.disabled = !tauriApi;
+        }
+        return;
+      }
+
+      if (ipEl) {
+        text('this-computer-ip', status.ip ? `IP: ${status.ip}` : 'IP: Unavailable');
+      }
+      if (pinEl) {
+        text('this-computer-pin', status.pin || '--------');
+      }
+
+      if (status.running) {
+        if (badge) {
+          text('this-computer-badge', 'Ready');
+          badge.className = 'status-badge badge-online';
+        }
+        if (toggleBtn) {
+          text('btn-toggle-host', 'Pause Sharing');
+          toggleBtn.disabled = !tauriApi;
+        }
+      } else {
+        if (badge) {
+          text('this-computer-badge', 'Paused');
+          badge.className = 'status-badge badge-paused';
+        }
+        if (toggleBtn) {
+          text('btn-toggle-host', 'Resume Sharing');
+          toggleBtn.disabled = !tauriApi;
+        }
+      }
+
+      if (copyBtn) {
+        copyBtn.disabled = !tauriApi;
+      }
+    }
+
+    async function refreshHostStatus() {
+      if (!tauriApi) {
+        updateHostStatus(null);
+        return null;
+      }
+      try {
+        const status = await invoke('get_host_status');
+        if (status) {
+          updateHostStatus(status);
+        }
+        return status;
+      } catch (err) {
+        console.error('refreshHostStatus error:', err);
+        return null;
+      }
+    }
+
+    async function toggleHost() {
+      if (!tauriApi) return;
+      const btn = byId('btn-toggle-host');
+      if (btn) btn.disabled = true;
+      try {
+        const isRunning = currentHostStatus ? currentHostStatus.running : true;
+        const action = isRunning ? 'stop_host' : 'start_host';
+        const status = await invoke(action);
+        if (status) {
+          updateHostStatus(status);
+        }
+      } catch (err) {
+        console.error('toggleHost error:', err);
+      } finally {
+        if (btn) btn.disabled = !tauriApi;
+      }
+    }
+
+    async function copyHostInfo() {
+      const ip = currentHostStatus?.ip || (byId('this-computer-ip')?.textContent || '').replace(/^IP:\s*/, '');
+      const port = currentHostStatus?.port || 19730;
+      const pin = currentHostStatus?.pin || byId('this-computer-pin')?.textContent || '';
+      const info = `${ip}:${port} PIN: ${pin}`;
+
+      let copied = false;
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+        try {
+          await navigator.clipboard.writeText(info);
+          copied = true;
+        } catch (_) {}
+      }
+      if (!copied) {
+        try {
+          const ta = document.createElement('textarea');
+          ta.value = info;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          copied = document.execCommand('copy');
+          document.body.removeChild(ta);
+        } catch (_) {}
+      }
+      const btn = byId('btn-copy-host-info');
+      if (btn) {
+        const originalText = 'Copy Info';
+        btn.textContent = 'Copied!';
+        setTimeout(() => {
+          if (btn.textContent === 'Copied!') btn.textContent = originalText;
+        }, 1500);
+      }
+      return info;
+    }
+
+    window.updateHostStatus = updateHostStatus;
+    window.refreshHostStatus = refreshHostStatus;
+    window.toggleHost = toggleHost;
+    window.copyHostInfo = copyHostInfo;
     let selectedHostPorts = null;
-    function connectToHost(ip, name, pin = null, tcpPort = null, udpPort = null) {
+    let selectedSavedPairingId = null;
+
+    let savedPairings = [];
+
+    async function refreshSavedPairings() {
+      if (!tauriApi) return [];
+      try {
+        const list = await invoke('list_pairings');
+        savedPairings = Array.isArray(list) ? list : [];
+        renderSavedPairings(savedPairings);
+        return savedPairings;
+      } catch (err) {
+        console.error('refreshSavedPairings error:', err);
+        return [];
+      }
+    }
+
+    async function forgetSavedPairing(id) {
+      if (!tauriApi || !id) return;
+      try {
+        await invoke('forget_pairing', { id });
+        await refreshSavedPairings();
+      } catch (err) {
+        console.error('forgetSavedPairing error:', err);
+      }
+    }
+
+    function renderSavedPairings(pairings) {
+      const container = byId('saved-pairings-list');
+      const emptyEl = byId('saved-pairings-empty');
+      const countEl = byId('saved-pairings-count');
+      if (countEl) text('saved-pairings-count', String(pairings.length));
+      if (!container) return;
+      if (emptyEl) emptyEl.hidden = pairings.length > 0;
+      container.replaceChildren();
+
+      for (const pairing of pairings) {
+        const card = document.createElement('article');
+        card.className = 'saved-pairing-card host-card';
+        card.setAttribute('role', 'listitem');
+        card.dataset.pairingId = pairing.id;
+
+        const body = document.createElement('div');
+        body.className = 'card-body';
+
+        const header = document.createElement('div');
+        header.className = 'card-header';
+        const name = document.createElement('h3');
+        name.className = 'host-name';
+        name.textContent = pairing.hostName;
+        const badge = document.createElement('span');
+        badge.className = 'status-badge badge-online saved-badge';
+        badge.textContent = 'Saved';
+        header.append(name, badge);
+
+        const idMeta = document.createElement('p');
+        idMeta.className = 'pairing-id-meta host-meta';
+        idMeta.textContent = `ID: ${pairing.id}`;
+
+        const ep = pairing.lastEndpoint;
+        const epMeta = document.createElement('p');
+        epMeta.className = 'pairing-endpoint-meta host-meta';
+        epMeta.textContent = ep ? `${ep.host}:${ep.tcpPort} (UDP ${ep.udpPort})` : 'Endpoint not yet recorded';
+
+        body.append(header, idMeta, epMeta);
+
+        const actions = document.createElement('div');
+        actions.className = 'card-actions';
+
+        const connectBtn = button('Connect', () => {
+          if (ep && ep.host) {
+            connectToHost(ep.host, pairing.hostName, null, ep.tcpPort, ep.udpPort, pairing.id);
+          } else {
+            selectedSavedPairingId = pairing.id;
+            selectedHostPorts = { ip: '', tcpPort: null, udpPort: null };
+            byId('direct-ip').value = '';
+            byId('direct-pin').value = '';
+            byId('direct-ip').focus();
+          }
+        });
+        connectBtn.dataset.action = 'connect-saved';
+        connectBtn.disabled = connection.snapshot().busy || !tauriApi;
+
+        const forgetBtn = button('Forget', () => {
+          forgetSavedPairing(pairing.id);
+        });
+        forgetBtn.dataset.action = 'forget-saved';
+        forgetBtn.className = 'btn-forget';
+        forgetBtn.disabled = connection.snapshot().busy || !tauriApi;
+
+        actions.append(connectBtn, forgetBtn);
+        card.append(body, actions);
+        container.append(card);
+      }
+    }
+
+    window.refreshSavedPairings = refreshSavedPairings;
+    window.forgetSavedPairing = forgetSavedPairing;
+    window.renderSavedPairings = renderSavedPairings;
+
+    function connectToHost(ip, name, pin = null, tcpPort = null, udpPort = null, pairingId = null) {
       if (!connection.snapshot().busy) returnFocus = document.activeElement;
-      return connection.connect({ host: ip, name, pin, tcpPort, udpPort });
+      return connection.connect({ host: ip, name, pin, tcpPort, udpPort, pairingId });
     }
     function connectDirect() {
       const ip = byId('direct-ip').value;
       const ports = (selectedHostPorts && selectedHostPorts.ip === ip) ? selectedHostPorts : {};
-      return connectToHost(ip, ip.trim(), byId('direct-pin').value, ports.tcpPort, ports.udpPort);
+      const pinVal = byId('direct-pin').value || null;
+      const pairingId = pinVal ? null : selectedSavedPairingId;
+      return connectToHost(ip, ip.trim(), pinVal, ports.tcpPort, ports.udpPort, pairingId);
     }
     function cancelConnecting() { return connection.cancel(); }
     function doDisconnect() { return connection.disconnect(); }
@@ -1126,12 +1496,15 @@
     byId('btn-audio-refresh').addEventListener('click', () => audioCommand('list_audio_devices'));
     byId('host-search').addEventListener('input', event => library.setQuery(event.target.value));
     byId('btn-clear-search').addEventListener('click', clearSearch);
-    byId('btn-refresh').addEventListener('click', refreshHosts);
+    byId('btn-refresh').addEventListener('click', () => { refreshHosts(); refreshSavedPairings(); });
+    byId('btn-refresh-pairings').addEventListener('click', refreshSavedPairings);
     byId('filter-all').addEventListener('click', () => library.clearFilters());
     byId('filter-available').addEventListener('click', () => library.setAvailableOnly(!library.snapshot().availableOnly));
     byId('filter-favorites').addEventListener('click', () => library.setFavoritesOnly(!library.snapshot().favoritesOnly));
     byId('nav-computers').addEventListener('click', () => library.clearFilters());
     byId('nav-favorites').addEventListener('click', () => library.setFavoritesOnly(true));
+    byId('btn-toggle-host').addEventListener('click', toggleHost);
+    byId('btn-copy-host-info').addEventListener('click', copyHostInfo);
     for (const [id, action] of [['btn-home', endSessionToHome], ['btn-disconnect', doDisconnect], ['btn-expand', toggleLauncherPanel], ['btn-fullscreen', toggleSessionFullscreen], ['btn-pointer-lock', togglePointerLock], ['btn-cancel-connect', cancelConnecting], ['btn-retry-cleanup', () => connection.retryCleanup()]]) byId(id).addEventListener('click', action);
     byId('btn-dismiss-session-error').addEventListener('click', () => { byId('session-error').hidden = true; });
     connectingModal.addEventListener('keydown', event => {
@@ -1141,7 +1514,11 @@
     library.subscribe(renderLibrary); connection.subscribe(renderConnection);
     renderLibrary(library.snapshot()); renderConnection(connection.snapshot());
     updatePointerLockUi();
-    window.addEventListener('DOMContentLoaded', refreshHosts);
+    window.addEventListener('DOMContentLoaded', () => {
+      refreshHosts();
+      refreshSavedPairings();
+      refreshHostStatus();
+    });
   </script>
 </body>
 </html>

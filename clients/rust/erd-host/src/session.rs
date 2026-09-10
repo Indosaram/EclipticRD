@@ -2047,11 +2047,45 @@ impl HostServer {
     }
 
     pub fn serve(self) -> Result<(), SessionError> {
-        loop {
-            if let Err(error) = self.serve_next() {
-                warn!(%error, "connection ended with an error");
+        self.serve_with_stop(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+    }
+
+    pub fn serve_with_stop(self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<(), SessionError> {
+        self.tcp_listener.set_nonblocking(true)?;
+        while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+            match self.tcp_listener.accept() {
+                Ok((tcp, peer)) => {
+                    let _ = tcp.set_nonblocking(false);
+                    let admission_deadline = std::time::Instant::now() + self.preauth_timeout;
+                    tcp.set_nodelay(true)?;
+                    let tls_server = erd_net::tls_psk::TlsPskServer::new(self.current_psks()?)?;
+                    match tls_server.accept_stream_until(tcp, admission_deadline) {
+                        Ok(stream) => {
+                            if let Err(error) = self.handle_connection(stream, peer, admission_deadline) {
+                                tracing::warn!(%error, "connection ended with an error");
+                            }
+                        }
+                        Err(error) => {
+                            let _ = error;
+                            let locked = self
+                                .lockout
+                                .lock()
+                                .expect("lockout poisoned")
+                                .record_failure(std::time::Instant::now());
+                            if locked {
+                                tracing::warn!("bootstrap TLS path locked after repeated failures");
+                            }
+                        }
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+                Err(e) => return Err(SessionError::Io(e)),
             }
         }
+        Ok(())
     }
 
     pub fn serve_n(&self, connection_count: usize) -> Result<(), SessionError> {
@@ -4747,6 +4781,22 @@ mod tests {
                 "server must not send HandshakeAck for duplicate handshake"
             );
         }
+    }
+
+    #[test]
+    fn test_serve_with_stop_exits_when_flag_set() {
+        let directory = tempdir().unwrap();
+        let store = PairingStore::new(directory.path().join("pairing-keys.json"));
+        let (consent_tx, _consent_rx) = mpsc::channel();
+        let config = test_config(store, consent_tx);
+        let server = HostServer::bind(config).unwrap();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop_clone = Arc::clone(&stop);
+        let server_thread = thread::spawn(move || server.serve_with_stop(stop_clone));
+
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = server_thread.join().expect("server thread joined");
+        assert!(result.is_ok());
     }
 
     #[test]

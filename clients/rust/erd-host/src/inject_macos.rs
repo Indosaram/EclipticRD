@@ -67,9 +67,11 @@ impl InputInjector {
         if !event.x.is_finite() || !event.y.is_finite() {
             return Err(InputError::InvalidCoordinates);
         }
+        // Protocol convention inverts Y (1.0 - y) on wire for legacy compatibility.
+        // Invert it back so (0,0) is top-left in Quartz/CoreGraphics display coordinates.
         Ok(map_to_host_pixels(
             event.x.clamp(0.0, 1.0),
-            event.y.clamp(0.0, 1.0),
+            (1.0 - event.y).clamp(0.0, 1.0),
             self.host_width,
             self.host_height,
         ))
@@ -502,7 +504,7 @@ mod tests {
                             );
                             if let Some(button) = button {
                                 let location = output.location();
-                                assert_eq!((location.x, location.y), (480.0, 810.0));
+                                assert_eq!((location.x, location.y), (480.0, 270.0));
                                 assert_eq!(
                                     output.get_integer_value_field(
                                         EventField::MOUSE_EVENT_BUTTON_NUMBER
@@ -661,7 +663,7 @@ mod tests {
             scroll_dx: 0.0,
             scroll_dy: 0.0,
         };
-        assert_eq!(injector.map_coordinates(&event).unwrap(), (480.0, 810.0));
+        assert_eq!(injector.map_coordinates(&event).unwrap(), (480.0, 270.0));
     }
 
     #[test]
@@ -676,7 +678,7 @@ mod tests {
             scroll_dx: 0.0,
             scroll_dy: 0.0,
         };
-        assert_eq!(injector.map_coordinates(&event).unwrap(), (0.0, 50.0));
+        assert_eq!(injector.map_coordinates(&event).unwrap(), (0.0, 0.0));
         event.x = f32::NAN;
         assert!(matches!(
             injector.map_coordinates(&event),

@@ -337,3 +337,23 @@ test('remote-ended stats and current frame failures use the cleanup path', async
     assert.equal(f.connection.snapshot().stats, null);
   }
 });
+
+test('validateConnection accepts pairingId and passes through invoke', async () => {
+  const parsed = validateConnection({ host: 'example.test', pairingId: 'explicit-pairing-id' });
+  assert.equal(parsed.ok, true);
+  assert.equal(parsed.args.pairingId, 'explicit-pairing-id');
+
+  const f = fixture();
+  const arrival = f.next('connect');
+  const done = f.connection.connect({
+    host: 'example.test',
+    name: 'Example',
+    pairingId: 'explicit-pairing-id',
+  });
+  const call = await arrival;
+  assert.equal(call.args.pairingId, 'explicit-pairing-id');
+  assert.equal(call.args.pin, null);
+  call.resolve();
+  assert.equal(await done, true);
+});
+
