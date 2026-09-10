@@ -1,0 +1,19 @@
+status: completed exit_code: 0
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src-tauri/src/lib.rs (clients/rust/target/debug/deps/tauri_shell_lib-d010ef5e7b76a666)
+
+running 11 tests
+test discovery_tests::stored_pairings_and_self_do_not_create_observed_peers ... ok
+test discovery_tests::source_dedup_merges_lan_and_tailscale_by_name_and_inherits_pairing ... ok
+test discovery_tests::pairing_does_not_infer_identity_from_testbed_ips_case_or_substrings ... ok
+test desktop_integration_tests::pairing_store_round_trip_and_deletion ... ok
+test pairing_tests::test_failed_reconnect_preserves_original_cause_and_never_falls_back_to_bootstrap_pin ... ok
+SEAM_SERIALIZED_JSON: [{"id":"SEAM-UUID-999","hostName":"desktop-host-target","addedAtUnixMs":1725999999000}]
+test pairing_tests::test_list_pairings_store_seam_isolated_store_serializes_only_allowed_metadata ... ok
+test pairing_tests::test_list_pairings_json_excludes_key_field ... ok
+test pairing_tests::test_missing_pin_and_missing_record_fails_immediately_without_bootstrap ... ok
+test pairing_tests::test_cancellable_accept_cancels_cleanly_before_client_connection ... ok
+test pairing_tests::test_loopback_reconnect_failure_does_not_trigger_bootstrap_request ... ok
+test pairing_tests::test_cancellable_accept_normal_completion_with_real_client ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.08s

@@ -32,6 +32,8 @@ use erd_app::platform::SystemClipboard;
 
 #[cfg(test)]
 mod discovery_tests;
+#[cfg(test)]
+mod pairing_tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostItem {
@@ -53,6 +55,38 @@ pub struct ConnectResponse {
     pub pairing_id: String,
     pub host_name: String,
     pub server_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingSummary {
+    pub id: String,
+    pub host_name: String,
+    pub added_at_unix_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_endpoint: Option<String>,
+}
+
+impl From<erd_app::PairingRecord> for PairingSummary {
+    fn from(record: erd_app::PairingRecord) -> Self {
+        Self {
+            id: record.id,
+            host_name: record.name,
+            added_at_unix_ms: record.added_at_unix_ms,
+            last_endpoint: None,
+        }
+    }
+}
+
+impl From<&erd_app::PairingRecord> for PairingSummary {
+    fn from(record: &erd_app::PairingRecord) -> Self {
+        Self {
+            id: record.id.clone(),
+            host_name: record.name.clone(),
+            added_at_unix_ms: record.added_at_unix_ms,
+            last_endpoint: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1369,12 +1403,17 @@ pub mod commands {
     }
 
     #[tauri::command]
-    pub fn list_pairings() -> Result<Vec<erd_app::PairingRecord>, String> {
+    pub fn list_pairings() -> Result<Vec<PairingSummary>, String> {
         let store =
             PairingStore::open_default().map_err(|e| format!("Pairing store error: {e}"))?;
-        store
+        list_pairings_internal(&store)
+    }
+
+    pub fn list_pairings_internal(store: &PairingStore) -> Result<Vec<PairingSummary>, String> {
+        let records = store
             .load_all()
-            .map_err(|e| format!("Load pairings error: {e}"))
+            .map_err(|e| format!("Load pairings error: {e}"))?;
+        Ok(records.into_iter().map(PairingSummary::from).collect())
     }
 
     #[tauri::command]

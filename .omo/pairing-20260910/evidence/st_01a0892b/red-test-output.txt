@@ -1,0 +1,26 @@
+Command:
+cargo test --manifest-path clients/rust/Cargo.toml -p tauri-shell --lib pairing
+Exit Code: 101
+
+Output:
+running 5 tests
+test discovery_tests::stored_pairings_and_self_do_not_create_observed_peers ... ok
+test discovery_tests::source_dedup_merges_lan_and_tailscale_by_name_and_inherits_pairing ... ok
+test discovery_tests::pairing_does_not_infer_identity_from_testbed_ips_case_or_substrings ... ok
+test pairing_tests::test_list_pairings_json_excludes_key_field ... FAILED
+test desktop_integration_tests::pairing_store_round_trip_and_deletion ... ok
+
+failures:
+
+---- pairing_tests::test_list_pairings_json_excludes_key_field stdout ----
+
+thread 'pairing_tests::test_list_pairings_json_excludes_key_field' (3951279) panicked at tauri-shell/src-tauri/src/pairing_tests.rs:96:5:
+JSON must contain camelCase 'hostName': [{"id":"TEST-PAIRING-UUID","name":"mock-remote-host","key":"c2VjcmV0LXNoYXJlZC1rZXktYnl0ZXMtMTIzNDU2Nzg=","addedAt":747592800.0}]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+failures:
+    pairing_tests::test_list_pairings_json_excludes_key_field
+
+test result: FAILED. 4 passed; 1 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p tauri-shell --lib`
