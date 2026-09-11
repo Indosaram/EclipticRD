@@ -23,6 +23,94 @@ import { Separator } from "@/components/ui/separator";
 
 export const QUALITY_STORAGE_KEY = "erd-quality-mbps";
 
+export const QUALITY_OPTIONS = [8, 25, 50, 100] as const;
+
+export function savedBitrateMbps(): number {
+  if (typeof window === "undefined" || !window.localStorage) {
+    return 50;
+  }
+  try {
+    const saved = Number(window.localStorage.getItem(QUALITY_STORAGE_KEY));
+    return Number.isInteger(saved) && saved >= 1 && saved <= 300 ? saved : 50;
+  } catch {
+    return 50;
+  }
+}
+
+/**
+ * Pure logic helper: Persists bitrate to localStorage under QUALITY_STORAGE_KEY
+ * and invokes setBitrate when connected.
+ */
+export async function applyBitrateCeiling(
+  mbps: number,
+  isConnected = true
+): Promise<void> {
+  if (typeof window !== "undefined" && window.localStorage) {
+    try {
+      window.localStorage.setItem(QUALITY_STORAGE_KEY, String(mbps));
+    } catch (e) {
+      console.error("Failed to write bitrate to localStorage:", e);
+    }
+  }
+  if (isConnected && typeof setBitrate === "function") {
+    await setBitrate(mbps);
+  }
+}
+
+/**
+ * Pure logic helper: Converts a 0..100 volume percentage to a 0..1 value
+ * and invokes setAudioVolume when connected.
+ */
+export async function applyVolumeLevel(
+  percent: number,
+  isConnected = true
+): Promise<DesktopAudioStatus | undefined> {
+  if (!isConnected || typeof setAudioVolume !== "function") return;
+  const volume = percent / 100;
+  return await setAudioVolume(volume);
+}
+
+/**
+ * Pure logic helper: Toggles audio muted status against the current muted state
+ * and invokes setAudioMuted when connected.
+ */
+export async function toggleAudioMuted(
+  currentMuted: boolean,
+  isConnected = true
+): Promise<DesktopAudioStatus | undefined> {
+  if (!isConnected || typeof setAudioMuted !== "function") return;
+  return await setAudioMuted(!currentMuted);
+}
+
+/**
+ * Pure logic helper: Sets audio device (or null for default) with optional input release.
+ */
+export async function applyAudioDeviceSelection(
+  selectedDeviceId: string | null,
+  isConnected = true,
+  onReleaseInputs?: () => Promise<void> | void
+): Promise<DesktopAudioStatus | undefined> {
+  if (!isConnected || typeof setAudioDevice !== "function") return;
+  if (onReleaseInputs) {
+    await onReleaseInputs();
+  }
+  const devId =
+    !selectedDeviceId || selectedDeviceId === "default"
+      ? null
+      : selectedDeviceId;
+  return await setAudioDevice(devId);
+}
+
+/**
+ * Pure logic helper: Refreshes audio output devices.
+ */
+export async function refreshAudioDeviceList(
+  isConnected = true
+): Promise<DesktopAudioStatus | undefined> {
+  if (!isConnected || typeof listAudioDevices !== "function") return;
+  return await listAudioDevices();
+}
+
 // Polyfill DOM prototypes for headless/fake test environments
 if (typeof (globalThis as any).HTMLFormElement === "undefined") {
   (globalThis as any).HTMLFormElement = class HTMLFormElement {};
@@ -125,20 +213,6 @@ if (typeof document !== "undefined" && typeof document.createElement === "functi
   };
 }
 
-export const QUALITY_OPTIONS = [8, 25, 50, 100] as const;
-
-export function savedBitrateMbps(): number {
-  if (typeof window === "undefined" || !window.localStorage) {
-    return 50;
-  }
-  try {
-    const saved = Number(window.localStorage.getItem(QUALITY_STORAGE_KEY));
-    return Number.isInteger(saved) && saved >= 1 && saved <= 300 ? saved : 50;
-  } catch {
-    return 50;
-  }
-}
-
 export interface SessionSettingsPanelProps {
   isConnected?: boolean;
   onReleaseInputs?: () => Promise<void> | void;
@@ -174,22 +248,12 @@ export function SessionSettingsPanel({
       const mbps = Number(value);
       setBitrateState(mbps);
       try {
-        if (typeof window !== "undefined" && window.localStorage) {
-          window.localStorage.setItem(QUALITY_STORAGE_KEY, String(mbps));
-        }
-      } catch (e) {
-        console.error("Failed to save bitrate to localStorage:", e);
-      }
-
-      if (isConnectedRef.current && typeof setBitrate === "function") {
-        try {
-          await setBitrate(mbps);
-          setQualityError(null);
-        } catch (err: any) {
-          const msg = `Bitrate apply failed: ${err}`;
-          setQualityError(msg);
-          onError?.(msg);
-        }
+        await applyBitrateCeiling(mbps, isConnectedRef.current);
+        setQualityError(null);
+      } catch (err: any) {
+        const msg = `Bitrate apply failed: ${err}`;
+        setQualityError(msg);
+        onError?.(msg);
       }
     },
     [onError]
@@ -198,7 +262,7 @@ export function SessionSettingsPanel({
   // Audio status helper matching legacy audioCommand
   const executeAudioCommand = useCallback(
     async (
-      commandFn: () => Promise<DesktopAudioStatus>,
+      commandFn: () => Promise<DesktopAudioStatus | undefined>,
       isDeviceSwitch = false
     ) => {
       if (!isConnectedRef.current) return;
@@ -208,18 +272,20 @@ export function SessionSettingsPanel({
           await onReleaseInputs();
         }
         const status = await commandFn();
-        setAudioState(status);
-        audioStateRef.current = status;
-        setAudioError(null);
-        if (status?.volume != null) {
-          setLiveVolume(Math.round(status.volume * 100));
-        }
-        if (status?.device_id != null) {
-          setSelectedDeviceId(status.device_id || "default");
-        }
-        if (status?.error) {
-          setAudioError(status.error);
-          onError?.(status.error);
+        if (status) {
+          setAudioState(status);
+          audioStateRef.current = status;
+          setAudioError(null);
+          if (status.volume != null) {
+            setLiveVolume(Math.round(status.volume * 100));
+          }
+          if (status.device_id != null) {
+            setSelectedDeviceId(status.device_id || "default");
+          }
+          if (status.error) {
+            setAudioError(status.error);
+            onError?.(status.error);
+          }
         }
         return status;
       } catch (err: any) {
@@ -279,7 +345,7 @@ export function SessionSettingsPanel({
     (vals: number[]) => {
       const val = vals[0] ?? 100;
       setLiveVolume(val);
-      executeAudioCommand(() => setAudioVolume(val / 100));
+      executeAudioCommand(() => applyVolumeLevel(val, isConnectedRef.current) as Promise<DesktopAudioStatus>);
     },
     [executeAudioCommand]
   );
@@ -287,24 +353,20 @@ export function SessionSettingsPanel({
   // Mute toggle
   const handleToggleMute = useCallback(() => {
     const currentMuted = audioStateRef.current?.muted ?? false;
-    executeAudioCommand(() => setAudioMuted(!currentMuted));
+    executeAudioCommand(() => toggleAudioMuted(currentMuted, isConnectedRef.current) as Promise<DesktopAudioStatus>);
   }, [executeAudioCommand]);
 
   // Apply audio device
   const handleApplyDevice = useCallback(() => {
-    const devId =
-      !selectedDeviceId || selectedDeviceId === "default"
-        ? null
-        : selectedDeviceId;
-    executeAudioCommand(() => setAudioDevice(devId), true);
-  }, [selectedDeviceId, executeAudioCommand]);
+    executeAudioCommand(
+      () => applyAudioDeviceSelection(selectedDeviceId, isConnectedRef.current, onReleaseInputs) as Promise<DesktopAudioStatus>,
+      true
+    );
+  }, [selectedDeviceId, onReleaseInputs, executeAudioCommand]);
 
   // Refresh audio devices
   const handleRefreshDevices = useCallback(() => {
-    executeAudioCommand(async () => {
-      const status = await listAudioDevices();
-      return status;
-    });
+    executeAudioCommand(() => refreshAudioDeviceList(isConnectedRef.current) as Promise<DesktopAudioStatus>);
   }, [executeAudioCommand]);
 
   // Attach DOM listeners for legacy compatibility
@@ -319,7 +381,7 @@ export function SessionSettingsPanel({
       const val = Number(e.target?.value ?? e?.detail?.value ?? (e as any).value);
       if (!Number.isNaN(val)) {
         setLiveVolume(val);
-        executeAudioCommand(() => setAudioVolume(val / 100));
+        executeAudioCommand(() => applyVolumeLevel(val, isConnectedRef.current) as Promise<DesktopAudioStatus>);
       }
     };
     el.addEventListener("input", onInput);
