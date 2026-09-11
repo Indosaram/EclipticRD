@@ -177,6 +177,53 @@ describe("invokeCommand", () => {
 describe("named thin wrappers", () => {
   let invoked: { cmd: string; args?: Record<string, unknown> }[] = [];
 
+  const mockHost: HostItem = {
+    id: "host-1",
+    name: "Desktop Host",
+    ip: "10.0.0.1",
+    os: "linux",
+    online: true,
+    paired: false,
+  };
+  const mockCursor: CursorState = {
+    x: 100,
+    y: 200,
+    cursor_type: 1,
+  };
+  const mockAudioStatus: DesktopAudioStatus = {
+    active: true,
+    volume: 0.8,
+    muted: false,
+    devices: [],
+    consumed_samples: 1024,
+  };
+  const mockPairing: PairingSummary = {
+    id: "pair-1",
+    hostName: "Desktop Host",
+    addedAtUnixMs: 1700000000000,
+  };
+  const mockStats: SessionStats = {
+    connected: true,
+    state: "connected",
+    frames_received: 120,
+    frames_decoded: 120,
+    audio_packets_received: 60,
+  };
+  const mockScreenInfo: ScreenInfo = {
+    width: 1920,
+    height: 1080,
+    scale: 1,
+    monitors: [],
+    connected_host: "host-1",
+  };
+  const mockHostStatus: HostStatus = {
+    running: true,
+    ip: "127.0.0.1",
+    port: 19730,
+    pin: "1234",
+    auto_approve: false,
+  };
+
   beforeEach(() => {
     invoked = [];
     (globalThis as any).window = {
@@ -184,7 +231,30 @@ describe("named thin wrappers", () => {
         core: {
           invoke: async (cmd: string, args?: Record<string, unknown>) => {
             invoked.push({ cmd, args });
-            return "ok";
+            switch (cmd) {
+              case "list_hosts":
+                return [mockHost];
+              case "get_cursor_position":
+                return mockCursor;
+              case "audio_status":
+              case "list_audio_devices":
+              case "set_audio_volume":
+              case "set_audio_muted":
+              case "set_audio_device":
+                return mockAudioStatus;
+              case "list_pairings":
+                return [mockPairing];
+              case "stats":
+                return mockStats;
+              case "agent_get_screen_info":
+                return mockScreenInfo;
+              case "get_host_status":
+              case "start_host":
+              case "stop_host":
+                return mockHostStatus;
+              default:
+                return "ok";
+            }
           },
         },
       },
@@ -196,7 +266,8 @@ describe("named thin wrappers", () => {
   });
 
   it("calls each thin wrapper and dispatches expected command and args", async () => {
-    await listHosts();
+    const hosts: HostItem[] = await listHosts();
+    expect(hosts).toEqual([mockHost]);
     expect(invoked[invoked.length - 1]).toEqual({ cmd: "list_hosts", args: undefined });
 
     await connect({ host: "10.0.0.1", tcpPort: 19730 });
@@ -205,7 +276,8 @@ describe("named thin wrappers", () => {
       args: { host: "10.0.0.1", tcpPort: 19730 },
     });
 
-    await getCursorPosition();
+    const cursor: CursorState = await getCursorPosition();
+    expect(cursor).toEqual(mockCursor);
     expect(invoked[invoked.length - 1]).toEqual({
       cmd: "get_cursor_position",
       args: undefined,
@@ -229,7 +301,8 @@ describe("named thin wrappers", () => {
       args: undefined,
     });
 
-    await audioStatus();
+    const audio: DesktopAudioStatus = await audioStatus();
+    expect(audio).toEqual(mockAudioStatus);
     expect(invoked[invoked.length - 1]).toEqual({
       cmd: "audio_status",
       args: undefined,
@@ -259,7 +332,8 @@ describe("named thin wrappers", () => {
       args: { deviceId: "output-0" },
     });
 
-    await listPairings();
+    const pairings: PairingSummary[] = await listPairings();
+    expect(pairings).toEqual([mockPairing]);
     expect(invoked[invoked.length - 1]).toEqual({
       cmd: "list_pairings",
       args: undefined,
@@ -271,7 +345,8 @@ describe("named thin wrappers", () => {
       args: { id: "pair-123" },
     });
 
-    await stats();
+    const sessionStats: SessionStats = await stats();
+    expect(sessionStats).toEqual(mockStats);
     expect(invoked[invoked.length - 1]).toEqual({ cmd: "stats", args: undefined });
 
     const inputEvt: InputPayload = { event_type: "MouseMove", x: 0.5, y: 0.5 };
@@ -288,7 +363,8 @@ describe("named thin wrappers", () => {
       args: { action: agentAction as any },
     });
 
-    await agentGetScreenInfo();
+    const screenInfo: ScreenInfo = await agentGetScreenInfo();
+    expect(screenInfo).toEqual(mockScreenInfo);
     expect(invoked[invoked.length - 1]).toEqual({
       cmd: "agent_get_screen_info",
       args: undefined,
@@ -306,7 +382,8 @@ describe("named thin wrappers", () => {
       args: undefined,
     });
 
-    await getHostStatus();
+    const hostStatus: HostStatus = await getHostStatus();
+    expect(hostStatus).toEqual(mockHostStatus);
     expect(invoked[invoked.length - 1]).toEqual({
       cmd: "get_host_status",
       args: undefined,
