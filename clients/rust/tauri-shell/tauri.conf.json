@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "identifier": "com.eclipticrd.shell",
   "build": {
-    "frontendDist": "./ui"
+    "frontendDist": "./dist",
+    "devUrl": "http://localhost:1420"
   },
   "app": {
     "withGlobalTauri": true,
