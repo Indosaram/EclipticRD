@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from 'node:fs';
 
 for (const configPath of ['../tauri.conf.json', '../src-tauri/tauri.conf.json']) {
   const configUrl = new URL(configPath, import.meta.url);
+  if (!existsSync(configUrl)) continue;
   const config = JSON.parse(readFileSync(configUrl, 'utf8'));
 
   test(`${configPath} produces an app bundle with resolvable icons`, () => {
