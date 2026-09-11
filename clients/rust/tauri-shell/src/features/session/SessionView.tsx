@@ -1,16 +1,13 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { SessionCanvas } from "./SessionCanvas";
+
+import { useRemoteInput } from "./useRemoteInput";
 import {
   pollFrameRaw,
-  sendInput,
   agentReleaseAll,
-  type InputPayload,
 } from "@/lib/ipc";
 import {
-  createHeldInputTracker,
   createOverlayState,
-  shouldForwardKeyboardEvent,
-  type MouseButton,
 } from "@/lib/overlay";
 import type { ConnectionInstance, ConnectionSnapshot } from "@/lib/connection";
 
@@ -29,20 +26,6 @@ function getDomElement(id: string): HTMLElement | null {
     return null;
   }
   return document.getElementById(id);
-}
-
-function mapMouseButton(button: number): MouseButton | null {
-  if (button === 0) return "left";
-  if (button === 1) return "middle";
-  if (button === 2) return "right";
-  return null;
-}
-
-function mouseButtonEventType(button: MouseButton, isDown: boolean): string {
-  if (button === "left") return isDown ? "LeftMouseDown" : "LeftMouseUp";
-  if (button === "middle") return isDown ? "MiddleMouseDown" : "MiddleMouseUp";
-  if (button === "right") return isDown ? "RightMouseDown" : "RightMouseUp";
-  return "";
 }
 
 export function SessionView({
@@ -141,413 +124,39 @@ export function SessionView({
     return buf;
   }, [connection, propPollFrame]);
 
-  // Input forwarding & held input tracking
-  const heldInputsRef = useRef(createHeldInputTracker());
-  const lastPointerRef = useRef({ x: 0, y: 0, viewWidth: 1280, viewHeight: 800 });
-  const pendingPointerRef = useRef<InputPayload | null>(null);
-  const pointerRafRef = useRef<number | null>(null);
-
   const isConnected = snapshot.phase === "streaming";
-  const isConnectedRef = useRef(isConnected);
-  useEffect(() => {
-    isConnectedRef.current = isConnected;
-  }, [isConnected]);
 
-  // Pointer motion throttling (~16ms rAF queue)
-  const flushPointerMotion = useCallback(() => {
-    if (pointerRafRef.current !== null) {
-      const cancel =
-        typeof cancelAnimationFrame === "function"
-          ? cancelAnimationFrame
-          : clearTimeout;
-      cancel(pointerRafRef.current);
-      pointerRafRef.current = null;
-    }
-    const event = pendingPointerRef.current;
-    pendingPointerRef.current = null;
-    if (isConnectedRef.current && event) {
-      sendInput(event).catch((err) => {
-        console.error("send_input pointer error:", err);
-      });
-    }
-  }, []);
-
-  const sendPointerEvent = useCallback(
-    (eventType: string, e: MouseEvent) => {
-      if (!isConnectedRef.current) return;
-      const isMotion =
-        eventType === "MouseMove" ||
-        eventType === "LeftMouseDragged" ||
-        eventType === "RightMouseDragged";
-      if (!isMotion) flushPointerMotion();
-
-      const canvas = getDomElement("video-canvas") as HTMLCanvasElement | null;
-      const rect = canvas?.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || rect.height <= 0) return;
-
-      const canvasWidth = canvas?.width || 3840;
-      const canvasHeight = canvas?.height || 1600;
-      const videoAspect =
-        canvasWidth > 0 && canvasHeight > 0 ? canvasWidth / canvasHeight : 16 / 9;
-      const canvasAspect = rect.width / rect.height;
-      let displayW = rect.width;
-      let displayH = rect.height;
-      let offsetX = 0;
-      let offsetY = 0;
-
-      if (canvasAspect > videoAspect) {
-        displayH = rect.height;
-        displayW = displayH * videoAspect;
-        offsetX = (rect.width - displayW) / 2;
-      } else {
-        displayW = rect.width;
-        displayH = displayW / videoAspect;
-        offsetY = (rect.height - displayH) / 2;
-      }
-
-      const rawX = e.clientX - rect.left - offsetX;
-      const rawY = e.clientY - rect.top - offsetY;
-      const clampedX = Math.max(0, Math.min(rawX, displayW));
-      const clampedY = Math.max(0, Math.min(rawY, displayH));
-
-      lastPointerRef.current.x = clampedX;
-      lastPointerRef.current.y = clampedY;
-      lastPointerRef.current.viewWidth = displayW;
-      lastPointerRef.current.viewHeight = displayH;
-
-      let mod = 0;
-      if (e.shiftKey) mod |= 1;
-      if (e.ctrlKey) mod |= 2;
-      if (e.altKey) mod |= 4;
-      if (e.metaKey) mod |= 8;
-
-      const event: InputPayload = {
-        event_type: eventType,
-        x: clampedX,
-        y: clampedY,
-        view_width: displayW,
-        view_height: displayH,
-        modifiers: mod,
-        scroll_dx: 0.0,
-        scroll_dy: 0.0,
-      };
-
-      if (isMotion) {
-        pendingPointerRef.current = event;
-        if (pointerRafRef.current === null) {
-          const req =
-            typeof requestAnimationFrame === "function"
-              ? requestAnimationFrame
-              : (cb: FrameRequestCallback) =>
-                  setTimeout(() => cb(Date.now()), 16) as unknown as number;
-          pointerRafRef.current = req(flushPointerMotion);
-        }
-        return;
-      }
-
-      sendInput(event).catch((err) => {
-        console.error("send_input pointer error:", err);
-      });
-    },
-    [flushPointerMotion]
-  );
-
-  const sendRelativePointerEvent = useCallback(
-    (e: MouseEvent) => {
-      if (!isConnectedRef.current) return;
-      const dx = typeof e.movementX === "number" ? e.movementX : 0;
-      const dy = typeof e.movementY === "number" ? e.movementY : 0;
-      if (dx === 0 && dy === 0) return;
-
-      let mod = 0;
-      if (e.shiftKey) mod |= 1;
-      if (e.ctrlKey) mod |= 2;
-      if (e.altKey) mod |= 4;
-      if (e.metaKey) mod |= 8;
-
-      const event: InputPayload = {
-        event_type: "RelativeMove",
-        x: lastPointerRef.current.x,
-        y: lastPointerRef.current.y,
-        view_width: lastPointerRef.current.viewWidth || 1280,
-        view_height: lastPointerRef.current.viewHeight || 800,
-        modifiers: mod,
-        scroll_dx: dx,
-        scroll_dy: dy,
-      };
-
-      if (
-        pendingPointerRef.current &&
-        pendingPointerRef.current.event_type === "RelativeMove"
-      ) {
-        pendingPointerRef.current.scroll_dx =
-          (pendingPointerRef.current.scroll_dx || 0) + dx;
-        pendingPointerRef.current.scroll_dy =
-          (pendingPointerRef.current.scroll_dy || 0) + dy;
-        pendingPointerRef.current.modifiers = mod;
-      } else {
-        flushPointerMotion();
-        pendingPointerRef.current = event;
-        if (pointerRafRef.current === null) {
-          const req =
-            typeof requestAnimationFrame === "function"
-              ? requestAnimationFrame
-              : (cb: FrameRequestCallback) =>
-                  setTimeout(() => cb(Date.now()), 16) as unknown as number;
-          pointerRafRef.current = req(flushPointerMotion);
-        }
+  // Forward remote input through useRemoteInput hook
+  useRemoteInput({
+    isConnected,
+    onEscape: () => {
+      if (overlayStateRef.current.getExpanded()) {
+        overlayStateRef.current.setExpanded(false);
+        const btnExpand = getDomElement("btn-expand");
+        btnExpand?.focus();
       }
     },
-    [flushPointerMotion]
-  );
+  });
 
-  // Release held input on attention switch or teardown
-  const releaseHeldInputs = useCallback(async () => {
-    flushPointerMotion();
-    const canvas = getDomElement("video-canvas") as HTMLCanvasElement | null;
-    const viewWidth = lastPointerRef.current.viewWidth || canvas?.clientWidth || 1280;
-    const viewHeight = lastPointerRef.current.viewHeight || canvas?.clientHeight || 800;
-    const events = heldInputsRef.current.releaseEvents(
-      lastPointerRef.current.x,
-      lastPointerRef.current.y,
-      viewWidth,
-      viewHeight
-    );
-    if (!events.length) return;
-    for (const event of events) {
-      try {
-        await sendInput(event as InputPayload);
-      } catch (err) {
-        console.error("send_input release error:", err);
-      }
-    }
-  }, [flushPointerMotion]);
-
-  const releaseLocalInputs = useCallback(() => {
-    if (!isConnectedRef.current) return;
-    releaseHeldInputs().catch((err) => {
-      console.error("releaseLocalInputs error:", err);
-    });
-  }, [releaseHeldInputs]);
-
-  // Wire event listeners on viewport, window, and overlay
+  // Track fullscreen state and host-level release on teardown
   useEffect(() => {
-    const viewport = getDomElement("viewport");
-
-    const handleMouseDown = (e: MouseEvent) => {
-      if (!isConnectedRef.current) return;
-      viewport?.focus();
-      const button = mapMouseButton(e.button);
-      if (!button) return;
-      if (e.button === 1) e.preventDefault();
-      heldInputsRef.current.mouseDown(button);
-      sendPointerEvent(mouseButtonEventType(button, true), e);
-    };
-
-    const handleMouseMove = (e: MouseEvent) => {
-      if (typeof document !== "undefined" && document.pointerLockElement) {
-        sendRelativePointerEvent(e);
-      } else if (heldInputsRef.current.isButtonDown("left")) {
-        sendPointerEvent("LeftMouseDragged", e);
-      } else if (heldInputsRef.current.isButtonDown("right")) {
-        sendPointerEvent("RightMouseDragged", e);
-      } else {
-        sendPointerEvent("MouseMove", e);
-      }
-    };
-
-    const handleContextMenu = (e: MouseEvent) => {
-      e.preventDefault();
-    };
-
-    const handleWheel = (e: WheelEvent) => {
-      if (!isConnectedRef.current) return;
-      e.preventDefault();
-      const canvas = getDomElement("video-canvas") as HTMLCanvasElement | null;
-      const rect = canvas?.getBoundingClientRect();
-      const rawX = rect ? Math.max(0, Math.min(e.clientX - rect.left, rect.width)) : 0;
-      const rawY = rect ? Math.max(0, Math.min(e.clientY - rect.top, rect.height)) : 0;
-
-      sendInput({
-        event_type: "ScrollWheel",
-        x: rawX,
-        y: rawY,
-        view_width: rect?.width || 1280,
-        view_height: rect?.height || 800,
-        modifiers: 0,
-        scroll_dx: e.deltaX,
-        scroll_dy: e.deltaY,
-      }).catch((err) => {
-        console.error("send_input wheel error:", err);
-      });
-    };
-
-    const handleWindowMouseUp = (e: MouseEvent) => {
-      const button = mapMouseButton(e.button);
-      if (!button) return;
-      if (heldInputsRef.current.isButtonDown(button)) {
-        heldInputsRef.current.mouseUp(button);
-        sendPointerEvent(mouseButtonEventType(button, false), e);
-      }
-    };
-
-    const handleKeyDown = (e: KeyboardEvent) => {
-      const target = e.target as { tagName?: unknown; id?: unknown } | null;
-      if (!shouldForwardKeyboardEvent({ target })) {
-        if (e.key === "Escape" && overlayStateRef.current.getExpanded()) {
-          overlayStateRef.current.setExpanded(false);
-          const btnExpand = getDomElement("btn-expand");
-          btnExpand?.focus();
-        }
-        return;
-      }
-      if (!isConnectedRef.current) return;
-      if (e.repeat) return;
-
-      let mod = 0;
-      if (e.shiftKey) mod |= 1;
-      if (e.ctrlKey) mod |= 2;
-      if (e.altKey) mod |= 4;
-      if (e.metaKey) mod |= 8;
-
-      const canvas = getDomElement("video-canvas") as HTMLCanvasElement | null;
-      heldInputsRef.current.keyDown(e.keyCode, mod);
-      sendInput({
-        event_type: "KeyDown",
-        key_code: e.keyCode,
-        modifiers: mod,
-        view_width: canvas?.clientWidth || 1280,
-        view_height: canvas?.clientHeight || 800,
-      }).catch((err) => {
-        console.error("send_input keydown error:", err);
-      });
-    };
-
-    const handleKeyUp = (e: KeyboardEvent) => {
-      const target = e.target as { tagName?: unknown; id?: unknown } | null;
-      if (!shouldForwardKeyboardEvent({ target })) return;
-      if (!isConnectedRef.current) return;
-
-      let mod = 0;
-      if (e.shiftKey) mod |= 1;
-      if (e.ctrlKey) mod |= 2;
-      if (e.altKey) mod |= 4;
-      if (e.metaKey) mod |= 8;
-
-      const canvas = getDomElement("video-canvas") as HTMLCanvasElement | null;
-      heldInputsRef.current.keyUp(e.keyCode);
-      sendInput({
-        event_type: "KeyUp",
-        key_code: e.keyCode,
-        modifiers: mod,
-        view_width: canvas?.clientWidth || 1280,
-        view_height: canvas?.clientHeight || 800,
-      }).catch((err) => {
-        console.error("send_input keyup error:", err);
-      });
-    };
-
-    const handleBlur = () => {
-      if (typeof document !== "undefined" && document.pointerLockElement) {
-        try {
-          document.exitPointerLock();
-        } catch (_) {}
-      }
-      releaseLocalInputs();
-    };
-
-    const handleVisibilityChange = () => {
-      if (typeof document !== "undefined" && document.hidden) {
-        if (document.pointerLockElement) {
-          try {
-            document.exitPointerLock();
-          } catch (_) {}
-        }
-        releaseLocalInputs();
-      }
-    };
-
     const handleFullscreenChange = () => {
       if (typeof document !== "undefined") {
         overlayStateRef.current.setFullscreenActive(Boolean(document.fullscreenElement));
       }
     };
 
-    const overlay = getDomElement("session-overlay");
-
-    const handleOverlayPointerDown = (e: PointerEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (
-        target &&
-        (target.closest("#btn-home") || target.closest("#btn-disconnect"))
-      ) {
-        return;
-      }
-      releaseLocalInputs();
-    };
-
-    const handleOverlayFocusIn = () => {
-      releaseLocalInputs();
-    };
-
-    if (viewport) {
-      viewport.addEventListener("mousedown", handleMouseDown);
-      viewport.addEventListener("mousemove", handleMouseMove);
-      viewport.addEventListener("contextmenu", handleContextMenu);
-      viewport.addEventListener("wheel", handleWheel, { passive: false });
-    }
-
-    if (overlay) {
-      overlay.addEventListener("pointerdown", handleOverlayPointerDown);
-      overlay.addEventListener("focusin", handleOverlayFocusIn);
-    }
-
-    if (typeof window !== "undefined") {
-      window.addEventListener("mouseup", handleWindowMouseUp);
-      window.addEventListener("keydown", handleKeyDown);
-      window.addEventListener("keyup", handleKeyUp);
-      window.addEventListener("blur", handleBlur);
-    }
-
     if (typeof document !== "undefined") {
-      document.addEventListener("visibilitychange", handleVisibilityChange);
       document.addEventListener("fullscreenchange", handleFullscreenChange);
     }
 
     return () => {
-      if (viewport) {
-        viewport.removeEventListener("mousedown", handleMouseDown);
-        viewport.removeEventListener("mousemove", handleMouseMove);
-        viewport.removeEventListener("contextmenu", handleContextMenu);
-        viewport.removeEventListener("wheel", handleWheel);
-      }
-      if (overlay) {
-        overlay.removeEventListener("pointerdown", handleOverlayPointerDown);
-        overlay.removeEventListener("focusin", handleOverlayFocusIn);
-      }
-      if (typeof window !== "undefined") {
-        window.removeEventListener("mouseup", handleWindowMouseUp);
-        window.removeEventListener("keydown", handleKeyDown);
-        window.removeEventListener("keyup", handleKeyUp);
-        window.removeEventListener("blur", handleBlur);
-      }
       if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", handleVisibilityChange);
         document.removeEventListener("fullscreenchange", handleFullscreenChange);
       }
-
-      // Teardown: flush pending motion, release held inputs, and invoke host release-all
-      flushPointerMotion();
-      releaseHeldInputs().catch(() => {});
       agentReleaseAll().catch(() => {});
     };
-  }, [
-    sendPointerEvent,
-    sendRelativePointerEvent,
-    flushPointerMotion,
-    releaseHeldInputs,
-    releaseLocalInputs,
-  ]);
+  }, []);
 
   const handleHome = () => {
     if (onHome) {
@@ -748,6 +357,7 @@ export function SessionView({
                   : "—"}
               </dd>
             </dl>
+
             <div className="pt-2 border-t border-[var(--border)] flex gap-2">
               <button
                 type="button"
