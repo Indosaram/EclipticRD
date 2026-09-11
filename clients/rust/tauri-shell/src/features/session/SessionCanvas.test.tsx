@@ -139,9 +139,34 @@ mock.module("@/lib/renderer", () => {
   };
 });
 
-import React from "react";
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { SessionCanvas, updateRemoteCursor } from "./SessionCanvas";
+
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  options?: { timeoutMs?: number; message?: string }
+): Promise<void> {
+  const timeoutMs = options?.timeoutMs ?? 2000;
+  const startTime = Date.now();
+  while (true) {
+    if (await predicate()) {
+      return;
+    }
+    if (Date.now() - startTime >= timeoutMs) {
+      throw new Error(options?.message ?? `waitFor condition timed out after ${timeoutMs}ms`);
+    }
+    await new Promise<void>((resolve) => {
+      if (typeof setImmediate === "function") {
+        setImmediate(resolve);
+      } else {
+        queueMicrotask(resolve);
+      }
+    });
+  }
+}
 
 describe("SessionCanvas", () => {
   beforeEach(() => {
@@ -157,76 +182,80 @@ describe("SessionCanvas", () => {
     const initialPollFrame = async () => null;
 
     // 1. Initial render / mount
-    root.render(
-      React.createElement(SessionCanvas, {
-        active: true,
-        pollFrame: initialPollFrame,
-      })
-    );
-
-    // Allow effects to flush
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    act(() => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: true,
+          pollFrame: initialPollFrame,
+        })
+      );
+    });
 
     expect(createRendererCallCount).toBe(1);
     expect(disposeCallCount).toBe(0);
 
     // 2. Re-render with active = false (prop change)
-    root.render(
-      React.createElement(SessionCanvas, {
-        active: false,
-        pollFrame: initialPollFrame,
-      })
-    );
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    act(() => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: false,
+          pollFrame: initialPollFrame,
+        })
+      );
+    });
 
     expect(createRendererCallCount).toBe(1);
     expect(disposeCallCount).toBe(0);
 
     // 3. Re-render with active = true and new pollFrame reference
     const secondPollFrame = async () => null;
-    root.render(
-      React.createElement(SessionCanvas, {
-        active: true,
-        pollFrame: secondPollFrame,
-      })
-    );
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    act(() => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: true,
+          pollFrame: secondPollFrame,
+        })
+      );
+    });
 
     expect(createRendererCallCount).toBe(1);
     expect(disposeCallCount).toBe(0);
 
     // 4. Re-render with onCursor callback prop added
     const cursorFn = () => {};
-    root.render(
-      React.createElement(SessionCanvas, {
-        active: true,
-        pollFrame: secondPollFrame,
-        onCursor: cursorFn,
-      })
-    );
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    act(() => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: true,
+          pollFrame: secondPollFrame,
+          onCursor: cursorFn,
+        })
+      );
+    });
 
     expect(createRendererCallCount).toBe(1);
     expect(disposeCallCount).toBe(0);
 
     // 5. Re-render with onError callback prop added
     const errorFn = () => {};
-    root.render(
-      React.createElement(SessionCanvas, {
-        active: true,
-        pollFrame: secondPollFrame,
-        onCursor: cursorFn,
-        onError: errorFn,
-      })
-    );
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    act(() => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: true,
+          pollFrame: secondPollFrame,
+          onCursor: cursorFn,
+          onError: errorFn,
+        })
+      );
+    });
 
     expect(createRendererCallCount).toBe(1);
     expect(disposeCallCount).toBe(0);
 
     // 6. Unmount component
-    root.unmount();
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    act(() => {
+      root.unmount();
+    });
 
     // After unmount: createRenderer still called only 1 time total, dispose called exactly once
     expect(createRendererCallCount).toBe(1);
@@ -243,21 +272,24 @@ describe("SessionCanvas", () => {
       return new ArrayBuffer(20);
     };
 
-    root.render(
-      React.createElement(SessionCanvas, {
-        active: true,
-        pollFrame,
-      })
-    );
+    act(() => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: true,
+          pollFrame,
+        })
+      );
+    });
 
     // Wait for at least one frame poll to execute
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => pollCount > 0 && renderCallCount > 0);
 
     expect(pollCount).toBeGreaterThan(0);
     expect(renderCallCount).toBeGreaterThan(0);
 
-    root.unmount();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    act(() => {
+      root.unmount();
+    });
   });
 
   it("cancels rAF and stops polling when active turns false", async () => {
@@ -270,34 +302,44 @@ describe("SessionCanvas", () => {
       return null;
     };
 
-    root.render(
-      React.createElement(SessionCanvas, {
-        active: true,
-        pollFrame,
-      })
-    );
+    act(() => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: true,
+          pollFrame,
+        })
+      );
+    });
 
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await waitFor(() => pollCount > 0);
     const countWhenActive = pollCount;
     expect(countWhenActive).toBeGreaterThan(0);
 
     // Deactivate
-    root.render(
-      React.createElement(SessionCanvas, {
-        active: false,
-        pollFrame,
-      })
-    );
+    act(() => {
+      root.render(
+        React.createElement(SessionCanvas, {
+          active: false,
+          pollFrame,
+        })
+      );
+    });
 
-    await new Promise((resolve) => setTimeout(resolve, 40));
     const countAfterInactive = pollCount;
 
     // After inactive, poll count should not continue increasing
-    await new Promise((resolve) => setTimeout(resolve, 40));
+    await new Promise<void>((resolve) => {
+      if (typeof setImmediate === "function") {
+        setImmediate(resolve);
+      } else {
+        queueMicrotask(resolve);
+      }
+    });
     expect(pollCount).toBeLessThanOrEqual(countAfterInactive + 1);
 
-    root.unmount();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    act(() => {
+      root.unmount();
+    });
   });
 
   describe("updateRemoteCursor", () => {

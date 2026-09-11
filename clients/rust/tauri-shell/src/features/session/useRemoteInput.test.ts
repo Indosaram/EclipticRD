@@ -185,9 +185,34 @@ if (!globalThis.document.getElementById) {
   };
 }
 
-import React from "react";
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { useRemoteInput, type UseRemoteInputOptions, type RemoteInputHandle } from "./useRemoteInput";
+
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  options?: { timeoutMs?: number; message?: string }
+): Promise<void> {
+  const timeoutMs = options?.timeoutMs ?? 2000;
+  const startTime = Date.now();
+  while (true) {
+    if (await predicate()) {
+      return;
+    }
+    if (Date.now() - startTime >= timeoutMs) {
+      throw new Error(options?.message ?? `waitFor condition timed out after ${timeoutMs}ms`);
+    }
+    await new Promise<void>((resolve) => {
+      if (typeof setImmediate === "function") {
+        setImmediate(resolve);
+      } else {
+        queueMicrotask(resolve);
+      }
+    });
+  }
+}
 
 function HookTestRig(props: UseRemoteInputOptions & { onMount?: (h: RemoteInputHandle) => void }) {
   const handle = useRemoteInput(props);
@@ -251,14 +276,15 @@ describe("useRemoteInput", () => {
     const viewport = createFakeDomTarget("viewport");
     const canvas = createFakeDomTarget("video-canvas", "canvas");
 
-    root.render(
-      React.createElement(HookTestRig, {
-        isConnected: true,
-        viewport,
-        canvas,
-      })
-    );
-    await new Promise((r) => setTimeout(r, 30));
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+        })
+      );
+    });
 
     // Dispatch keydown with repeat: true targeting viewport
     const repeatEvent = new Event("keydown") as any;
@@ -286,9 +312,10 @@ describe("useRemoteInput", () => {
     expect(downInputs.length).toBe(1);
     expect(downInputs[0].key_code).toBe(13);
 
-    root.unmount();
+    act(() => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((r) => setTimeout(r, 20));
   });
 
   it("the modifier bitmask is shift=1, ctrl=2, alt=4, meta=8 and combines correctly", async () => {
@@ -299,14 +326,15 @@ describe("useRemoteInput", () => {
     const viewport = createFakeDomTarget("viewport");
     const canvas = createFakeDomTarget("video-canvas", "canvas");
 
-    root.render(
-      React.createElement(HookTestRig, {
-        isConnected: true,
-        viewport,
-        canvas,
-      })
-    );
-    await new Promise((r) => setTimeout(r, 30));
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+        })
+      );
+    });
 
     const combinations = [
       { shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, expected: 0 },
@@ -344,9 +372,10 @@ describe("useRemoteInput", () => {
       expect(downs[0].modifiers).toBe(combo.expected);
     }
 
-    root.unmount();
+    act(() => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((r) => setTimeout(r, 20));
   });
 
   it("a held button releases exactly once on teardown and is not double-sent", async () => {
@@ -358,17 +387,18 @@ describe("useRemoteInput", () => {
     const canvas = createFakeDomTarget("video-canvas", "canvas");
     let handleRef: RemoteInputHandle | null = null;
 
-    root.render(
-      React.createElement(HookTestRig, {
-        isConnected: true,
-        viewport,
-        canvas,
-        onMount: (h: RemoteInputHandle) => {
-          handleRef = h;
-        },
-      })
-    );
-    await new Promise((r) => setTimeout(r, 30));
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+          onMount: (h: RemoteInputHandle) => {
+            handleRef = h;
+          },
+        })
+      );
+    });
 
     // Send left mouse down on viewport (button = 0)
     const downEv = new Event("mousedown") as any;
@@ -385,9 +415,11 @@ describe("useRemoteInput", () => {
     sentInputs = [];
 
     // Teardown: unmount the hook
-    root.unmount();
+    await act(async () => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((r) => setTimeout(r, 30));
+    await waitFor(() => sentInputs.filter((i) => i.event_type === "LeftMouseUp").length === 1);
 
     // Exactly one LeftMouseUp event should have been emitted during teardown
     const upInputsAfterTeardown = sentInputs.filter((i) => i.event_type === "LeftMouseUp");
@@ -408,17 +440,18 @@ describe("useRemoteInput", () => {
     const canvas = createFakeDomTarget("video-canvas", "canvas");
     let handleRef: RemoteInputHandle | null = null;
 
-    root.render(
-      React.createElement(HookTestRig, {
-        isConnected: true,
-        viewport,
-        canvas,
-        onMount: (h: RemoteInputHandle) => {
-          handleRef = h;
-        },
-      })
-    );
-    await new Promise((r) => setTimeout(r, 30));
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+          onMount: (h: RemoteInputHandle) => {
+            handleRef = h;
+          },
+        })
+      );
+    });
 
     // Press middle button (button = 1)
     let prevented = false;
@@ -441,9 +474,10 @@ describe("useRemoteInput", () => {
 
     // On unmount, already released, so no duplicate
     sentInputs = [];
-    root.unmount();
+    await act(async () => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((r) => setTimeout(r, 20));
 
     expect(sentInputs.filter((i) => i.event_type === "MiddleMouseUp").length).toBe(0);
   });
@@ -457,15 +491,16 @@ describe("useRemoteInput", () => {
     const canvas = createFakeDomTarget("video-canvas", "canvas");
     const overlay = createFakeDomTarget("session-overlay");
 
-    root.render(
-      React.createElement(HookTestRig, {
-        isConnected: true,
-        viewport,
-        canvas,
-        overlay,
-      })
-    );
-    await new Promise((r) => setTimeout(r, 30));
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+          overlay,
+        })
+      );
+    });
 
     // Press right button (button = 2)
     const downEv = new Event("mousedown") as any;
@@ -481,7 +516,6 @@ describe("useRemoteInput", () => {
     const homePointerEv = new Event("pointerdown") as any;
     Object.defineProperty(homePointerEv, "target", { value: homeBtn, configurable: true });
     overlay.dispatchEvent(homePointerEv);
-    await new Promise((r) => setTimeout(r, 20));
     expect(sentInputs.filter((i) => i.event_type === "RightMouseUp").length).toBe(0);
 
     // Overlay pointerdown on disconnect button: should NOT release
@@ -489,7 +523,6 @@ describe("useRemoteInput", () => {
     const discPointerEv = new Event("pointerdown") as any;
     Object.defineProperty(discPointerEv, "target", { value: discBtn, configurable: true });
     overlay.dispatchEvent(discPointerEv);
-    await new Promise((r) => setTimeout(r, 20));
     expect(sentInputs.filter((i) => i.event_type === "RightMouseUp").length).toBe(0);
 
     // Overlay pointerdown elsewhere: MUST release
@@ -497,12 +530,13 @@ describe("useRemoteInput", () => {
     const normalPointerEv = new Event("pointerdown") as any;
     Object.defineProperty(normalPointerEv, "target", { value: otherEl, configurable: true });
     overlay.dispatchEvent(normalPointerEv);
-    await new Promise((r) => setTimeout(r, 20));
+    await waitFor(() => sentInputs.filter((i) => i.event_type === "RightMouseUp").length === 1);
     expect(sentInputs.filter((i) => i.event_type === "RightMouseUp").length).toBe(1);
 
-    root.unmount();
+    await act(async () => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((r) => setTimeout(r, 20));
   });
 
   it("handles viewport wheel event with preventDefault and clamped coords", async () => {
@@ -513,14 +547,15 @@ describe("useRemoteInput", () => {
     const viewport = createFakeDomTarget("viewport");
     const canvas = createFakeDomTarget("video-canvas", "canvas");
 
-    root.render(
-      React.createElement(HookTestRig, {
-        isConnected: true,
-        viewport,
-        canvas,
-      })
-    );
-    await new Promise((r) => setTimeout(r, 30));
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+        })
+      );
+    });
 
     let wheelPrevented = false;
     const wheelEv = new Event("wheel") as any;
@@ -542,9 +577,10 @@ describe("useRemoteInput", () => {
     expect(wheelInputs[0].x).toBe(500);
     expect(wheelInputs[0].y).toBe(300);
 
-    root.unmount();
+    act(() => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((r) => setTimeout(r, 20));
   });
 
   it("handles viewport contextmenu with preventDefault", async () => {
@@ -555,14 +591,15 @@ describe("useRemoteInput", () => {
     const viewport = createFakeDomTarget("viewport");
     const canvas = createFakeDomTarget("video-canvas", "canvas");
 
-    root.render(
-      React.createElement(HookTestRig, {
-        isConnected: true,
-        viewport,
-        canvas,
-      })
-    );
-    await new Promise((r) => setTimeout(r, 30));
+    act(() => {
+      root.render(
+        React.createElement(HookTestRig, {
+          isConnected: true,
+          viewport,
+          canvas,
+        })
+      );
+    });
 
     let cmPrevented = false;
     const cmEv = new Event("contextmenu") as any;
@@ -573,8 +610,9 @@ describe("useRemoteInput", () => {
     viewport.dispatchEvent(cmEv);
     expect(cmPrevented).toBe(true);
 
-    root.unmount();
+    act(() => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((r) => setTimeout(r, 20));
   });
 });

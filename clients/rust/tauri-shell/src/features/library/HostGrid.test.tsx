@@ -150,7 +150,9 @@ if (typeof globalThis.document === "undefined") {
   (globalThis as any).Node = class Node {};
 }
 
-import React from "react";
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { HostGrid, type Host } from "./HostGrid";
 
@@ -219,17 +221,17 @@ describe("HostGrid", () => {
       connectCalls.push(host);
     };
 
-    root.render(
-      React.createElement(HostGrid, {
-        hosts: mockHosts,
-        favoriteIps: [mockHosts[0].ip],
-        busy: false,
-        onConnect,
-        onToggleFavorite,
-      })
-    );
-
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    act(() => {
+      root.render(
+        React.createElement(HostGrid, {
+          hosts: mockHosts,
+          favoriteIps: [mockHosts[0].ip],
+          busy: false,
+          onConnect,
+          onToggleFavorite,
+        })
+      );
+    });
 
     // 1. the grid container carries role="list" and exactly 2 elements carry role="listitem"
     const listContainers = findElements(
@@ -293,26 +295,27 @@ describe("HostGrid", () => {
     firstFav.onClick();
     expect(toggleCalls).toEqual(["192.168.1.10"]);
 
-    root.unmount();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    act(() => {
+      root.unmount();
+    });
   });
 
   it("5. when statusMessage is set to a non-empty string, the grid is NOT rendered and the message text IS", async () => {
     const container = document.createElement("div");
     const root = createRoot(container);
 
-    root.render(
-      React.createElement(HostGrid, {
-        hosts: mockHosts,
-        favoriteIps: [mockHosts[0].ip],
-        busy: false,
-        onConnect: () => {},
-        onToggleFavorite: () => {},
-        statusMessage: "No hosts discovered on network",
-      })
-    );
-
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    act(() => {
+      root.render(
+        React.createElement(HostGrid, {
+          hosts: mockHosts,
+          favoriteIps: [mockHosts[0].ip],
+          busy: false,
+          onConnect: () => {},
+          onToggleFavorite: () => {},
+          statusMessage: "No hosts discovered on network",
+        })
+      );
+    });
 
     // Grid (role="list") should not be rendered
     const listContainers = findElements(
@@ -331,7 +334,8 @@ describe("HostGrid", () => {
     const allText = collectText(container);
     expect(allText).toContain("No hosts discovered on network");
 
-    root.unmount();
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    act(() => {
+      root.unmount();
+    });
   });
 });

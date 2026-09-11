@@ -67,15 +67,18 @@ Object.defineProperty(globalThis, "localStorage", {
   writable: true,
   configurable: true,
 });
-if (typeof window !== "undefined") {
-  Object.defineProperty(window, "localStorage", {
-    value: fakeLocalStorage,
-    writable: true,
-    configurable: true,
-  });
+if (typeof window === "undefined") {
+  (globalThis as any).window = globalThis;
 }
+Object.defineProperty(window, "localStorage", {
+  value: fakeLocalStorage,
+  writable: true,
+  configurable: true,
+});
 
-import React from "react";
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import {
   SessionSettingsPanel,
@@ -226,12 +229,15 @@ describe("SessionSettingsPanel", () => {
       const container = document.createElement("div");
       const root = createRoot(container);
 
-      root.render(React.createElement(SessionSettingsPanel, { isConnected: true }));
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await act(async () => {
+        root.render(React.createElement(SessionSettingsPanel, { isConnected: true }));
+      });
 
       expect(audioStatusCalls).toBeGreaterThanOrEqual(1);
 
-      root.unmount();
+      act(() => {
+        root.unmount();
+      });
     }
   });
 });

@@ -1,5 +1,22 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
 
+// Polyfill classes for React DOM if needed
+if (typeof (globalThis as any).HTMLIFrameElement === "undefined") {
+  (globalThis as any).HTMLIFrameElement = class HTMLIFrameElement {};
+}
+if (typeof (globalThis as any).HTMLCanvasElement === "undefined") {
+  (globalThis as any).HTMLCanvasElement = class HTMLCanvasElement {};
+}
+if (typeof (globalThis as any).HTMLDivElement === "undefined") {
+  (globalThis as any).HTMLDivElement = class HTMLDivElement {};
+}
+if (typeof (globalThis as any).Element === "undefined") {
+  (globalThis as any).Element = class Element {};
+}
+if (typeof (globalThis as any).Node === "undefined") {
+  (globalThis as any).Node = class Node {};
+}
+
 // Mock renderer module before importing React components to avoid WebGL errors in headless test env
 mock.module("@/lib/renderer", () => {
   return {
@@ -53,6 +70,15 @@ if (typeof globalThis.document === "undefined") {
       attributes: {} as Record<string, string>,
       className: "",
       disabled: false,
+      _textContent: undefined as string | undefined,
+      get textContent(): string {
+        if (this._textContent !== undefined) return this._textContent;
+        return (this.childNodes || []).map((c: any) => c.textContent ?? "").join("");
+      },
+      set textContent(v: string) {
+        this._textContent = String(v);
+        this.childNodes = [ownerDoc.createTextNode(v)];
+      },
       _onClick: undefined as any,
       get onClick() {
         for (const key of Object.keys(this)) {
@@ -185,6 +211,7 @@ if (typeof globalThis.document === "undefined") {
   globalThis.window = globalThis as any;
   (globalThis as any).HTMLCanvasElement = class HTMLCanvasElement {};
   (globalThis as any).HTMLDivElement = class HTMLDivElement {};
+  (globalThis as any).HTMLIFrameElement = class HTMLIFrameElement {};
   (globalThis as any).Element = class Element {};
   (globalThis as any).Node = class Node {};
 }
@@ -218,9 +245,12 @@ function findElements(node: any, predicate: (el: any) => boolean): any[] {
 }
 
 function getAllText(node: any): string {
+  if (!node) return "";
   let text = "";
   if (node.nodeType === 3) {
     text += node.textContent || "";
+  } else if (typeof node.textContent === "string" && (!node.childNodes || node.childNodes.length === 0)) {
+    text += node.textContent;
   }
   const children = node.childNodes || node.children || [];
   for (const child of children) {
@@ -238,11 +268,36 @@ if (!globalThis.document.getElementById) {
   };
 }
 
-import React from "react";
+(globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { SessionView } from "./SessionView";
 import App from "@/app/App";
 import type { ConnectionInstance, ConnectionSnapshot } from "@/lib/connection";
+
+async function waitFor(
+  predicate: () => boolean | Promise<boolean>,
+  options?: { timeoutMs?: number; message?: string }
+): Promise<void> {
+  const timeoutMs = options?.timeoutMs ?? 2000;
+  const startTime = Date.now();
+  while (true) {
+    if (await predicate()) {
+      return;
+    }
+    if (Date.now() - startTime >= timeoutMs) {
+      throw new Error(options?.message ?? `waitFor condition timed out after ${timeoutMs}ms`);
+    }
+    await new Promise<void>((resolve) => {
+      if (typeof setImmediate === "function") {
+        setImmediate(resolve);
+      } else {
+        queueMicrotask(resolve);
+      }
+    });
+  }
+}
 
 function createMockConnection(phase: ConnectionSnapshot["phase"] = "streaming"): ConnectionInstance {
   const state: ConnectionSnapshot = {
@@ -318,8 +373,9 @@ describe("SessionView", () => {
     const root = createRoot(container);
     const mockConn = createMockConnection("streaming");
 
-    root.render(React.createElement(SessionView, { connection: mockConn }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await act(async () => {
+      root.render(React.createElement(SessionView, { connection: mockConn }));
+    });
 
     // Viewport and Canvas
     const viewports = findElements(container, (el) => el.getAttribute("id") === "viewport");
@@ -343,9 +399,10 @@ describe("SessionView", () => {
     const barClass = bars[0].className || bars[0].getAttribute("class") || "";
     expect(barClass).toContain("pointer-events-auto");
 
-    root.unmount();
+    await act(async () => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((resolve) => setTimeout(resolve, 20));
   });
 
   it("reproduces legacy copy: host name badge, live stats line, and buttons", async () => {
@@ -354,8 +411,9 @@ describe("SessionView", () => {
     const root = createRoot(container);
     const mockConn = createMockConnection("streaming");
 
-    root.render(React.createElement(SessionView, { connection: mockConn }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await act(async () => {
+      root.render(React.createElement(SessionView, { connection: mockConn }));
+    });
 
     // Host badge contains host name
     const hostBadges = findElements(container, (el) => el.getAttribute("id") === "session-host-name");
@@ -385,9 +443,10 @@ describe("SessionView", () => {
     expect(dcBtns.length).toBe(1);
     expect(getAllText(dcBtns[0])).toContain("Disconnect");
 
-    root.unmount();
+    await act(async () => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((resolve) => setTimeout(resolve, 20));
   });
 
   it("toggles launcher panel when Expand button is clicked", async () => {
@@ -396,16 +455,18 @@ describe("SessionView", () => {
     const root = createRoot(container);
     const mockConn = createMockConnection("streaming");
 
-    root.render(React.createElement(SessionView, { connection: mockConn }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await act(async () => {
+      root.render(React.createElement(SessionView, { connection: mockConn }));
+    });
 
     const expandBtns = findElements(container, (el) => el.getAttribute("id") === "btn-expand");
     expect(expandBtns.length).toBe(1);
     expect(findElements(container, (el) => el.getAttribute("id") === "launcher-panel").length).toBe(0);
 
     // Click expand
-    triggerClick(expandBtns[0]);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await act(async () => {
+      triggerClick(expandBtns[0]);
+    });
 
     // Launcher panel is now visible
     const panels = findElements(container, (el) => el.getAttribute("id") === "launcher-panel");
@@ -430,9 +491,10 @@ describe("SessionView", () => {
     expect(fsBtns.length).toBe(1);
     expect(getAllText(fsBtns[0])).toContain("Fullscreen");
 
-    root.unmount();
+    await act(async () => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((resolve) => setTimeout(resolve, 20));
   });
 
   it("on teardown releases held inputs via agentReleaseAll", async () => {
@@ -441,15 +503,18 @@ describe("SessionView", () => {
     const root = createRoot(container);
     const mockConn = createMockConnection("streaming");
 
-    root.render(React.createElement(SessionView, { connection: mockConn }));
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await act(async () => {
+      root.render(React.createElement(SessionView, { connection: mockConn }));
+    });
 
     expect(agentReleaseAllCalls).toBe(0);
 
     // Teardown unmount
-    root.unmount();
+    await act(async () => {
+      root.unmount();
+    });
     document.body.removeChild(container);
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await waitFor(() => agentReleaseAllCalls >= 1);
 
     expect(agentReleaseAllCalls).toBeGreaterThanOrEqual(1);
   });
@@ -461,8 +526,9 @@ describe("SessionView", () => {
       const root = createRoot(container);
       const mockConn = createMockConnection("idle");
 
-      root.render(<App connection={mockConn} />);
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await act(async () => {
+        root.render(<App connection={mockConn} />);
+      });
 
       // Launcher main-view and sidebar are rendered, session-overlay is not
       const mainView = findElements(container, (el) => el.getAttribute("id") === "main-view");
@@ -471,9 +537,10 @@ describe("SessionView", () => {
       const overlay = findElements(container, (el) => el.getAttribute("id") === "session-overlay");
       expect(overlay.length).toBe(0);
 
-      root.unmount();
+      await act(async () => {
+        root.unmount();
+      });
       document.body.removeChild(container);
-      await new Promise((resolve) => setTimeout(resolve, 20));
     });
 
     it("renders SessionView when connection phase is connecting, waiting-video, or streaming", async () => {
@@ -483,8 +550,9 @@ describe("SessionView", () => {
         const root = createRoot(container);
         const mockConn = createMockConnection(phase);
 
-        root.render(<App connection={mockConn} />);
-        await new Promise((resolve) => setTimeout(resolve, 50));
+        await act(async () => {
+          root.render(<App connection={mockConn} />);
+        });
 
         // SessionView overlay is rendered, launcher main-view is not
         const overlay = findElements(container, (el) => el.getAttribute("id") === "session-overlay");
@@ -493,9 +561,10 @@ describe("SessionView", () => {
         const mainView = findElements(container, (el) => el.getAttribute("id") === "main-view");
         expect(mainView.length).toBe(0);
 
-        root.unmount();
+        await act(async () => {
+          root.unmount();
+        });
         document.body.removeChild(container);
-        await new Promise((resolve) => setTimeout(resolve, 20));
       }
     });
   });
@@ -507,8 +576,9 @@ describe("SessionView", () => {
       const root = createRoot(container);
       const mockConn = createMockConnection("streaming");
 
-      root.render(React.createElement(SessionView, { connection: mockConn }));
-      await new Promise((resolve) => setTimeout(resolve, 50));
+      await act(async () => {
+        root.render(React.createElement(SessionView, { connection: mockConn }));
+      });
 
       const viewports = findElements(container, (el) => el.getAttribute("id") === "viewport");
       expect(viewports.length).toBe(1);
@@ -545,9 +615,10 @@ describe("SessionView", () => {
       expect(keyEvents.length).toBe(1);
       expect(keyEvents[0].key_code).toBe(66);
 
-      root.unmount();
+      await act(async () => {
+        root.unmount();
+      });
       document.body.removeChild(container);
-      await new Promise((resolve) => setTimeout(resolve, 20));
     });
   });
 });
