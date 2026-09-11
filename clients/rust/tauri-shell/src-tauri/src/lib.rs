@@ -946,7 +946,18 @@ pub mod commands {
             let records_clone = records.clone();
             tokio::spawn(async move {
                 #[cfg(target_os = "macos")]
-                let program = "/Applications/Tailscale.app/Contents/MacOS/Tailscale";
+                let program = {
+                    const CANDIDATES: &[&str] = &[
+                        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+                        "/usr/local/bin/tailscale",
+                        "/opt/homebrew/bin/tailscale",
+                    ];
+                    CANDIDATES
+                        .iter()
+                        .find(|p| std::path::Path::new(p).exists())
+                        .copied()
+                        .unwrap_or("tailscale")
+                };
                 #[cfg(not(target_os = "macos"))]
                 let program = "tailscale";
                 let output = tailscale_status(std::ffi::OsStr::new(program)).await;
@@ -993,10 +1004,12 @@ pub mod commands {
         program: &std::ffi::OsStr,
     ) -> std::io::Result<std::process::Output> {
         // Dropping the timed-out/cancelled output future also kills its child.
+        // On macOS, the Tailscale app CLI checks $SHLVL and errors if missing (e.g. launched via GUI/LaunchServices).
         tokio::time::timeout(
             Duration::from_secs(5),
             tokio::process::Command::new(program)
                 .args(["status", "--json"])
+                .env("SHLVL", "1")
                 .kill_on_drop(true)
                 .output(),
         )
