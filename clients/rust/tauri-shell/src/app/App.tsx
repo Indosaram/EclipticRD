@@ -1,9 +1,63 @@
-import { useState } from "react"
+import { useState, useMemo, useEffect } from "react"
 import { Sidebar } from "@/features/shell/Sidebar"
 import { ComputersPage } from "@/features/library/ComputersPage"
+import { SessionView } from "@/features/session/SessionView"
+import {
+  createConnection,
+  type ConnectionInstance,
+  type ConnectionSnapshot,
+} from "@/lib/connection"
+import {
+  isNativeAvailable,
+  invokeCommand,
+  agentReleaseAll,
+  type ErdCommand,
+} from "@/lib/ipc"
 
-export default function App() {
+export interface AppProps {
+  connection?: ConnectionInstance;
+}
+
+export function App(props: AppProps = {}) {
+  const propConnection = props.connection
   const [activeView, setActiveView] = useState<"computers" | "favorites">("computers")
+  const native = isNativeAvailable()
+
+  const connection: ConnectionInstance = useMemo(() => {
+    return (
+      propConnection ??
+      createConnection({
+        invoke: (cmd: string, args?: unknown) =>
+          invokeCommand(cmd as ErdCommand, args as Record<string, unknown> | undefined),
+        nativeAvailable: native,
+        releaseInputs: async () => {
+          try {
+            await agentReleaseAll()
+          } catch {
+            // Release failure is non-fatal during teardown
+          }
+        },
+      })
+    )
+  }, [propConnection, native])
+
+  const [snapshot, setSnapshot] = useState<ConnectionSnapshot>(() =>
+    connection.snapshot()
+  )
+
+  useEffect(() => {
+    setSnapshot(connection.snapshot())
+    return connection.subscribe(setSnapshot)
+  }, [connection])
+
+  const isSessionActive =
+    snapshot.phase === "connecting" ||
+    snapshot.phase === "waiting-video" ||
+    snapshot.phase === "streaming"
+
+  if (isSessionActive) {
+    return <SessionView connection={connection} snapshot={snapshot} />
+  }
 
   return (
     <div
@@ -21,3 +75,5 @@ export default function App() {
     </div>
   )
 }
+
+export default App
