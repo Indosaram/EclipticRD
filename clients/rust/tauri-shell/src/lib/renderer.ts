@@ -29,10 +29,11 @@ const FS_SOURCE_WEBGL2 = `#version 300 es
   uniform sampler2D u_yPlane;
   uniform sampler2D u_uvPlane;
   void main() {
-    float y = (texture(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
-    vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(128.0 / 255.0, 128.0 / 255.0);
-    float u = uv.r * (255.0 / 224.0);
-    float v = uv.g * (255.0 / 224.0);
+    // Full range: erd-host session.rs bgra_to_nv12 produces full-range BT.601 (JPEG) with no luma offset
+    float y = texture(u_yPlane, v_texCoord).r;
+    vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(0.5, 0.5);
+    float u = uv.r;
+    float v = uv.g;
 
     float r = y + 1.402 * v;
     float g = y - 0.344136 * u - 0.714136 * v;
@@ -57,10 +58,11 @@ const FS_SOURCE_WEBGL1 = `
   uniform sampler2D u_yPlane;
   uniform sampler2D u_uvPlane;
   void main() {
-    float y = (texture2D(u_yPlane, v_texCoord).r - (16.0 / 255.0)) * (255.0 / 219.0);
-    vec2 uv = texture2D(u_uvPlane, v_texCoord).ra - vec2(128.0 / 255.0, 128.0 / 255.0);
-    float u = uv.r * (255.0 / 224.0);
-    float v = uv.g * (255.0 / 224.0);
+    // Full range: erd-host session.rs bgra_to_nv12 produces full-range BT.601 (JPEG) with no luma offset
+    float y = texture2D(u_yPlane, v_texCoord).r;
+    vec2 uv = texture2D(u_uvPlane, v_texCoord).ra - vec2(0.5, 0.5);
+    float u = uv.r;
+    float v = uv.g;
 
     float r = y + 1.402 * v;
     float g = y - 0.344136 * u - 0.714136 * v;

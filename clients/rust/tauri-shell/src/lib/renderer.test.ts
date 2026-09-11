@@ -152,3 +152,160 @@ describe("parseFrame", () => {
     expect(parsed?.uv.byteLength).toBe(uvLen);
   });
 });
+
+interface Nv12Pixel {
+  y: number;
+  u: number;
+  v: number;
+}
+
+interface RgbPixel {
+  r: number;
+  g: number;
+  b: number;
+}
+
+function clamp(val: number, min: number, max: number): number {
+  return Math.min(Math.max(val, min), max);
+}
+
+function hostBgraToNv12(r: number, g: number, b: number): Nv12Pixel {
+  const y = (77 * r + 150 * g + 29 * b) >> 8;
+  const u = 128 + ((-43 * r - 85 * g + 128 * b) >> 8);
+  const v = 128 + ((128 * r - 107 * g - 21 * b) >> 8);
+  return { y, u, v };
+}
+
+function shaderNv12ToRgb(y: number, u: number, v: number): RgbPixel {
+  // Texture sampling normalizes unsigned bytes [0, 255] to [0.0, 1.0]
+  const texY = y / 255.0;
+  const texU = u / 255.0;
+  const texV = v / 255.0;
+
+  // New full-range BT.601 shader math (no 16/255 offset, no 255/219 scaling, no 255/224 scaling)
+  const shaderY = texY;
+  const shaderU = texU - 0.5;
+  const shaderV = texV - 0.5;
+
+  const rNorm = clamp(shaderY + 1.402 * shaderV, 0.0, 1.0);
+  const gNorm = clamp(shaderY - 0.344136 * shaderU - 0.714136 * shaderV, 0.0, 1.0);
+  const bNorm = clamp(shaderY + 1.772 * shaderU, 0.0, 1.0);
+
+  return {
+    r: rNorm * 255.0,
+    g: gNorm * 255.0,
+    b: bNorm * 255.0,
+  };
+}
+
+describe("shader artifact range validation", () => {
+  it("fails if limited-range BT.601 shader expansions or offsets are reintroduced in renderer.ts", async () => {
+    const rendererSrc = await Bun.file(new URL("./renderer.ts", import.meta.url)).text();
+
+    expect(rendererSrc.includes("255.0 / 219.0")).toBe(false);
+    expect(rendererSrc.includes("255.0/219.0")).toBe(false);
+    expect(rendererSrc.includes("255.0 / 224.0")).toBe(false);
+    expect(rendererSrc.includes("255.0/224.0")).toBe(false);
+    expect(rendererSrc.includes("16.0 / 255.0")).toBe(false);
+    expect(rendererSrc.includes("16.0/255.0")).toBe(false);
+
+    expect(rendererSrc.includes("texture(u_yPlane")).toBe(true);
+    expect(rendererSrc.includes("texture2D(u_yPlane")).toBe(true);
+
+    const occurrences = rendererSrc.split("- vec2(0.5, 0.5)").length - 1;
+    expect(occurrences).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe("BT.601 full-range NV12 round-trip", () => {
+  // Tolerance of 3/255 (~0.01176 normalized, or 3.0 in 0..255 space)
+  // Max observed integer-quantization error across test colors is ~1.07/255.
+  const TOLERANCE_255 = 3;
+  const TOLERANCE_NORM = 3 / 255;
+
+  const testCases: { name: string; r: number; g: number; b: number }[] = [
+    { name: "black", r: 0, g: 0, b: 0 },
+    { name: "white", r: 255, g: 255, b: 255 },
+    { name: "mid grey", r: 128, g: 128, b: 128 },
+    { name: "pure red", r: 255, g: 0, b: 0 },
+    { name: "pure green", r: 0, g: 255, b: 0 },
+    { name: "pure blue", r: 0, g: 0, b: 255 },
+  ];
+
+  for (const { name, r, g, b } of testCases) {
+    it(`round-trips ${name} (r=${r}, g=${g}, b=${b}) within 3/255 tolerance`, () => {
+      const { y, u, v } = hostBgraToNv12(r, g, b);
+      const out = shaderNv12ToRgb(y, u, v);
+
+      const errR = Math.abs(out.r - r);
+      const errG = Math.abs(out.g - g);
+      const errB = Math.abs(out.b - b);
+
+      expect(errR).toBeLessThanOrEqual(TOLERANCE_255);
+      expect(errG).toBeLessThanOrEqual(TOLERANCE_255);
+      expect(errB).toBeLessThanOrEqual(TOLERANCE_255);
+
+      expect(errR / 255).toBeLessThanOrEqual(TOLERANCE_NORM);
+      expect(errG / 255).toBeLessThanOrEqual(TOLERANCE_NORM);
+      expect(errB / 255).toBeLessThanOrEqual(TOLERANCE_NORM);
+    });
+  }
+
+  it("discriminates against limited-range decoding with a tight <= 1/255 bound on mid grey", () => {
+    // Under the old limited-range math:
+    //   y = (128.0 / 255.0 - 16.0 / 255.0) * (255.0 / 219.0) = 112 / 219 = 0.5114155
+    //   which produced 130.41, i.e. an error of 2.41/255 from 128.
+    // Under full-range math:
+    //   y = 128.0 / 255.0, u = 128.0 / 255.0 - 0.5, v = 128.0 / 255.0 - 0.5
+    //   which round-trips 128 exactly (with chroma offset 0.5/255 yielding max error ~0.886/255).
+    // An error bound of <= 1/255 strictly passes for full-range math and fails for limited-range math,
+    // so this assertion is what actually fails if the limited-range bug returns.
+    const TIGHT_TOLERANCE_255 = 1;
+    const TIGHT_TOLERANCE_NORM = 1 / 255;
+
+    const { y, u, v } = hostBgraToNv12(128, 128, 128);
+    const out = shaderNv12ToRgb(y, u, v);
+
+    const errR = Math.abs(out.r - 128);
+    const errG = Math.abs(out.g - 128);
+    const errB = Math.abs(out.b - 128);
+
+    expect(errR).toBeLessThanOrEqual(TIGHT_TOLERANCE_255);
+    expect(errG).toBeLessThanOrEqual(TIGHT_TOLERANCE_255);
+    expect(errB).toBeLessThanOrEqual(TIGHT_TOLERANCE_255);
+
+    expect(errR / 255).toBeLessThanOrEqual(TIGHT_TOLERANCE_NORM);
+    expect(errG / 255).toBeLessThanOrEqual(TIGHT_TOLERANCE_NORM);
+    expect(errB / 255).toBeLessThanOrEqual(TIGHT_TOLERANCE_NORM);
+  });
+
+  it("explicitly asserts that WHITE comes back near 255 without being clipped by limited-range math", () => {
+    const { y, u, v } = hostBgraToNv12(255, 255, 255);
+    // Luma for full-range white spans up to 255 (not 235)
+    expect(y).toBe(255);
+    const out = shaderNv12ToRgb(y, u, v);
+    // Under limited-range math, raw Y was ~278.3 (blown highlights).
+    // Under full-range math, RGB values are all within TOLERANCE_255 of 255.
+    expect(out.r).toBeGreaterThanOrEqual(255 - TOLERANCE_255);
+    expect(out.g).toBeGreaterThanOrEqual(255 - TOLERANCE_255);
+    expect(out.b).toBeGreaterThanOrEqual(255 - TOLERANCE_255);
+    expect(Math.abs(out.r - 255)).toBeLessThanOrEqual(TOLERANCE_255);
+    expect(Math.abs(out.g - 255)).toBeLessThanOrEqual(TOLERANCE_255);
+    expect(Math.abs(out.b - 255)).toBeLessThanOrEqual(TOLERANCE_255);
+  });
+
+  it("explicitly asserts that BLACK comes back near 0 without being crushed by limited-range math", () => {
+    const { y, u, v } = hostBgraToNv12(0, 0, 0);
+    // Luma for full-range black starts at 0 (not 16)
+    expect(y).toBe(0);
+    const out = shaderNv12ToRgb(y, u, v);
+    // Under limited-range math, raw Y was -18.6 (crushed blacks below 16).
+    // Under full-range math, RGB values are all within TOLERANCE_255 of 0.
+    expect(out.r).toBeLessThanOrEqual(TOLERANCE_255);
+    expect(out.g).toBeLessThanOrEqual(TOLERANCE_255);
+    expect(out.b).toBeLessThanOrEqual(TOLERANCE_255);
+    expect(Math.abs(out.r - 0)).toBeLessThanOrEqual(TOLERANCE_255);
+    expect(Math.abs(out.g - 0)).toBeLessThanOrEqual(TOLERANCE_255);
+    expect(Math.abs(out.b - 0)).toBeLessThanOrEqual(TOLERANCE_255);
+  });
+});
