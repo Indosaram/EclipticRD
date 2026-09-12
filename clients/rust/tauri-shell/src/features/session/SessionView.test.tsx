@@ -328,7 +328,12 @@ function createMockConnection(phase: ConnectionSnapshot["phase"] = "streaming"):
       listeners.add(fn);
       return () => listeners.delete(fn);
     },
-    connect: async () => true,
+    connect: async () => {
+      state.phase = "connecting";
+      state.busy = true;
+      listeners.forEach((l) => l({ ...state }));
+      return true;
+    },
     cancel: async () => {},
     disconnect: async () => {
       state.phase = "idle";
@@ -566,6 +571,32 @@ describe("SessionView", () => {
         });
         document.body.removeChild(container);
       }
+    });
+
+    it("passes shared connection to ComputersPage so triggering connect switches App to SessionView", async () => {
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      const mockConn = createMockConnection("idle");
+
+      await act(async () => {
+        root.render(<App connection={mockConn} />);
+      });
+
+      expect(findElements(container, (el) => el.getAttribute("id") === "main-view").length).toBe(1);
+      expect(findElements(container, (el) => el.getAttribute("id") === "session-overlay").length).toBe(0);
+
+      await act(async () => {
+        await mockConn.connect({ host: "100.91.254.71" });
+      });
+
+      expect(findElements(container, (el) => el.getAttribute("id") === "main-view").length).toBe(0);
+      expect(findElements(container, (el) => el.getAttribute("id") === "session-overlay").length).toBe(1);
+
+      await act(async () => {
+        root.unmount();
+      });
+      document.body.removeChild(container);
     });
   });
 

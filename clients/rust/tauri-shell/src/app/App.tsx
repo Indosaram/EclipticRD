@@ -70,7 +70,7 @@ export function App(props: AppProps = {}) {
         id="main-view"
         data-ui-scope
       >
-        <ComputersPage view={activeView} />
+        <ComputersPage view={activeView} connection={connection} />
       </main>
     </div>
   )

@@ -39,12 +39,14 @@ export interface ComputersPageProps {
   view?: "computers" | "favorites";
   activeView?: "computers" | "favorites";
   includeDirectConnect?: boolean;
+  connection?: ConnectionInstance;
 }
 
 export function ComputersPage({
   view,
   activeView,
   includeDirectConnect,
+  connection: propConnection,
 }: ComputersPageProps) {
   const currentView = view ?? activeView ?? "computers"
   const isFavoritesView = currentView === "favorites"
@@ -66,19 +68,22 @@ export function ComputersPage({
   }, [native])
 
   const connection: ConnectionInstance = useMemo(() => {
-    return createConnection({
-      invoke: (cmd: string, args?: unknown) =>
-        invokeCommand(cmd as ErdCommand, args as Record<string, unknown> | undefined),
-      nativeAvailable: native,
-      releaseInputs: async () => {
-        try {
-          await agentReleaseAll()
-        } catch {
-          // Release failure is non-fatal during teardown
-        }
-      },
-    })
-  }, [native])
+    return (
+      propConnection ??
+      createConnection({
+        invoke: (cmd: string, args?: unknown) =>
+          invokeCommand(cmd as ErdCommand, args as Record<string, unknown> | undefined),
+        nativeAvailable: native,
+        releaseInputs: async () => {
+          try {
+            await agentReleaseAll()
+          } catch {
+            // Release failure is non-fatal during teardown
+          }
+        },
+      })
+    )
+  }, [propConnection, native])
 
   const [libSnapshot, setLibSnapshot] = useState<LibrarySnapshot<LibraryHost>>(() =>
     library.snapshot()
@@ -259,6 +264,7 @@ export function ComputersPage({
       setDirectError(null)
       const pinEl = document.getElementById("direct-pin")
       pinEl?.focus()
+      pinEl?.scrollIntoView?.({ behavior: "smooth", block: "center" })
     }
   }
 
