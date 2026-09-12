@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use erd_app::{PairingRecord, PairingStore};
+use maho_app::{PairingRecord, PairingStore};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -43,7 +43,7 @@ pub fn check_qa_provisioning() -> StartupResponse {
 pub fn check_qa_provisioning_in_dir(base_dir: &std::path::Path) -> StartupResponse {
     #[cfg(debug_assertions)]
     {
-        let qa_path = base_dir.join("Documents").join("erd-device-qa.json");
+        let qa_path = base_dir.join("Documents").join("maho-device-qa.json");
         if qa_path.exists() {
             if let Ok(data) = std::fs::read(&qa_path) {
                 if let Ok(qa) = serde_json::from_slice::<QaProvisioningFile>(&data) {
@@ -88,7 +88,7 @@ pub fn check_qa_provisioning_in_dir(base_dir: &std::path::Path) -> StartupRespon
                         auto_connect: true,
                     };
                 } else {
-                    tracing::warn!("Failed to parse Documents/erd-device-qa.json");
+                    tracing::warn!("Failed to parse Documents/maho-device-qa.json");
                 }
             }
             let _ = std::fs::remove_file(&qa_path);

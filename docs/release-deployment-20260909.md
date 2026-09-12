@@ -19,16 +19,16 @@ rollback/runtime artifacts and must not be committed wholesale.
 
 | Target | Installation and launcher |
 | --- | --- |
-| Linux | `/home/indo/.local/share/EclipticRD/releases/20260909-782e7af/erd-host`; enabled systemd **user** unit `erd-host.service` |
-| Windows | `C:\erd\clients\rust\target\release\erd-host.exe`; existing `erd-host-run` scheduled task, VBS and batch launcher retained |
-| macOS | `/Applications/EclipticRD.app`; ARM64 executable `Contents/MacOS/tauri-shell`; FFmpeg 7 libraries bundled in `Contents/Frameworks` |
+| Linux | `/home/indo/.local/share/MahoRD/releases/20260909-782e7af/maho-host`; enabled systemd **user** unit `maho-host.service` |
+| Windows | `C:\maho\clients\rust\target\release\maho-host.exe`; existing `maho-host-run` scheduled task, VBS and batch launcher retained |
+| macOS | `/Applications/MahoRD.app`; ARM64 executable `Contents/MacOS/tauri-shell`; FFmpeg 7 libraries bundled in `Contents/Frameworks` |
 
 Linux retains the existing user, home, Wayland display, DBus address, pairing
 store, and `HDMI-A-2` output. Its previous launcher was a manual process; this
 deployment changes it to an enabled user service. Windows retains its existing
 interactive task principal and command arguments.
 
-The Mac application retains bundle identifier `com.eclipticrd.shell` and version
+The Mac application retains bundle identifier `com.projectmaho.mahord` and version
 `0.1.0`. It is ad-hoc signed, as was the previous installation, not notarized.
 Its packaging declares macOS 12.0 minimum; older macOS versions were not tested.
 Only packaging/signing and runtime execution occurred on the Mac; Rust, OpenSSL,
@@ -51,7 +51,7 @@ file. Installed and staged signed hashes matched.
 
 ## Verification
 
-- Rust workspace tests, excluding `erd-ios`, passed on Omarchy
+- Rust workspace tests, excluding `maho-ios`, passed on Omarchy
   (`host-builds-clean.log`, `RELEASE_TESTS_PASS`). One existing test was ignored.
 - Linux, Windows GNU, and macOS ARM64 release builds completed.
 - Desktop non-page tests passed: 28 Bun tests and 32 Node tests (`ui-tests.log`).
@@ -121,14 +121,14 @@ This run therefore does **not** certify same-LAN connectivity or discovery.
 
 Backups are retained:
 
-- Linux: `/home/indo/.local/share/EclipticRD/releases/20260909-782e7af/rollback/`
+- Linux: `/home/indo/.local/share/MahoRD/releases/20260909-782e7af/rollback/`
   contains the original host and pairing file. The original executable also
-  remains at `/home/indo/projects/erd-lan-20260909/deployment/erd-host`.
-- Windows: `C:\erd\releases\20260909-782e7af\rollback\` contains the original host,
+  remains at `/home/indo/projects/maho-lan-20260909/deployment/maho-host`.
+- Windows: `C:\maho\releases\20260909-782e7af\rollback\` contains the original host,
   pairing file, task XML, VBS, and batch launcher. `rollback-after-lock` is a second
   matching backup made before the successful retry.
-- Mac: `~/Library/Application Support/EclipticRD-releases/20260909-782e7af/rollback/`
-  contains `EclipticRD.app`, `application-support`, and `webkit`.
+- Mac: `~/Library/Application Support/MahoRD-releases/20260909-782e7af/rollback/`
+  contains `MahoRD.app`, `application-support`, and `webkit`.
 
 The Linux and Windows backup binaries passed `--help` on their respective hosts;
 the Mac backup passed signature validation and matched its recorded hash.
@@ -136,19 +136,19 @@ Other than Windows's observed automatic recovery, rollback was **not** executed.
 
 To revert Linux, stop and disable the new user unit, then launch the original
 executable under the saved environment and original arguments. Required values
-are `LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib`,
+are `LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib`,
 `XDG_RUNTIME_DIR=/run/user/1000`, `WAYLAND_DISPLAY=wayland-1`, and
 `DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus`; working directory is
 `/home/indo`, output is `HDMI-A-2`. The saved environment and launch details are in
 `linux-runtime-environment.json`, `linux-before.log`, and `journal.md`.
 
 To revert Windows, stop the process at the exact deployed executable path and
-wait for its actual exit. Copy `rollback\erd-host.exe` back to that path and run
-`Start-ScheduledTask -TaskName erd-host-run`. Existing launcher files were not
+wait for its actual exit. Copy `rollback\maho-host.exe` back to that path and run
+`Start-ScheduledTask -TaskName maho-host-run`. Existing launcher files were not
 changed; their backups and task XML are available if separately needed.
 
 To revert Mac, quit the current app and confirm its process has exited. Move the
-new bundle aside, restore the backed-up `EclipticRD.app` to `/Applications`,
+new bundle aside, restore the backed-up `MahoRD.app` to `/Applications`,
 validate its signature, and launch it.
 
 Do not routinely restore pairing or WebKit backups when reverting binaries:
@@ -156,7 +156,7 @@ doing so could discard legitimate user changes made after deployment.
 
 ## Retained artifacts and cleanup
 
-The private builder at `/home/indo/projects/erd-release-20260909-nSnZkP/` was
+The private builder at `/home/indo/projects/maho-release-20260909-nSnZkP/` was
 reduced from **13,462,468 KiB to 159,788 KiB**, reclaiming about **12.7 GiB**.
 Only this run's source build directory, FFmpeg build trees, osxcross build and
 toolchain, duplicate SDK, and strip probe were removed (`cleanup.log`).
@@ -166,7 +166,7 @@ the FFmpeg 7.0.2 source archive, original source snapshot and hash manifest, and
 `source-reproducible.tar.gz` containing the actual build source without targets.
 The latter's SHA-256 is
 `a83c4ab23ea34674e72d6141c50b62a610c27b5dcaec4c98db8669d8e7f27930`.
-The Linux release directory also retains the release `erd-client`.
+The Linux release directory also retains the release `maho-client`.
 
 The signed Mac bundle and CLI, Windows executable, deployment scripts, test logs,
 and runtime statistics remain under the local evidence directory. Existing

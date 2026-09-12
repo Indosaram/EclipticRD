@@ -31,7 +31,7 @@
    - 명시적 `pairingId` 전달을 필수로 전환하고, 저장되지 않은 기기는 PIN 입력 화면으로 유도.
    - 동일 이름의 서로 다른 엔드포인트를 IP 기준으로 온전히 분리 표시.
 4. **수명주기 결정성 및 취소 접근성 (R5, R6, R7):**
-   - iOS 셸에 `erd-ios-supervisor` 스레드를 도입하여 원격 TCP 비정상 종료 시 세션 상태를 `disconnected` (`remote-closed`)로 전파.
+   - iOS 셸에 `maho-ios-supervisor` 스레드를 도입하여 원격 TCP 비정상 종료 시 세션 상태를 `disconnected` (`remote-closed`)로 전파.
    - `SessionInterruptHandle`을 코어 세션에 도입하여 대기 중인 TLS/핸드셰이크 소켓을 1ms 미만으로 즉시 인터럽트.
    - UI 자원 소유권(`hasOwnedSession`)을 표시 상태와 독립 분리하여 정리 실패 시 재접속 락(`cleanup-failed`)을 유지하고, 단일 인플라이트 정리 프로미스를 공유하여 중복 호출 방지.
    - 연결 중 모달을 `<body>` 직속 최상위 루트로 재배치하여 취소 버튼의 100% 히트테스트 도달성, 포커스 트랩, 백그라운드 비활성화(`inert`), 폼 PIN 자동 소거 및 NV12 WebGL 프레임 렌더링 루프 정합성 확보.
@@ -40,7 +40,7 @@
    - Strict Clippy (-D warnings): **경고 0건, 오류 0건**.
    - macOS arm64 작업스테이션에서 `aarch64-apple-ios` 타깃 컴파일 **종료 코드 0**.
    - 로컬 Bun 테스트 러너에서 모바일 UI 88건, 데스크톱 UI 60건, 실 브라우저 페이지 테스트 12건 **전수 통과**.
-   - 물리 기기(iPhone 16 Plus)에 서명된 `EclipticRD.ipa` 배포, 설치 및 프로세스 실행(PID 81449) 성공 확인.
+   - 물리 기기(iPhone 16 Plus)에 서명된 `MahoRD.ipa` 배포, 설치 및 프로세스 실행(PID 81449) 성공 확인.
 
 ---
 
@@ -48,17 +48,17 @@
 
 | ID | 우선순위 | 구분 | 구현 내역 및 파일 위치 | 검증 증거 및 회귀 테스트 | 판정 |
 |---|---|---|---|---|---|
-| **R1** | P1 | 권한 분리 | 호스트 허용 목록(`host-authorizations.json`)과 클라이언트 자격증명(`client-pairings.json`)을 물리적으로 분리. 레코드 방향성 명시 (`erd-app/src/pairing.rs`, `erd-host/src/session.rs`) | `test_legacy_pairing_keys_not_auto_imported_by_host_and_migrated_by_client`<br>`test_outbound_client_pairing_rejected_as_host_authorization` 통과 | **PASS** |
-| **R2** | P1 | 인증 결속 | Bootstrap TLS 연결 시 호스트 승인 절차를 강제하고, 승인받은 Pairing ID만 `Handshake` 가능하도록 결속. 중복 핸드셰이크 거부 (`erd-host/src/session.rs`) | `test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input`<br>`test_bootstrap_consent_b_cannot_use_a`<br>`test_bootstrap_authenticated_session_rejects_duplicate_handshake` 통과 | **PASS** |
-| **R3** | P1 | UDP 인증 | Capability bit 7 및 Ping 데이터그램 기반 클라이언트 대칭키 인증 완료 시에만 UDP 엔드포인트 등록. 미인증/구세션 패킷 완전 드롭 (`erd-host/src/session.rs`, `erd-proto/src/capabilities.rs`) | `test_udp_host_rejects_client_missing_authenticated_registration_capability`<br>`test_udp_registration_rejects_prior_session_datagram` 통과 (실제 3840x1600 스트리밍 확인) | **PASS** |
-| **R4** | P1 | 비밀키 은닉 | `PairingSummary` DTO를 도입하여 대칭키(32바이트 비밀키)를 IPC 응답 및 JSON 직렬화에서 완전 배제 (`erd-app/src/pairing.rs`, `tauri-shell/src-tauri/src/lib.rs`) | `test_list_pairings_json_excludes_key_field`<br>`test_list_pairings_store_seam_isolated_store_serializes_only_allowed_metadata` 통과 | **PASS** |
-| **R5** | P1 | 네이티브 수명주기 | `erd-ios-supervisor` 도입으로 TCP 소켓 종료를 감지하여 세션을 `disconnected`로 전환. `SessionInterruptHandle`로 논블로킹 소켓 셧다운 지원 (`ios-shell/src/state.rs`, `erd-app/src/session.rs`) | `test_ios_tcp_disconnect_updates_session_state`<br>`test_canceled_connect_cannot_install_resources`<br>`test_worker_completion_signals_emitted_on_disconnect` 통과 | **PASS** |
+| **R1** | P1 | 권한 분리 | 호스트 허용 목록(`host-authorizations.json`)과 클라이언트 자격증명(`client-pairings.json`)을 물리적으로 분리. 레코드 방향성 명시 (`maho-app/src/pairing.rs`, `maho-host/src/session.rs`) | `test_legacy_pairing_keys_not_auto_imported_by_host_and_migrated_by_client`<br>`test_outbound_client_pairing_rejected_as_host_authorization` 통과 | **PASS** |
+| **R2** | P1 | 인증 결속 | Bootstrap TLS 연결 시 호스트 승인 절차를 강제하고, 승인받은 Pairing ID만 `Handshake` 가능하도록 결속. 중복 핸드셰이크 거부 (`maho-host/src/session.rs`) | `test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input`<br>`test_bootstrap_consent_b_cannot_use_a`<br>`test_bootstrap_authenticated_session_rejects_duplicate_handshake` 통과 | **PASS** |
+| **R3** | P1 | UDP 인증 | Capability bit 7 및 Ping 데이터그램 기반 클라이언트 대칭키 인증 완료 시에만 UDP 엔드포인트 등록. 미인증/구세션 패킷 완전 드롭 (`maho-host/src/session.rs`, `maho-proto/src/capabilities.rs`) | `test_udp_host_rejects_client_missing_authenticated_registration_capability`<br>`test_udp_registration_rejects_prior_session_datagram` 통과 (실제 3840x1600 스트리밍 확인) | **PASS** |
+| **R4** | P1 | 비밀키 은닉 | `PairingSummary` DTO를 도입하여 대칭키(32바이트 비밀키)를 IPC 응답 및 JSON 직렬화에서 완전 배제 (`maho-app/src/pairing.rs`, `tauri-shell/src-tauri/src/lib.rs`) | `test_list_pairings_json_excludes_key_field`<br>`test_list_pairings_store_seam_isolated_store_serializes_only_allowed_metadata` 통과 | **PASS** |
+| **R5** | P1 | 네이티브 수명주기 | `maho-ios-supervisor` 도입으로 TCP 소켓 종료를 감지하여 세션을 `disconnected`로 전환. `SessionInterruptHandle`로 논블로킹 소켓 셧다운 지원 (`ios-shell/src/state.rs`, `maho-app/src/session.rs`) | `test_ios_tcp_disconnect_updates_session_state`<br>`test_canceled_connect_cannot_install_resources`<br>`test_worker_completion_signals_emitted_on_disconnect` 통과 | **PASS** |
 | **R6** | P1 | 정리 소유권 | UI 연결 관리자에서 네이티브 자원 소유권(`hasOwnedSession`) 분리. 정리 실패 시 `cleanup-failed` 잠금 유지. 동시 cleanup 단일 프로미스 공유 (`ios-shell/ui/connection-state.js`) | `cleanup failure transitions to cleanup-failed and does not revert to idle`<br>`concurrent disconnect calls share single pending cleanup promise`<br>`lead_disconnected_stats_end_ui_session` 통과 | **PASS** |
 | **R7** | P1 | 모달 UI 및 접근성 | 연결/취소 모달을 `<body>` 직속으로 이동. 백그라운드 `inert`, 포커스 트랩, 취소 버튼 히트테스트, 폼 제출 시 PIN 소거, NV12 WebGL 프레임 표시 루프 정합 (`ios-shell/ui/index.html`, `app.js`, `styles.css`) | `page-modal.test.mjs`, `page-lifecycle-order-a.test.mjs`, `dom-modal.test.mjs` 통과 (430x932, 1280x800 실브라우저 인터랙션 검증) | **PASS** |
 | **R8** | P2 | 데스크톱 자격증명 | 데스크톱 셸에서 호스트명/IP 기반 암묵적 페어링 추론을 제거하고 `pairingId` 명시. 저장된 자격증명 카드 분리 및 Forget 기능 제공 (`tauri-shell/src-tauri/src/lib.rs`, `ui/index.html`) | `test_wrong_stored_id_fails_before_transport_without_bootstrap`<br>`test_same_name_records_select_exact_stored_id_and_key`<br>`frontend-page.test.mjs` (R8 브라우저 테스트) 통과 | **PASS** |
 | **R9** | P2 | iOS 자격증명 | iOS Keychain 저장소 기반 exact-ID 로드. `list_pairings` 및 `forget_pairing` 명령 구현. UI 저장된 페어링 목록 섹션 분리 (`ios-shell/src/commands.rs`, `lib.rs`, `ui/connection-state.js`) | `test_connect_exact_id_loads_correct_stored_pairing`<br>`test_connect_unknown_id_fails_before_transport_without_bootstrap`<br>`connection-state.test.mjs` 통과 | **PASS** |
-| **R10** | P2 | Scoped IPv6 | Apple link-local IPv6 인터페이스 스코프 식별자(`%en0`, `%if14`) 파싱, 보존, mDNS 게시 및 해석 파이프라인 정합 (`erd-net/src/discovery/* `) | `discovery_scoped_ipv6.rs` (9개 회귀 테스트 전원 통과) | **PASS** |
-| **R11** | P1 | PIN 정책 | 데몬 및 임베디드 호스트 런타임의 고정 기본 PIN(`12345678`)을 암호학적 난수 8자리 PIN으로 전환. `auto_approve: false` 및 명시적 동의 필수화. 재접속 실패 시 자동 PIN fallback 금지 (`erd-host`, `tauri-shell`) | `test_failed_reconnect_preserves_original_cause_and_never_falls_back_to_bootstrap_pin`<br>`test_random_pin_retained_and_format_valid`<br>`test_host_status_defaults` 통과 | **PASS** |
+| **R10** | P2 | Scoped IPv6 | Apple link-local IPv6 인터페이스 스코프 식별자(`%en0`, `%if14`) 파싱, 보존, mDNS 게시 및 해석 파이프라인 정합 (`maho-net/src/discovery/* `) | `discovery_scoped_ipv6.rs` (9개 회귀 테스트 전원 통과) | **PASS** |
+| **R11** | P1 | PIN 정책 | 데몬 및 임베디드 호스트 런타임의 고정 기본 PIN(`12345678`)을 암호학적 난수 8자리 PIN으로 전환. `auto_approve: false` 및 명시적 동의 필수화. 재접속 실패 시 자동 PIN fallback 금지 (`maho-host`, `tauri-shell`) | `test_failed_reconnect_preserves_original_cause_and_never_falls_back_to_bootstrap_pin`<br>`test_random_pin_retained_and_format_valid`<br>`test_host_status_defaults` 통과 | **PASS** |
 
 ---
 
@@ -83,22 +83,22 @@
 ## 4. 독립 검증 및 진단 증거 (Verification Evidence)
 
 ### 4.1 Rust 전체 작업공간 검증 (Omarchy Linux: 100.91.254.71)
-- **테스트 명령:** `PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib cargo test --manifest-path clients/rust/Cargo.toml`
+- **테스트 명령:** `PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib cargo test --manifest-path clients/rust/Cargo.toml`
 - **결과:** **51개 스위트 통과, 총 580개 테스트 성공, 0건 실패, 1건 의도된 Tailscale 관측 무시 (종료 코드 0)**.
-  - `erd-proto`: 62 tests pass
-  - `erd-net`: 73 tests pass
-  - `erd-decode`: 9 tests pass
-  - `erd-render`: 16 tests pass
-  - `erd-app`: 191 tests pass
-  - `erd-host`: 108 tests pass
-  - `erd-mobile`: 60 tests pass
+  - `maho-proto`: 62 tests pass
+  - `maho-net`: 73 tests pass
+  - `maho-decode`: 9 tests pass
+  - `maho-render`: 16 tests pass
+  - `maho-app`: 191 tests pass
+  - `maho-host`: 108 tests pass
+  - `maho-mobile`: 60 tests pass
   - `tauri-shell`: 66 tests pass
-  - `erd-ios` (`ios-shell`): 31 tests pass (유닛 22 + 수명주기 통합 9)
-- **Strict Clippy 명령:** `cargo clippy --manifest-path clients/rust/Cargo.toml -p erd-ios -p erd-app -p tauri-shell --tests --no-deps -- -D warnings`
+  - `maho-ios` (`ios-shell`): 31 tests pass (유닛 22 + 수명주기 통합 9)
+- **Strict Clippy 명령:** `cargo clippy --manifest-path clients/rust/Cargo.toml -p maho-ios -p maho-app -p tauri-shell --tests --no-deps -- -D warnings`
   - **결과:** **0 warnings, 0 errors**.
 
 ### 4.2 물리 iOS 타깃 컴파일 검증 (macOS arm64 Workstation)
-- **체크 명령:** `cargo check --manifest-path clients/rust/Cargo.toml --target aarch64-apple-ios -p erd-ios`
+- **체크 명령:** `cargo check --manifest-path clients/rust/Cargo.toml --target aarch64-apple-ios -p maho-ios`
 - **결과:** **0 warnings, 0 errors (종료 코드 0)**.
 
 ### 4.3 프론트엔드 UI 검증 (Bun v1.4.0)
@@ -114,10 +114,10 @@
 
 ### 4.4 물리 iPhone 16 Plus 실기기 배포 및 실행 검증
 - **장비 식별자:** `F1C581E0-A54E-5E85-8013-4F02DF80F98B` (천재개발자 iPhone 16 Plus)
-- **빌드 및 패키징:** `cargo tauri ios build --debug --target aarch64 --export-method debugging` -> `clients/rust/ios-shell/gen/apple/build/arm64/EclipticRD.ipa` 생성 완료.
+- **빌드 및 패키징:** `cargo tauri ios build --debug --target aarch64 --export-method debugging` -> `clients/rust/ios-shell/gen/apple/build/arm64/MahoRD.ipa` 생성 완료.
 - **설치 명령:** `xcrun devicectl device install app --device F1C581E0-A54E-5E85-8013-4F02DF80F98B ...` -> **종료 코드 0**.
-- **앱 실행:** `xcrun devicectl device process launch --device F1C581E0-A54E-5E85-8013-4F02DF80F98B --terminate-existing com.eclipticrd.ios` -> **종료 코드 0**.
-- **프로세스 확인:** `PID 81449 (/private/var/containers/Bundle/Application/.../EclipticRD.app/EclipticRD)`, WebContent (PID 81454), GPU (PID 81455), Networking (PID 81456) 활성 확인.
+- **앱 실행:** `xcrun devicectl device process launch --device F1C581E0-A54E-5E85-8013-4F02DF80F98B --terminate-existing com.projectmaho.mahord` -> **종료 코드 0**.
+- **프로세스 확인:** `PID 81449 (/private/var/containers/Bundle/Application/.../MahoRD.app/MahoRD)`, WebContent (PID 81454), GPU (PID 81455), Networking (PID 81456) 활성 확인.
 
 ---
 
@@ -127,14 +127,14 @@
    - E2E 브라우저 테스트 및 액션 로깅에 사용된 임시 WebView 및 HTTP 서버(`127.0.0.1:53720 ~ 53786`, `60046`, `60053`) 전수 셧다운 확인.
    - 포트 연결 시도 시 `ConnectionRefused` 확인 완료.
 2. **원격 Omarchy 자원:**
-   - 격리 검증 작업 디렉터리(`/home/indo/projects/erd-pairing-20260910`) 내 테스트 아티팩트 정리 완료.
-   - 잔류 테스트 프로세스 및 고아 소켓 0건 확인 (`ps aux | grep -E 'erd|cargo|rustc'` 조회 시 시스템 데몬 PID 3700943만 유지).
+   - 격리 검증 작업 디렉터리(`/home/indo/projects/maho-pairing-20260910`) 내 테스트 아티팩트 정리 완료.
+   - 잔류 테스트 프로세스 및 고아 소켓 0건 확인 (`ps aux | grep -E 'maho|cargo|rustc'` 조회 시 시스템 데몬 PID 3700943만 유지).
 
 ---
 
 ## 6. 결론 및 향후 권고사항
 
-본 개선 작업을 통해 EclipticRD의 페어링 보안 아키텍처 및 접속 수명주기가 엔터프라이즈 수준으로 강화되었다.
+본 개선 작업을 통해 MahoRD의 페어링 보안 아키텍처 및 접속 수명주기가 엔터프라이즈 수준으로 강화되었다.
 - 인증 정보 방향성이 엄격히 분리되어 클라이언트 연결이 호스트 권한으로 오인될 여지가 차단되었다.
 - UDP 미디어 스트림 수신 주소가 암호학적 서명(Ping 데이터그램)으로 보호되어 스푸핑이 불가능하다.
 - 클라이언트 및 모바일 UI가 비동기 수명주기, 연결 취소, 예외 복구를 결정론적으로 통제할 수 있게 되었다.

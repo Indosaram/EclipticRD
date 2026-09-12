@@ -1,12 +1,12 @@
-# EclipticRD AI Agent Remote Desktop Architecture & Capability Audit
+# MahoRD AI Agent Remote Desktop Architecture & Capability Audit
 
 > 기준 리비전: 2026-09-09 현재 작업 트리  
-> 조사 범위: 활성 Rust 워크스페이스 `clients/rust/`의 `erd-app`, `erd-host`, `erd-net`, `erd-proto`, `tauri-shell` 및 관련 검증 문서  
-> 목적: AI 에이전트가 EclipticRD를 통해 원격 데스크톱을 인지하고 조작하는 전체 경로를 코드 기준으로 분석하고, 기능 공백·안전성·신뢰성·에이전트 사용성 문제를 우선순위화합니다.
+> 조사 범위: 활성 Rust 워크스페이스 `clients/rust/`의 `maho-app`, `maho-host`, `maho-net`, `maho-proto`, `tauri-shell` 및 관련 검증 문서  
+> 목적: AI 에이전트가 MahoRD를 통해 원격 데스크톱을 인지하고 조작하는 전체 경로를 코드 기준으로 분석하고, 기능 공백·안전성·신뢰성·에이전트 사용성 문제를 우선순위화합니다.
 
 ## 1. 결론 요약
 
-EclipticRD는 이미 **에이전트가 GUI 클라이언트를 띄우지 않고 원격 화면을 보고 입력을 보낼 수 있는 실질적인 headless client 경로**를 갖추고 있습니다. `erd-client --agent-server`는 loopback HTTP API를, `erd-client --mcp`는 stdio MCP를 제공하며, 둘 다 Tauri/WebKit 없이 `erd-app`의 `ClientSession`에 직접 연결됩니다. 원격 전송은 TLS 1.2 PSK 기반 TCP control/input과 세션 키에서 파생된 UDP media 암호화로 구성되어 있고, 8자리 PIN bootstrap은 PBKDF2-HMAC-SHA256 600,000회와 5회 실패 lockout을 사용합니다. macOS ScreenCaptureKit, Windows DXGI Desktop Duplication, Linux wlroots screencopy와 각 OS 입력 주입기도 실제 구현되어 있습니다.
+MahoRD는 이미 **에이전트가 GUI 클라이언트를 띄우지 않고 원격 화면을 보고 입력을 보낼 수 있는 실질적인 headless client 경로**를 갖추고 있습니다. `maho-client --agent-server`는 loopback HTTP API를, `maho-client --mcp`는 stdio MCP를 제공하며, 둘 다 Tauri/WebKit 없이 `maho-app`의 `ClientSession`에 직접 연결됩니다. 원격 전송은 TLS 1.2 PSK 기반 TCP control/input과 세션 키에서 파생된 UDP media 암호화로 구성되어 있고, 8자리 PIN bootstrap은 PBKDF2-HMAC-SHA256 600,000회와 5회 실패 lockout을 사용합니다. macOS ScreenCaptureKit, Windows DXGI Desktop Duplication, Linux wlroots screencopy와 각 OS 입력 주입기도 실제 구현되어 있습니다.
 
 다만 현재 형태는 **“video frame + blind coordinate injection”을 에이전트 표면에 얹은 1세대 computer-use interface**에 가깝습니다. 안정적인 자율 에이전트 플랫폼으로 사용하려면 다음 문제가 우선 해결되어야 합니다.
 
@@ -17,7 +17,7 @@ EclipticRD는 이미 **에이전트가 GUI 클라이언트를 띄우지 않고 �
 5. **Major — Unicode/IME 입력이 없습니다.** `TypeText`는 ASCII만 물리 keycode로 합성하며 한글·일본어·이모지 등은 조용히 건너뜁니다. `paste_mode`, `delay_ms`, `hold_ms`, drag `duration_ms`도 현재 동작하지 않습니다.
 6. **Major — 입력 안전장치가 불완전합니다.** 5초 `InputStateTracker::check_timeout()`는 정의되어 있지만 호출되지 않으며, Tauri disconnect는 tracker를 먼저 `clear()`한 뒤 `Reset`만 보내므로 실제 held key를 잃을 수 있습니다. macOS host에서 `Reset` 자체는 no-op입니다.
 7. **Major — 에이전트 피드백 루프가 약합니다.** action response는 이벤트 전송 개수만 반환하며 cursor 위치, 실제 injection ACK, 새 frame id, screen diff, wait-for-change를 제공하지 않습니다.
-8. **Major — 현재 session model은 단일 host/단일 active session입니다.** Tauri는 connect 전에 기존 session을 disconnect하고, headless `erd-client`도 CLI에서 host를 고정합니다. HostServer도 connection을 직렬 처리합니다. 자동 reconnect/backoff와 agent-facing host discovery/session switch API도 없습니다.
+8. **Major — 현재 session model은 단일 host/단일 active session입니다.** Tauri는 connect 전에 기존 session을 disconnect하고, headless `maho-client`도 CLI에서 host를 고정합니다. HostServer도 connection을 직렬 처리합니다. 자동 reconnect/backoff와 agent-facing host discovery/session switch API도 없습니다.
 9. **Improvement — 접근성 트리, 파일 전송, agent audio, agent clipboard, OCR/semantic hit target 같은 현대 computer-use 보조 채널이 없습니다.** 코드 검색상 Windows UI Automation 및 Linux AT-SPI 연동은 없고, clipboard/audio 기반 기능은 내부 전송 능력이 있어도 agent MCP/HTTP 표면에는 노출되지 않습니다.
 
 즉, **원격 전송·캡처·입력이라는 기반은 충분히 존재하지만, 에이전트에게 필요한 좌표 계약, 확정적 action acknowledgement, semantic perception, session orchestration, 안전한 local control plane이 아직 부족합니다.**
@@ -42,11 +42,11 @@ EclipticRD는 이미 **에이전트가 GUI 클라이언트를 띄우지 않고 �
 ```text
 AI Agent
   ├─ stdio MCP
-  │    └─ erd-client --mcp
+  │    └─ maho-client --mcp
   │         └─ mcp_stdio.rs -> mcp_dispatch.rs -> AgentServerBackend
   │
   ├─ loopback HTTP/1.1
-  │    └─ erd-client --agent-server [PORT]
+  │    └─ maho-client --agent-server [PORT]
   │         └─ agent_server.rs -> AgentServerBackend
   │
   └─ Tauri IPC
@@ -57,11 +57,11 @@ AI Agent
             └─ agent_release_all
 
 AgentServerBackend / Tauri AppState
-  └─ erd_app::ClientSession
+  └─ maho_app::ClientSession
        ├─ TCP: TLS-PSK pairing, handshake, input, control, clipboard, heartbeat
        └─ UDP: encrypted video/audio/cursor datagrams
 
-Remote erd-host
+Remote maho-host
   ├─ macOS: ScreenCaptureKit + CoreGraphics input
   ├─ Windows: DXGI Desktop Duplication + SendInput
   └─ Linux: wlroots screencopy + /dev/uinput
@@ -69,14 +69,14 @@ Remote erd-host
 
 주요 코드 위치:
 
-- CLI/headless lifecycle: `clients/rust/erd-app/src/bin/erd_client.rs`
-- HTTP agent server: `clients/rust/erd-app/src/agent_server.rs`
-- Agent action translation/screenshot encoding: `clients/rust/erd-app/src/agent_input.rs`
-- MCP schema/dispatch/stdio: `clients/rust/erd-app/src/mcp_server.rs`, `mcp_dispatch.rs`, `mcp_stdio.rs`
-- Client transport/session: `clients/rust/erd-app/src/session.rs`
-- Wire input/handshake: `clients/rust/erd-proto/src/input.rs`, `handshake.rs`
-- TLS-PSK/bootstrap: `clients/rust/erd-net/src/tls_psk.rs`
-- Host lifecycle/media/input: `clients/rust/erd-host/src/session.rs`
+- CLI/headless lifecycle: `clients/rust/maho-app/src/bin/maho_client.rs`
+- HTTP agent server: `clients/rust/maho-app/src/agent_server.rs`
+- Agent action translation/screenshot encoding: `clients/rust/maho-app/src/agent_input.rs`
+- MCP schema/dispatch/stdio: `clients/rust/maho-app/src/mcp_server.rs`, `mcp_dispatch.rs`, `mcp_stdio.rs`
+- Client transport/session: `clients/rust/maho-app/src/session.rs`
+- Wire input/handshake: `clients/rust/maho-proto/src/input.rs`, `handshake.rs`
+- TLS-PSK/bootstrap: `clients/rust/maho-net/src/tls_psk.rs`
+- Host lifecycle/media/input: `clients/rust/maho-host/src/session.rs`
 - macOS capture/input: `capture_macos.rs`, `inject_macos.rs`
 - Windows capture/input/geometry: `capture_windows.rs`, `inject_windows.rs`, `windows_logic.rs`
 - Linux capture/input: `capture_linux.rs`, `inject_linux.rs`
@@ -107,7 +107,7 @@ AgentAction JSON/MCP args
  -> normalized wire InputEvent
  -> ClientSession::send_input()
  -> TLS TCP frame
- -> erd-host InputEvent::decode()
+ -> maho-host InputEvent::decode()
  -> platform injector
  -> OS event subsystem
 ```
@@ -122,7 +122,7 @@ AgentAction JSON/MCP args
 
 **현황 — 지원됨.**
 
-`clients/rust/erd-app/Cargo.toml`은 Tauri 의존성이 없고 `erd-client` binary를 직접 빌드합니다. `erd_client.rs`는 연결/decoder/media worker를 시작한 뒤 `--agent-server`면 자체 Tokio runtime의 HTTP listener를, `--mcp`면 별도 thread에서 stdio MCP를 실행합니다. 따라서 에이전트 실행 측에는 Tauri/WebKit/desktop UI가 필요하지 않습니다.
+`clients/rust/maho-app/Cargo.toml`은 Tauri 의존성이 없고 `maho-client` binary를 직접 빌드합니다. `maho_client.rs`는 연결/decoder/media worker를 시작한 뒤 `--agent-server`면 자체 Tokio runtime의 HTTP listener를, `--mcp`면 별도 thread에서 stdio MCP를 실행합니다. 따라서 에이전트 실행 측에는 Tauri/WebKit/desktop UI가 필요하지 않습니다.
 
 **제약 — remote host까지 완전한 GUI-independent headless는 아닙니다.**
 
@@ -135,7 +135,7 @@ AgentAction JSON/MCP args
 
 권장사항:
 
-- `erd-client agent serve`와 `erd-host service`를 명확히 분리한 headless deployment guide를 제공합니다.
+- `maho-client agent serve`와 `maho-host service`를 명확히 분리한 headless deployment guide를 제공합니다.
 - startup preflight API에서 capture/input capability와 필요한 OS permission을 구조화하여 반환합니다.
 - Linux에는 XDG Desktop Portal/PipeWire fallback을 실제 구현합니다. 현재 `capture_linux.rs`는 unsupported compositor에서 `PortalRequired` 오류를 정의하지만 fallback 자체는 없습니다.
 
@@ -143,12 +143,12 @@ AgentAction JSON/MCP args
 
 **현황 — 설계가 비교적 견고합니다.**
 
-- `erd-net/src/tls_psk.rs`
+- `maho-net/src/tls_psk.rs`
   - TLS 1.2 PSK cipher: `PSK-AES128-GCM-SHA256`, `PSK-AES256-GCM-SHA384`
-  - bootstrap identity `erd-b1`, paired identity `erd-p1.<pairing-id>`
+  - bootstrap identity `maho-b1`, paired identity `maho-p1.<pairing-id>`
   - 8자리 PIN을 고정 salt `erd/bootstrap/v3`와 PBKDF2-HMAC-SHA256 600,000회로 stretch 후 HKDF로 TLS PSK를 생성합니다.
   - `MAX_PAIRING_ATTEMPTS = 5`, 60초 failure window, lockout 300초입니다.
-- `erd-host/src/session.rs`
+- `maho-host/src/session.rs`
   - 기본 pairing window는 `PAIRING_WINDOW = 300s`입니다.
   - bootstrap identity는 pairing window와 lockout이 모두 허용할 때만 TLS PSK set에 포함됩니다.
   - PairingRequest 후 host consent channel 승인이 필요하고, 승인되면 random 32-byte key와 UUID pairing ID를 저장합니다.
@@ -165,7 +165,7 @@ AgentAction JSON/MCP args
 
 ### 4.3 인증 실패의 agent error 전달
 
-**현황:** `erd-client`는 먼저 pairing/reconnect/handshake를 완료한 뒤에만 AgentServerBackend와 MCP/HTTP worker를 시작합니다.
+**현황:** `maho-client`는 먼저 pairing/reconnect/handshake를 완료한 뒤에만 AgentServerBackend와 MCP/HTTP worker를 시작합니다.
 
 따라서 잘못된 PIN, pairing not found, TLS failure, handshake timeout은 좋은 Rust/CLI error string으로는 나타나지만 **agent가 연결된 MCP/HTTP endpoint에서 구조화된 session/auth error로 받을 수는 없습니다.** 서버 자체가 아직 열리지 않았기 때문입니다.
 
@@ -180,13 +180,13 @@ AgentAction JSON/MCP args
 
 ### 4.4 Reconnect
 
-**현황:** 저장된 pairing을 이용한 명시적 reconnect는 구현되어 있습니다. `erd-client` startup과 Tauri `connect()`가 PairingStore에서 record를 찾아 `ClientSession::reconnect()`를 호출합니다.
+**현황:** 저장된 pairing을 이용한 명시적 reconnect는 구현되어 있습니다. `maho-client` startup과 Tauri `connect()`가 PairingStore에서 record를 찾아 `ClientSession::reconnect()`를 호출합니다.
 
 **부족한 점:** 연결이 끊긴 뒤 automatic reconnect/backoff/resume은 없습니다. TCP runtime/UDP receiver 오류 후 agent가 session을 계속 보유하면서 다시 dial하는 state machine이 없습니다.
 
 또한 CLI와 Tauri에는 테스트 환경으로 보이는 특정 host/IP 이름 매칭이 코드에 하드코딩되어 있습니다.
 
-- `erd-app/src/bin/erd_client.rs`: `100.91.254.71` ↔ `indo`
+- `maho-app/src/bin/maho_client.rs`: `100.91.254.71` ↔ `indo`
 - `tauri-shell/src-tauri/src/lib.rs`: 위 매칭과 별도 `100.126.171.58`/`DESKTOP` 매칭
 
 이 로직은 다른 사용자의 실제 host와 잘못된 pairing record를 연결할 수 있고 product code에 환경 의존성을 남깁니다.
@@ -202,18 +202,18 @@ AgentAction JSON/MCP args
 
 ### 4.5 Discovery: mDNS/Bonjour 및 Tailscale
 
-**현황:** `erd-net/src/discovery.rs`는 Apple 플랫폼에서 DNSService 계열, Linux/Windows에서 mdns-sd를 사용하여 `_erd._tcp`를 발견합니다. TXT에는 protocol, name, os, udp_port가 포함됩니다.
+**현황:** `maho-net/src/discovery.rs`는 Apple 플랫폼에서 DNSService 계열, Linux/Windows에서 mdns-sd를 사용하여 `_maho-rd._tcp`를 발견합니다. TXT에는 protocol, name, os, udp_port가 포함됩니다.
 
-Tauri의 `list_hosts_internal()`은 LAN 결과와 `tailscale status --json` 결과를 병합합니다. 코드 주석도 명시하듯 Tailscale 결과는 **Tailscale peer가 존재한다는 신호일 뿐 ERD service readiness 증명이 아닙니다.** Tailscale 결과에는 ERD tcp/udp port가 없고 기본 port 사용을 기대합니다.
+Tauri의 `list_hosts_internal()`은 LAN 결과와 `tailscale status --json` 결과를 병합합니다. 코드 주석도 명시하듯 Tailscale 결과는 **Tailscale peer가 존재한다는 신호일 뿐 MahoRD service readiness 증명이 아닙니다.** Tailscale 결과에는 MahoRD tcp/udp port가 없고 기본 port 사용을 기대합니다.
 
-**Agent gap:** 이 discovery surface가 `erd-client --mcp`나 HTTP API에는 노출되지 않습니다. headless agent는 실행 시 `--host`를 이미 알아야 합니다.
+**Agent gap:** 이 discovery surface가 `maho-client --mcp`나 HTTP API에는 노출되지 않습니다. headless agent는 실행 시 `--host`를 이미 알아야 합니다.
 
 **평가: Major**
 
 권장사항:
 
 - MCP `remote_list_hosts`, `remote_probe_host`를 추가합니다.
-- Tailscale peer마다 짧은 authenticated service probe 또는 signed ERD discovery record를 사용합니다.
+- Tailscale peer마다 짧은 authenticated service probe 또는 signed MahoRD discovery record를 사용합니다.
 - LAN/Tailscale merge key를 IP가 아니라 stable host identity로 바꿉니다.
 - discovery result에 `discovered`, `reachable`, `paired`, `authenticated`, `last_seen`, ports를 구분합니다.
 
@@ -222,7 +222,7 @@ Tauri의 `list_hosts_internal()`은 LAN 결과와 `tailscale status --json` 결�
 **현황:** 현재 client model은 단일 active `ClientSession`입니다.
 
 - Tauri `connect()`는 lifecycle lock을 잡고 `disconnect_internal()`을 먼저 호출합니다.
-- headless `erd-client`도 하나의 CLI `host`와 하나의 backend만 구성합니다.
+- headless `maho-client`도 하나의 CLI `host`와 하나의 backend만 구성합니다.
 - `HostServer::serve()`는 `serve_next()`를 호출하고, accepted connection을 같은 thread에서 `handle_connection()`이 끝날 때까지 처리한 뒤 다음 `accept()`로 갑니다. 즉 host 역시 실질적으로 동시 client session을 하나만 처리합니다.
 
 **평가: Major**
@@ -332,7 +332,7 @@ Host HandshakeAck는 `DisplayInfo.logical_width`, `logical_height`, `scale`을 �
 
 ### 5.4 Y-axis 규약
 
-`agent_input.rs::normalize_agent_coordinates()`는 agent top-left Y를 wire에서 `1.0 - y`로 뒤집습니다. `erd-proto::normalize_client_coordinates()`도 legacy macOS bottom-left wire convention을 문서화합니다.
+`agent_input.rs::normalize_agent_coordinates()`는 agent top-left Y를 wire에서 `1.0 - y`로 뒤집습니다. `maho-proto::normalize_client_coordinates()`도 legacy macOS bottom-left wire convention을 문서화합니다.
 
 - Windows `normalize_absolute_pointer()`는 wire Y를 다시 뒤집어 top-left absolute desktop으로 사용합니다.
 - Linux `map_normalized_to_output()`도 다시 뒤집습니다.
@@ -362,7 +362,7 @@ Host HandshakeAck는 `DisplayInfo.logical_width`, `logical_height`, `scale`을 �
 
 #### Linux
 
-Capture는 `--output`/`ERD_OUTPUT`/Hyprland focused output으로 선택할 수 있습니다. 그러나 input injector는 `OutputGeometry::single_output(pixel_width, pixel_height)`로 생성되어 실제 output의 compositor global `x/y`와 전체 desktop dimensions를 잃습니다. non-origin monitor 선택 시 잘못된 output으로 입력이 갈 수 있습니다.
+Capture는 `--output`/`MAHO_OUTPUT`/Hyprland focused output으로 선택할 수 있습니다. 그러나 input injector는 `OutputGeometry::single_output(pixel_width, pixel_height)`로 생성되어 실제 output의 compositor global `x/y`와 전체 desktop dimensions를 잃습니다. non-origin monitor 선택 시 잘못된 output으로 입력이 갈 수 있습니다.
 
 **평가: Major**
 
@@ -382,7 +382,7 @@ Capture는 `--output`/`ERD_OUTPUT`/Hyprland focused output으로 선택할 수 �
 - **Linux:** screencopy `CaptureConfig::default().overlay_cursor = true`이므로 기본 화면에는 cursor가 합성됩니다.
 - **Windows:** DXGI frame은 pointer position/visibility metadata를 별도로 받고 host가 `MediaEvent::Cursor(CursorUpdate)`로 보냅니다. 영상 BGRA에 cursor shape를 합성하는 코드는 없습니다.
 
-Tauri는 `latest_cursor`를 유지하고 `get_cursor_position` command도 있습니다. 하지만 headless `erd-client` UDP receive loop는 `SessionEvent::Frame`과 `Ping`만 처리하고 `Cursor`는 `Ok(_) => {}`로 버립니다. 따라서 Windows MCP/HTTP agent는 cursor 위치를 알 방법이 없고 screenshot에도 cursor가 없습니다.
+Tauri는 `latest_cursor`를 유지하고 `get_cursor_position` command도 있습니다. 하지만 headless `maho-client` UDP receive loop는 `SessionEvent::Frame`과 `Ping`만 처리하고 `Cursor`는 `Ok(_) => {}`로 버립니다. 따라서 Windows MCP/HTTP agent는 cursor 위치를 알 방법이 없고 screenshot에도 cursor가 없습니다.
 
 또한 Tauri raw-frame buffer 끝에 cursor x/y/type을 append하지만 `agent_capture_screen`의 screenshot encoder는 NV12 길이만 소비하므로 cursor가 이미지로 합성되는 것은 아닙니다.
 
@@ -409,7 +409,7 @@ Host는 지속 video stream을 보내고 client가 최신 frame을 유지하지�
 
 Windows DXGI에는 dirty/move rectangles가 이미 있고 Linux screencopy에도 damage rect가 있지만 이 정보는 encoder/agent layer까지 전달되지 않습니다.
 
-`erd-client --nudge-ms`는 static compositor가 frame을 잘 내지 않을 때 작은 mouse move를 주기적으로 보내는 보조 장치입니다. agent perception 자체의 change notification은 아닙니다.
+`maho-client --nudge-ms`는 static compositor가 frame을 잘 내지 않을 때 작은 mouse move를 주기적으로 보내는 보조 장치입니다. agent perception 자체의 change notification은 아닙니다.
 
 **평가: Major**
 
@@ -578,7 +578,7 @@ macOS injector는 200 events/s, burst 400의 rate limit을 가지고 있어 큰 
 
 ### 6.7 Host injection failure가 agent에게 전파되지 않음
 
-`erd-host/src/session.rs::inject_input()`은 platform injector error를 `warn!`만 하고 호출자에게 반환하지 않습니다. Client는 TCP write가 성공하면 `send_input` 성공으로 봅니다.
+`maho-host/src/session.rs::inject_input()`은 platform injector error를 `warn!`만 하고 호출자에게 반환하지 않습니다. Client는 TCP write가 성공하면 `send_input` 성공으로 봅니다.
 
 따라서 다음이 모두 false positive가 될 수 있습니다.
 
@@ -615,7 +615,7 @@ HTTP는 `events_sent`, MCP는 “successfully dispatched”를 반환하므로 a
 3. macOS injector는 `InputEventType::Reset`을 no-op 처리합니다.
 4. Linux Reset은 buttons와 modifiers만 release하며 임의의 held non-modifier key를 알 수 없습니다.
 5. HTTP action dispatch가 중간 `backend.send_input_event()` 실패로 끝날 때 MCP처럼 즉시 release cleanup을 호출하지 않습니다.
-6. Unix `erd-client` SIGINT 경로는 명시적인 async graceful handler가 아니라 process 기본 종료에 기대는 부분이 있어 abnormal termination 시 release 보장이 어렵습니다.
+6. Unix `maho-client` SIGINT 경로는 명시적인 async graceful handler가 아니라 process 기본 종료에 기대는 부분이 있어 abnormal termination 시 release 보장이 어렵습니다.
 
 **평가: Major**
 
@@ -673,7 +673,7 @@ HTTP는 `events_sent`, MCP는 “successfully dispatched”를 반환하므로 a
 
 ### 7.3 HTTP 구현은 일반 WebSocket API가 아님
 
-README는 “HTTP/WebSocket API”를 언급하지만 `erd-app`의 AgentServer에는 WebSocket upgrade/handshake 코드가 없습니다. 구현은 직접 `TcpListener`에서 HTTP/1.1 request line/Content-Length를 파싱하고 응답 후 `Connection: close`하는 형태입니다.
+README는 “HTTP/WebSocket API”를 언급하지만 `maho-app`의 AgentServer에는 WebSocket upgrade/handshake 코드가 없습니다. 구현은 직접 `TcpListener`에서 HTTP/1.1 request line/Content-Length를 파싱하고 응답 후 `Connection: close`하는 형태입니다.
 
 지원 route:
 
@@ -694,7 +694,7 @@ README는 “HTTP/WebSocket API”를 언급하지만 `erd-app`의 AgentServer�
 
 ### 7.4 Critical: HTTP caller authentication 없음
 
-`erd-client --agent-server`는 `127.0.0.1`에만 bind되어 외부 NIC 노출은 막습니다. 그러나 `agent_server.rs`에는 `Authorization` 검증이 없고 모든 응답에 `Access-Control-Allow-Origin: *`가 포함됩니다. request Content-Type도 검증하지 않습니다.
+`maho-client --agent-server`는 `127.0.0.1`에만 bind되어 외부 NIC 노출은 막습니다. 그러나 `agent_server.rs`에는 `Authorization` 검증이 없고 모든 응답에 `Access-Control-Allow-Origin: *`가 포함됩니다. request Content-Type도 검증하지 않습니다.
 
 이 endpoint는 단순 status API가 아니라 **원격 host에서 keyboard/mouse를 실행하는 authority**를 갖습니다. 같은 머신의 다른 user/process 또는 localhost 접근이 가능한 악성 웹 context가 이 port를 호출할 수 있는 threat를 고려해야 합니다.
 
@@ -869,7 +869,7 @@ Capability negotiation도 host ack에 실제 clipboard capability를 일관되�
 
 ### 9.4 Audio perception
 
-Host는 audio capture 및 UDP AudioFrame을 지원하고 Tauri는 playback path가 있습니다. 그러나 headless `erd-client` UDP loop는 Frame/Ping 외 event를 버리므로 agent가 audio sample, transcript, sound event를 받을 수 없습니다.
+Host는 audio capture 및 UDP AudioFrame을 지원하고 Tauri는 playback path가 있습니다. 그러나 headless `maho-client` UDP loop는 Frame/Ping 외 event를 버리므로 agent가 audio sample, transcript, sound event를 받을 수 없습니다.
 
 **평가: Improvement**
 
@@ -970,9 +970,9 @@ Host는 audio capture 및 UDP AudioFrame을 지원하고 Tauri는 playback path�
 
 | ID | 심각도 | Finding | 주요 코드 |
 | --- | --- | --- | --- |
-| F-01 | **Critical** | Loopback HTTP remote-control API에 caller auth 없음 + CORS `*` | `erd-app/src/agent_server.rs` |
-| F-02 | **Major** | Host input injection failure를 swallow하여 agent success가 authoritative하지 않음 | `erd-host/src/session.rs::inject_input` |
-| F-03 | **Major** | Headless screen info logical size와 screenshot physical size 불일치 | `erd_client.rs`, `capture_macos.rs`, `windows_logic.rs` |
+| F-01 | **Critical** | Loopback HTTP remote-control API에 caller auth 없음 + CORS `*` | `maho-app/src/agent_server.rs` |
+| F-02 | **Major** | Host input injection failure를 swallow하여 agent success가 authoritative하지 않음 | `maho-host/src/session.rs::inject_input` |
+| F-03 | **Major** | Headless screen info logical size와 screenshot physical size 불일치 | `maho_client.rs`, `capture_macos.rs`, `windows_logic.rs` |
 | F-04 | **Major** | Windows capture display 0 vs input virtual desktop mismatch | `session.rs`, `inject_windows.rs` |
 | F-05 | **Major** | Linux selected output global geometry가 input injector에 전달되지 않음 | `session.rs`, `inject_linux.rs` |
 | F-06 | **Major** | Multi-monitor list/select agent API 없음 | MCP/AgentServer/Tauri agent commands |
@@ -983,17 +983,17 @@ Host는 audio capture 및 UDP AudioFrame을 지원하고 Tauri는 playback path�
 | F-11 | **Major** | modifier key-up가 `active_modifiers`를 정리하지 않음 | `agent_input.rs` |
 | F-12 | **Major** | Tauri disconnect가 tracker clear 후 Reset만 전송; macOS Reset no-op | `tauri-shell/lib.rs`, `inject_macos.rs` |
 | F-13 | **Major** | Screenshot freshness/frame ID/wait-for-change 없음 | `agent_server.rs`, MCP dispatch |
-| F-14 | **Major** | Windows cursor는 separate metadata인데 headless agent가 버림 | `erd-host/session.rs`, `erd_client.rs` |
-| F-15 | **Major** | Auto reconnect/session resume 없음 | `erd-app/session.rs`, `erd_client.rs` |
+| F-14 | **Major** | Windows cursor는 separate metadata인데 headless agent가 버림 | `maho-host/session.rs`, `maho_client.rs` |
+| F-15 | **Major** | Auto reconnect/session resume 없음 | `maho-app/session.rs`, `maho_client.rs` |
 | F-16 | **Major** | Headless agent discovery/session switch API 없음 | discovery/Tauri vs MCP gap |
-| F-17 | **Major** | HostServer가 connections를 직렬 처리, client도 single session | `erd-host/session.rs::serve` |
-| F-18 | **Major** | 코드에 특정 Tailscale IP/name pairing 예외 하드코딩 | `erd_client.rs`, Tauri `lib.rs` |
+| F-17 | **Major** | HostServer가 connections를 직렬 처리, client도 single session | `maho-host/session.rs::serve` |
+| F-18 | **Major** | 코드에 특정 Tailscale IP/name pairing 예외 하드코딩 | `maho_client.rs`, Tauri `lib.rs` |
 | F-19 | **Major** | Tauri unconnected agent screen info가 1920×1080 fake geometry를 반환 | Tauri `lib.rs` |
 | F-20 | **Major** | agent clipboard tool 부재로 Unicode/paste workflow 활용 불가 | `ClientSession`, MCP/HTTP gap |
 | F-21 | **Minor** | README의 WebSocket API 주장과 실제 raw HTTP/1.1 구현 불일치 | README, `agent_server.rs` |
 | F-22 | **Minor** | HTTP health가 session/frame readiness를 반영하지 않음 | `agent_server.rs` |
 | F-23 | **Minor** | HTTP batch partial failure의 sent count/cleanup 정보 부족 | `agent_server.rs` |
-| F-24 | **Minor** | Wire coordinate가 legacy bottom-left convention이라 platform adapter 복잡 | `erd-proto/src/input.rs` |
+| F-24 | **Minor** | Wire coordinate가 legacy bottom-left convention이라 platform adapter 복잡 | `maho-proto/src/input.rs` |
 | F-25 | **Minor** | NV12 screenshot 변환에 color-space metadata/optimized path 없음 | `agent_input.rs` |
 | F-26 | **Improvement** | Accessibility/UI tree 없음 | workspace 전체 |
 | F-27 | **Improvement** | File transfer 없음 | protocol/agent surface |
@@ -1087,7 +1087,7 @@ Agent layer가 직접 `ClientSession` primitive를 조합하기보다 `Agent Con
 
 ### 이미 강한 부분
 
-- 실제 GUI 없이 동작하는 `erd-client` headless agent mode
+- 실제 GUI 없이 동작하는 `maho-client` headless agent mode
 - stdio MCP와 loopback HTTP라는 두 automation entry point
 - TLS-PSK + persisted pairing + bootstrap stretching/lockout/host consent
 - TCP control / encrypted UDP media separation
@@ -1110,7 +1110,7 @@ Agent layer가 직접 `ClientSession` primitive를 조합하기보다 `Agent Con
 
 ### 최종 판단
 
-EclipticRD는 **“AI가 원격 PC를 볼 수 있고 기본 mouse/keyboard를 보낼 수 있는 기술적 기반”은 이미 갖췄습니다.** 특히 headless client, 실제 native capture, pairing/암호화는 실험용 mock 수준을 넘어섭니다.
+MahoRD는 **“AI가 원격 PC를 볼 수 있고 기본 mouse/keyboard를 보낼 수 있는 기술적 기반”은 이미 갖췄습니다.** 특히 headless client, 실제 native capture, pairing/암호화는 실험용 mock 수준을 넘어섭니다.
 
 하지만 현재 인터페이스만으로는 장시간 자율 computer-use에서 요구되는 **정확성, 안전한 권한 경계, action observability, 다국어 입력, multi-monitor/session orchestration**을 충분히 보장하기 어렵습니다. P0/P1 항목을 먼저 해결하면 Anthropic-style computer-use/OSWorld류 workload에서 실패 원인을 “vision model의 추론 실패”와 “remote desktop transport/input 실패”로 분리할 수 있고, agent가 자기 행동의 성공 여부를 스스로 검증할 수 있는 구조로 발전할 수 있습니다.
 
@@ -1118,4 +1118,4 @@ EclipticRD는 **“AI가 원격 PC를 볼 수 있고 기본 mouse/keyboard를 �
 
 > **HTTP auth → input ACK → geometry contract → input safety/Unicode fixes → frame-id/wait-for-change → cursor/clipboard → monitor/session manager → accessibility tree**
 
-이 순서로 진행하면 기존 transport/capture 코드를 대규모로 갈아엎지 않고도 EclipticRD를 훨씬 신뢰할 수 있는 agent-native remote desktop substrate로 확장할 수 있습니다.
+이 순서로 진행하면 기존 transport/capture 코드를 대규모로 갈아엎지 않고도 MahoRD를 훨씬 신뢰할 수 있는 agent-native remote desktop substrate로 확장할 수 있습니다.

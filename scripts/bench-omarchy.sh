@@ -8,7 +8,7 @@ FRAMES="${1:-100}"
 PIN="${PIN:-12345678}"
 OUTPUT_NAME="${OUTPUT_NAME:-HDMI-A-2}"
 STATS_FILE="${2:-${ROOT_DIR}/.omo/mass-ulw-20260906/bench-results-omarchy.json}"
-LOG_DIR="/tmp/erd-bench-omarchy"
+LOG_DIR="/tmp/maho-bench-omarchy"
 
 mkdir -p "${LOG_DIR}" "$(dirname "${STATS_FILE}")"
 
@@ -20,27 +20,27 @@ if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
         export HYPRLAND_INSTANCE_SIGNATURE="$SIG"
     fi
 fi
-export PKG_CONFIG_PATH="/home/indo/erd-ffmpeg7/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-export LD_LIBRARY_PATH="/home/indo/erd-ffmpeg7/lib:${LD_LIBRARY_PATH:-}"
+export PKG_CONFIG_PATH="/home/indo/maho-ffmpeg7/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+export LD_LIBRARY_PATH="/home/indo/maho-ffmpeg7/lib:${LD_LIBRARY_PATH:-}"
 
 echo "========================================================"
-echo "  EclipticRD Latency Benchmark (Omarchy Linux)"
+echo "  MahoRD Latency Benchmark (Omarchy Linux)"
 echo "  Target: ${FRAMES} frames on ${OUTPUT_NAME}"
 echo "========================================================"
 
-HOST_BIN="${ROOT_DIR}/clients/rust/target/debug/erd-host"
-CLIENT_BIN="${ROOT_DIR}/clients/rust/target/debug/erd-client"
+HOST_BIN="${ROOT_DIR}/clients/rust/target/debug/maho-host"
+CLIENT_BIN="${ROOT_DIR}/clients/rust/target/debug/maho-client"
 
 if [ ! -f "${HOST_BIN}" ] || [ ! -f "${CLIENT_BIN}" ]; then
-    echo "Building erd-host and erd-client..."
-    cargo build --manifest-path "${ROOT_DIR}/clients/rust/Cargo.toml" -p erd-host -p erd-app --bins
+    echo "Building maho-host and maho-client..."
+    cargo build --manifest-path "${ROOT_DIR}/clients/rust/Cargo.toml" -p maho-host -p maho-app --bins
 fi
 
-pkill -9 erd-host || true
-pkill -9 erd-client || true
+pkill -9 maho-host || true
+pkill -9 maho-client || true
 sleep 0.5
 
-echo "[1/3] Starting erd-host on output ${OUTPUT_NAME}..."
+echo "[1/3] Starting maho-host on output ${OUTPUT_NAME}..."
 "${HOST_BIN}" \
     --bootstrap-pin "${PIN}" \
     --auto-approve \
@@ -57,13 +57,13 @@ for i in $(seq 1 50); do
 done
 
 if [ "$READY" -ne 1 ]; then
-    echo "ERROR: erd-host failed to start or listen on port 19730."
+    echo "ERROR: maho-host failed to start or listen on port 19730."
     tail -n 25 "${LOG_DIR}/host.log"
     kill -9 "${HOST_PID}" 2>/dev/null || true
     exit 1
 fi
 
-echo "[2/3] Running erd-client for ${FRAMES} frames..."
+echo "[2/3] Running maho-client for ${FRAMES} frames..."
 CLIENT_EXIT=0
 "${CLIENT_BIN}" \
     --host 127.0.0.1 \
@@ -77,7 +77,7 @@ kill -9 "${HOST_PID}" 2>/dev/null || true
 wait "${HOST_PID}" 2>/dev/null || true
 
 if [ "$CLIENT_EXIT" -ne 0 ]; then
-    echo "ERROR: erd-client exited with code ${CLIENT_EXIT}."
+    echo "ERROR: maho-client exited with code ${CLIENT_EXIT}."
     echo "=== Host Log Tail ==="
     tail -n 20 "${LOG_DIR}/host.log"
     echo "=== Client Log Tail ==="
@@ -110,7 +110,7 @@ send_stats = rx.get("host_encode_to_send_complete_us") or {}
 assembly_stats = rx.get("receive_assembly_us") or {}
 
 print("=" * 68)
-print("  ECLIPTICRD LATENCY & TELEMETRY BENCHMARK REPORT")
+print("  MAHORD LATENCY & TELEMETRY BENCHMARK REPORT")
 print("=" * 68)
 print(f"  Decoded Video Frames:    {frames}")
 print(f"  Authenticated Datagrams: {datagrams} ({bytes_rx:,} bytes, {bps / 1_000_000:.2f} Mbps)")

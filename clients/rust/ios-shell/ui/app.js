@@ -536,7 +536,7 @@
       }
       pinInput.value = '';
       try {
-        localStorage.setItem('eclipticrd.ios.last_host', host);
+        localStorage.setItem('mahord.ios.last_host', host);
       } catch (_) {}
       connection.connectSelectedHost(pin);
       return;
@@ -549,7 +549,7 @@
       if (!host || host === epHost) {
         pinInput.value = '';
         try {
-          localStorage.setItem('eclipticrd.ios.last_host', epHost || host);
+          localStorage.setItem('mahord.ios.last_host', epHost || host);
         } catch (_) {}
         connection.connectSavedPairing(selectedPairing.id);
         return;
@@ -565,7 +565,7 @@
 
     pinInput.value = '';
     try {
-      localStorage.setItem('eclipticrd.ios.last_host', host);
+      localStorage.setItem('mahord.ios.last_host', host);
     } catch (_) {}
 
     connection.connect(val.args);
@@ -820,7 +820,7 @@
 
   window.addEventListener('DOMContentLoaded', async () => {
     try {
-      const savedHost = localStorage.getItem('eclipticrd.ios.last_host');
+      const savedHost = localStorage.getItem('mahord.ios.last_host');
       if (savedHost && !hostInput.value) {
         hostInput.value = savedHost;
       }

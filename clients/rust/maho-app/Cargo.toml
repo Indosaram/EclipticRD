@@ -1,0 +1,44 @@
+[package]
+name = "maho-app"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[features]
+default = ["ffmpeg"]
+ffmpeg = ["maho-decode/ffmpeg"]
+
+[dependencies]
+maho-proto = { path = "../maho-proto" }
+maho-net = { path = "../maho-net" }
+maho-decode = { path = "../maho-decode", default-features = false }
+maho-render = { path = "../maho-render" }
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rand.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+rustix.workspace = true
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "maho-client"
+path = "src/bin/maho_client.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.1", default-features = false, features = ["NSPasteboard"] }
+objc2-foundation = { version = "0.3.1", default-features = false, features = ["NSArray", "NSString"] }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_System_IO", "Win32_System_Threading"] }

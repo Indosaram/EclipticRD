@@ -1,4 +1,4 @@
-[2m2026-09-02T10:06:37.769947Z[0m [32m INFO[0m [2merd_host::session[0m[2m:[0m UDP sender received stop signal
+[2m2026-09-02T10:06:37.769947Z[0m [32m INFO[0m [2mmaho_host::session[0m[2m:[0m UDP sender received stop signal
 [libx264 @ 0x7f29a0000cc0] frame I:4     Avg QP:34.25  size: 98577
 [libx264 @ 0x7f29a0000cc0] frame P:198   Avg QP:36.31  size: 15446
 [libx264 @ 0x7f29a0000cc0] mb I  I16..4: 100.0%  0.0%  0.0%

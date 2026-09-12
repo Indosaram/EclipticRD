@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "EclipticRD",
+  "productName": "MahoRD",
   "version": "0.1.0",
-  "identifier": "com.eclipticrd.shell",
+  "identifier": "com.projectmaho.mahord",
   "build": {
     "frontendDist": "./dist",
     "devUrl": "http://localhost:1420"
@@ -11,7 +11,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "EclipticRD",
+        "title": "MahoRD",
         "width": 1280,
         "height": 800,
         "resizable": true

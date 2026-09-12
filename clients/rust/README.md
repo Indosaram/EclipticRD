@@ -1,10 +1,10 @@
-# EclipticRD Rust workspace
+# MahoRD Rust workspace
 
-This is the active EclipticRD workspace, containing the host, desktop and iOS
+This is the active MahoRD workspace, containing the host, desktop and iOS
 applications, protocol and transport crates, media pipeline, and agent automation API.
 
-**Agent-first:** Use `erd-client --mcp` for stdio Model Context Protocol (JSON-RPC) access via Claude, Codex, or custom agents.
-**Automation API:** Use `erd-client --agent-server 19735` for HTTP/WebSocket API on loopback.
+**Agent-first:** Use `maho-client --mcp` for stdio Model Context Protocol (JSON-RPC) access via Claude, Codex, or custom agents.
+**Automation API:** Use `maho-client --agent-server 19735` for HTTP/WebSocket API on loopback.
 **Desktop GUI:** Use `tauri-shell` for graphical remote desktop client on macOS/Linux.
 
 Start with the [project README](../../README.md) for platform status, agent setup,
@@ -19,7 +19,7 @@ Expose ten remote-control tools via stdio JSON-RPC:
 
 ```sh
 # With pairing ID (no PIN required)
-cargo run --locked --release -p erd-app --bin erd-client -- \
+cargo run --locked --release -p maho-app --bin maho-client -- \
   --host 192.168.1.50 \
   --pairing-id YOUR-UUID \
   --pairing-store ~/.pairings.json \
@@ -34,20 +34,20 @@ cargo run --locked --release -p erd-app --bin erd-client -- \
 Registration:
 ```sh
 # Claude
-claude mcp add --transport stdio --scope project eclipticrd \
-  -- /path/to/erd-client --host HOST --pairing-id ID --pairing-store FILE --mcp
+claude mcp add --transport stdio --scope project mahord \
+  -- /path/to/maho-client --host HOST --pairing-id ID --pairing-store FILE --mcp
 
 # Codex
-codex mcp add eclipticrd \
-  -- /path/to/erd-client --host HOST --pairing-id ID --pairing-store FILE --mcp
+codex mcp add mahord \
+  -- /path/to/maho-client --host HOST --pairing-id ID --pairing-store FILE --mcp
 ```
 
-See [docs/agent-setup.md](../../docs/agent-setup.md) for full setup and [skills/eclipticrd-remote-control/SKILL.md](../../skills/eclipticrd-remote-control/SKILL.md) for tool reference.
+See [docs/agent-setup.md](../../docs/agent-setup.md) for full setup and [skills/mahord-remote-control/SKILL.md](../../skills/mahord-remote-control/SKILL.md) for tool reference.
 
 ### HTTP API (Loopback)
 
 ```sh
-cargo run --locked --release -p erd-app --bin erd-client -- \
+cargo run --locked --release -p maho-app --bin maho-client -- \
   --host 192.168.1.50 \
   --pairing-id YOUR-UUID \
   --pairing-store ~/.pairings.json \
@@ -61,24 +61,24 @@ cargo run --locked --release -p erd-app --bin erd-client -- \
 Run from this directory after installing the native dependencies:
 
 ```sh
-cargo build --locked --release -p erd-host -p erd-app
+cargo build --locked --release -p maho-host -p maho-app
 cargo build --locked --release -p tauri-shell --features tauri/custom-protocol
-cargo test --locked --workspace --exclude erd-ios
+cargo test --locked --workspace --exclude maho-ios
 ```
 
 Both desktop and MCP/HTTP client builds **require FFmpeg 7.0.2 headers and runtime**. The Rust wrapper is `ffmpeg-next` 8.1.0. Point `PKG_CONFIG_PATH` at your FFmpeg prefix; both headers and shared libraries must be present.
 
-**iOS:** Separate Xcode tooling, signing, and physical-device requirements. Excluding `erd-ios` from tests does not verify iOS.
+**iOS:** Separate Xcode tooling, signing, and physical-device requirements. Excluding `maho-ios` from tests does not verify iOS.
 
 ## Workspace members
 
-- **`erd-proto`**: Wire types, framing, handshake, protocol limits
-- **`erd-net`**: TCP/UDP transport, replay protection, discovery, signaling
-- **`erd-decode`**: FFmpeg and iOS VideoToolbox video decoding
-- **`erd-render`**: Presentation, audio, WebGL/native platform integration
-- **`erd-app`**: Main CLI (`erd-client`), MCP dispatcher, HTTP API (`AgentServer`), session lifecycle
-- **`erd-host`**: Platform capture, encoding, audio, input injection
-- **`erd-mobile`**: Shared mobile input, lifecycle, storage abstractions
+- **`maho-proto`**: Wire types, framing, handshake, protocol limits
+- **`maho-net`**: TCP/UDP transport, replay protection, discovery, signaling
+- **`maho-decode`**: FFmpeg and iOS VideoToolbox video decoding
+- **`maho-render`**: Presentation, audio, WebGL/native platform integration
+- **`maho-app`**: Main CLI (`maho-client`), MCP dispatcher, HTTP API (`AgentServer`), session lifecycle
+- **`maho-host`**: Platform capture, encoding, audio, input injection
+- **`maho-mobile`**: Shared mobile input, lifecycle, storage abstractions
 - **`tauri-shell`**: Desktop GUI application (native Tauri, WebKit)
 - **`ios-shell`**: iOS app and native integration
 

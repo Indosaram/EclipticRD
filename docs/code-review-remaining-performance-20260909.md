@@ -18,7 +18,7 @@ This review provides the required substantive code quality, systems programming,
 
 ## 2. File-by-File Technical Review
 
-### 2.1 Transport & Session (`clients/rust/erd-host/src/session.rs`)
+### 2.1 Transport & Session (`clients/rust/maho-host/src/session.rs`)
 - **MTU Constants:**
   - `SENDER_MAX_VIDEO_CHUNK_BYTES = 1154`
   - `SENDER_MAX_AUDIO_FRAGMENT_BYTES = 1152`
@@ -45,8 +45,8 @@ This review provides the required substantive code quality, systems programming,
   - Once saturated, subsequent events are dropped, and an overflow counter is incremented via `overflow = overflow.saturating_add(1)`. It is a bounded first-N buffer with drop-on-overflow, not a lockless or circular ring buffer.
   - Stage attribution events 15–40 are cleanly recorded without memory leaks or unbounded growth.
 
-### 2.4 Workspace Compiler Fixes (`erd-render`, `tauri-shell`, `pairing.rs`, `audio_windows.rs`)
-- Factored complex function pointer signature in `erd-render/tests/audio_api.rs:72-76` into local type alias `StartWithEventsFn` to satisfy `clippy::type-complexity`.
+### 2.4 Workspace Compiler Fixes (`maho-render`, `tauri-shell`, `pairing.rs`, `audio_windows.rs`)
+- Factored complex function pointer signature in `maho-render/tests/audio_api.rs:72-76` into local type alias `StartWithEventsFn` to satisfy `clippy::type-complexity`.
 - Fixed `clippy::needless_borrow` in `tauri-shell/src-tauri/src/lib.rs:1126` by passing `state` directly instead of `&state`.
 - Removed redundant `as u32` casts on `i32::unsigned_abs()` results in `windows_logic.rs`.
 - Removed unused imports in Windows test modules.
@@ -59,7 +59,7 @@ This review provides the required substantive code quality, systems programming,
 During review, five implementation and test patterns were scrutinized:
 
 ### Finding 1: Injected Trace Tests vs. Production Emission (`sender_trace_tests.rs:82-156`)
-- **Observation:** In `clients/rust/erd-host/src/sender_trace_tests.rs`, tests sequentially insert 17 mock `TraceEvent` records in a single thread and assert JSON serialization formatting and field values. They do not exercise concurrent multithreaded contention, buffer overflow drop semantics, or live encoder execution.
+- **Observation:** In `clients/rust/maho-host/src/sender_trace_tests.rs`, tests sequentially insert 17 mock `TraceEvent` records in a single thread and assert JSON serialization formatting and field values. They do not exercise concurrent multithreaded contention, buffer overflow drop semantics, or live encoder execution.
 - **Risk:** The unit test proves serialization and schema matching, but cannot prove that production encode calls actually emit records.
 - **Disposition (ACCEPTED WITH DEFINED SCOPE):**
   - Accepted as a unit test for record schema validation and JSON serialization.
@@ -75,18 +75,18 @@ During review, five implementation and test patterns were scrutinized:
 - **Observation:** In `capture_windows.rs:195-233`, the `OutputGeometry` trait, its implementation for `DXGI_OUTPUT_DESC`, and the `output_geometry` helper calculate resolution by swapping width/height based on rotation 2/4 from `DesktopCoordinates`. Production code now uses `ModeDesc` physical mode and rejects unsupported rotations.
 - **Risk:** Dead/legacy test logic that mirrors superseded design assumptions.
 - **Disposition (ISOLATED IN TEST HARNESS):**
-  - Confirmed strictly isolated behind `#[cfg(test)]`. Production release binaries (`erd-host.exe`) do not compile or link this code.
+  - Confirmed strictly isolated behind `#[cfg(test)]`. Production release binaries (`maho-host.exe`) do not compile or link this code.
   - Dispositioned for deprecation and cleanup in the next scheduled refactoring increment.
 
 ### Finding 4: Actual Deletions & Removal-Verification Test Analysis
 - **Observation:** Audited the actual deletions across the working tree diff:
-  1. `clients/rust/erd-host/src/inject_linux.rs:25-27,67-76`: Deleted constant `ABSOLUTE_AXIS_MAX: i32 = 65_535` and helper function `scale_to_uinput(value: u32, extent: u32) -> i32`. This was dead code leftover from an older uinput coordinate mapping scheme.
-  2. `clients/rust/erd-host/src/session.rs`: Deleted uppercase FFI struct `POINT` in favor of CamelCase `Point`; deleted direct assignment `logical_width: pixel_width` in favor of `resolve_output_metadata`; deleted closure wrappers (`.map_err(|error| SessionError::Io(error))?`).
-  3. `clients/rust/erd-app/src/pairing.rs`: Deleted redundant `return` statement.
-  4. `clients/rust/erd-host/src/windows_logic.rs`: Deleted redundant `as u32` casts on `unsigned_abs()`.
+  1. `clients/rust/maho-host/src/inject_linux.rs:25-27,67-76`: Deleted constant `ABSOLUTE_AXIS_MAX: i32 = 65_535` and helper function `scale_to_uinput(value: u32, extent: u32) -> i32`. This was dead code leftover from an older uinput coordinate mapping scheme.
+  2. `clients/rust/maho-host/src/session.rs`: Deleted uppercase FFI struct `POINT` in favor of CamelCase `Point`; deleted direct assignment `logical_width: pixel_width` in favor of `resolve_output_metadata`; deleted closure wrappers (`.map_err(|error| SessionError::Io(error))?`).
+  3. `clients/rust/maho-app/src/pairing.rs`: Deleted redundant `return` statement.
+  4. `clients/rust/maho-host/src/windows_logic.rs`: Deleted redundant `as u32` casts on `unsigned_abs()`.
 - **Assessment of Removal-Verification Tests:**
   - Evaluated whether any new tests were added that merely assert the removal of these symbols (a common anti-pattern where tests assert that a function cannot be called or that an identifier is gone).
-  - **Verdict:** Zero removal-only tests were added. Existing unit tests (`inject_linux::tests`, `erd_app::pairing::tests`) exercise functional behavior (e.g. mapping coordinates, resolving paths). The deletions removed dead helpers and lint infractions without altering safety invariants or leaving tautological removal tests.
+  - **Verdict:** Zero removal-only tests were added. Existing unit tests (`inject_linux::tests`, `maho_app::pairing::tests`) exercise functional behavior (e.g. mapping coordinates, resolving paths). The deletions removed dead helpers and lint infractions without altering safety invariants or leaving tautological removal tests.
 
 ### Finding 5: Unnecessary Extraction, Parsing & Normalization Analysis
 - **Observation:** Evaluated whether `resolve_output_metadata` in `windows_logic.rs` introduces unnecessary parsing or abstraction layers.
@@ -103,23 +103,23 @@ The compiler gates were executed on Omarchy and verified as follows:
 
 1. **Full Workspace Linux Clippy (`--workspace` without package narrowing):**
    ```bash
-   cargo clippy --manifest-path clients/rust/Cargo.toml --locked --workspace --exclude erd-ios --all-targets --no-deps -- -D warnings
+   cargo clippy --manifest-path clients/rust/Cargo.toml --locked --workspace --exclude maho-ios --all-targets --no-deps -- -D warnings
    ```
    - **Exit Code:** 0 (Clean pass, 0 warnings, 0 errors).
    - **Receipt Artifact:** `.omo/remaining-performance-20260909/workspace-clippy-full.log`.
-   - **Coverage:** All workspace member crates (`erd-proto`, `erd-net`, `erd-decode`, `erd-render`, `erd-app`, `erd-host`, `tauri-shell`). Resolves CONSTRAINT-5 across the Linux workspace.
+   - **Coverage:** All workspace member crates (`maho-proto`, `maho-net`, `maho-decode`, `maho-render`, `maho-app`, `maho-host`, `tauri-shell`). Resolves CONSTRAINT-5 across the Linux workspace.
 
 2. **Windows Target Clippy Gate (Explicitly Scoped to Windows Host Daemon):**
    ```bash
-   cargo clippy --manifest-path clients/rust/Cargo.toml --locked -p erd-host --all-targets --target x86_64-pc-windows-gnu --no-deps -- -D warnings
+   cargo clippy --manifest-path clients/rust/Cargo.toml --locked -p maho-host --all-targets --target x86_64-pc-windows-gnu --no-deps -- -D warnings
    ```
    - **Exit Code:** 0 (Clean pass, 0 warnings, 0 errors).
    - **Receipt Artifact:** `.omo/remaining-performance-20260909/windows-clippy.log`.
-   - **Criterion Replacement & Structural Boundary:** Cross-compiling the client crates (`--workspace`) for `x86_64-pc-windows-gnu` on Linux fails at `ffmpeg-sys-next` because the cross-compilation environment lacks a MinGW Windows FFmpeg sysroot (`.omo/remaining-performance-20260909/windows-workspace-clippy-error.log`). Because `erd-host` is the sole native Windows host daemon and uses native Media Foundation (not FFmpeg), the Windows acceptance criterion is explicitly defined as **Windows-host-only verification** (`-p erd-host`), which passes cleanly with zero warnings under `-D warnings`.
+   - **Criterion Replacement & Structural Boundary:** Cross-compiling the client crates (`--workspace`) for `x86_64-pc-windows-gnu` on Linux fails at `ffmpeg-sys-next` because the cross-compilation environment lacks a MinGW Windows FFmpeg sysroot (`.omo/remaining-performance-20260909/windows-workspace-clippy-error.log`). Because `maho-host` is the sole native Windows host daemon and uses native Media Foundation (not FFmpeg), the Windows acceptance criterion is explicitly defined as **Windows-host-only verification** (`-p maho-host`), which passes cleanly with zero warnings under `-D warnings`.
 
 3. **Full Workspace Regression Test Suite:**
    ```bash
-   cargo test --manifest-path clients/rust/Cargo.toml --locked --workspace --exclude erd-ios
+   cargo test --manifest-path clients/rust/Cargo.toml --locked --workspace --exclude maho-ios
    ```
    - **Result:** 510 tests passed across all crates, 0 failed, 1 ignored pre-existing network test (`ALL_WORKSPACE_TESTS_PASS`).
 

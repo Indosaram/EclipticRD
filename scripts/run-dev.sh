@@ -1,12 +1,12 @@
 #!/bin/bash
-# EclipticRD Development Launcher
+# MahoRD Development Launcher
 # Relauches the app, and optionally resets stale TCC permissions.
 
-BUNDLE_ID="com.indo.EclipticRD"
+BUNDLE_ID="com.indo.MahoRD"
 APP_PATH=""
 
 # Find the primary active DerivedData app path
-APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name 'EclipticRD.app' -path '*/Debug/*' -type d 2>/dev/null | head -1)
+APP_PATH=$(find ~/Library/Developer/Xcode/DerivedData -name 'MahoRD.app' -path '*/Debug/*' -type d 2>/dev/null | head -1)
 
 # Check custom argument
 RESET_TCC=false
@@ -17,7 +17,7 @@ for arg in "$@"; do
 done
 
 if [ -z "$APP_PATH" ]; then
-  echo "❌ EclipticRD.app not found. Build first: xcodebuild -scheme EclipticRD build"
+  echo "❌ MahoRD.app not found. Build first: xcodebuild -scheme MahoRD build"
   exit 1
 fi
 

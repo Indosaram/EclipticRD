@@ -1,7 +1,7 @@
 # Linux Desktop Support Matrix
 
 **Last updated:** 2026-09-06
-**Scope:** `erd-host` Linux capture (`capture_linux.rs`) and input injection (`inject_linux.rs`)
+**Scope:** `maho-host` Linux capture (`capture_linux.rs`) and input injection (`inject_linux.rs`)
 
 ## Summary
 
@@ -29,7 +29,7 @@ Key facts:
   compositor implementing it (Sway, river, niri, Wayfire, labwc, ...) works
   with zero code changes.
 - Output selection follows the existing priority: `--output` CLI flag →
-  `ERD_OUTPUT` env var → Hyprland auto-probe (focused monitor first, then first
+  `MAHO_OUTPUT` env var → Hyprland auto-probe (focused monitor first, then first
   monitor). On non-Hyprland compositors the auto-probe cannot resolve a focused
   output, so first-monitor fallback applies.
 - Frames arrive as tightly packed BGRA (`wl_shm` ARGB8888/XRGB8888 offer) with
@@ -46,7 +46,7 @@ injection works identically under Hyprland, KDE, GNOME, and X11 sessions.
 One-time permission setup (Arch/Omarchy, already applied on the testbed):
 
 ```text
-# /etc/udev/rules.d/70-eclipticrd-uinput.rules
+# /etc/udev/rules.d/70-mahord-uinput.rules
 KERNEL=="uinput", GROUP="uinput", MODE="0660", OPTIONS+="static_node=uinput"
 ```
 
@@ -113,7 +113,7 @@ WAYLAND_DISPLAY set?
          └─ no  → fail with a clear "no display server" error
 ```
 
-`ERD_CAPTURE_BACKEND=wlr|portal|x11` env override for CI and debugging.
+`MAHO_CAPTURE_BACKEND=wlr|portal|x11` env override for CI and debugging.
 
 ## Verification notes
 

@@ -15,17 +15,17 @@ if [ -z "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then
         export HYPRLAND_INSTANCE_SIGNATURE="$SIG"
     fi
 fi
-export PKG_CONFIG_PATH="/home/indo/erd-ffmpeg7/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
-export LD_LIBRARY_PATH="/home/indo/erd-ffmpeg7/lib:${LD_LIBRARY_PATH:-}"
+export PKG_CONFIG_PATH="/home/indo/maho-ffmpeg7/lib/pkgconfig:${PKG_CONFIG_PATH:-}"
+export LD_LIBRARY_PATH="/home/indo/maho-ffmpeg7/lib:${LD_LIBRARY_PATH:-}"
 
-HOST_BIN="${ROOT_DIR}/clients/rust/target/debug/erd-host"
+HOST_BIN="${ROOT_DIR}/clients/rust/target/debug/maho-host"
 
 if [ ! -f "${HOST_BIN}" ]; then
-    echo "Building erd-host..."
-    cargo build --manifest-path "${ROOT_DIR}/clients/rust/Cargo.toml" -p erd-host
+    echo "Building maho-host..."
+    cargo build --manifest-path "${ROOT_DIR}/clients/rust/Cargo.toml" -p maho-host
 fi
 
-echo "Starting erd-host on output ${OUTPUT_NAME} (PIN: ${PIN})..."
+echo "Starting maho-host on output ${OUTPUT_NAME} (PIN: ${PIN})..."
 exec "${HOST_BIN}" \
     --bootstrap-pin "${PIN}" \
     --auto-approve \

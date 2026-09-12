@@ -25,20 +25,20 @@ jobs:
             os: macos-latest
             target: aarch64-apple-darwin
             features: macos-host
-            binary_name: erd-host
-            artifact_name: eclipticrd-macos-aarch64
+            binary_name: maho-host
+            artifact_name: mahord-macos-aarch64
           - name: Linux
             os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             features: default
-            binary_name: erd-client
-            artifact_name: eclipticrd-linux-x86_64
+            binary_name: maho-client
+            artifact_name: mahord-linux-x86_64
           - name: Windows
             os: windows-latest
             target: x86_64-pc-windows-msvc
             features: default
-            binary_name: erd-client.exe
-            artifact_name: eclipticrd-windows-x86_64
+            binary_name: maho-client.exe
+            artifact_name: mahord-windows-x86_64
 
     defaults:
       run:
@@ -78,8 +78,8 @@ jobs:
           echo "OPENSSL_STATIC=1" >> $env:GITHUB_ENV
           choco install ffmpeg-shared --yes || true
 
-      - name: Build erd-host
-        run: cargo build -p erd-host --features ${{ matrix.features }} --release --target ${{ matrix.target }}
+      - name: Build maho-host
+        run: cargo build -p maho-host --features ${{ matrix.features }} --release --target ${{ matrix.target }}
 
       - name: Build Workspace Binaries
         run: cargo build --workspace --release --target ${{ matrix.target }}
@@ -94,7 +94,7 @@ jobs:
         run: |
           mkdir -p ../../staging
           # Copy target release binaries
-          for bin in erd-host erd-client tauri-shell; do
+          for bin in maho-host maho-client tauri-shell; do
             if [ -f "target/${{ matrix.target }}/release/${bin}" ]; then
               cp "target/${{ matrix.target }}/release/${bin}" ../../staging/
             elif [ -f "target/release/${bin}" ]; then
@@ -112,7 +112,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path ..\..\staging | Out-Null
           # Copy target release executables
-          @("erd-host.exe", "erd-client.exe", "tauri-shell.exe") | ForEach-Object {
+          @("maho-host.exe", "maho-client.exe", "tauri-shell.exe") | ForEach-Object {
             $targetPath = "target\${{ matrix.target }}\release\$_"
             $rootPath = "target\release\$_"
             if (Test-Path $targetPath) {

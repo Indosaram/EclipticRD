@@ -5,7 +5,7 @@
 ## 결론
 
 현재 코드는 **iOS/Android에서 데스크톱에 접속하는 완성된 앱이 아니다.**
-`erd-mobile`은 Rust 라이브러리와 정책·입력 변환 로직이다. 리뷰 시작 시
+`maho-mobile`은 Rust 라이브러리와 정책·입력 변환 로직이다. 리뷰 시작 시
 연결·영상·오디오 경로가 실제 처리 없이 성공을 반환했으며, 이번 수정으로
 해당 허위 성공을 명시적 미지원 오류 또는 출력량 0으로 바꿨다.
 실제 세션·네이티브 미디어 연결과 APK/IPA 앱 프로젝트는 여전히 없다.
@@ -19,7 +19,7 @@ Android APK 및 iOS 앱으로 완성하여 개인 휴대폰에 설치하는 것�
 ## 검토 범위와 제한
 
 - 검토 대상은 작업 시작 시점의 미커밋 변경을 포함한
-  `clients/rust/erd-mobile`, 관련 Rust 크레이트와 Tauri 설정이다.
+  `clients/rust/maho-mobile`, 관련 Rust 크레이트와 Tauri 설정이다.
 - 기존 미커밋 변경은 보존한다. 이 작업은 커밋·배포 승인이 아니다.
 - 최신 사용자 지시: **코드 수준에서만 검증한다. 실기기·에뮬레이터는 별도
   승인 전 사용하지 않는다.** 설치, 실행, 입력 조작, 화면 캡처를 검증에
@@ -34,11 +34,11 @@ Android APK 및 iOS 앱으로 완성하여 개인 휴대폰에 설치하는 것�
 
 ### F1 · 치명적: 실제 연결·입력 전송 없이 성공 반환
 
-근거: `clients/rust/erd-mobile/src/bridge.rs:21-89`.
+근거: `clients/rust/maho-mobile/src/bridge.rs:21-89`.
 
-`erd_mobile_create`는 호스트 문자열과 포트를 구조체에 넣고
+`maho_mobile_create`는 호스트 문자열과 포트를 구조체에 넣고
 `is_connected: true`를 설정한다. TLS 연결, 페어링, handshake, UDP 세션 생성은
-없다. `erd_mobile_send_touch`는 `_event`를 만들어 버리고 `Ok`를 반환한다.
+없다. `maho_mobile_send_touch`는 `_event`를 만들어 버리고 `Ok`를 반환한다.
 호스트가 존재하지 않아도 테스트가 성공하는 이유다. 테스트의 포트 `19735`도
 실제 스트리밍 TCP 기본 포트 `19730`이 아니라 에이전트 HTTP API 포트다.
 
@@ -46,7 +46,7 @@ Android APK 및 iOS 앱으로 완성하여 개인 휴대폰에 설치하는 것�
 
 1. 현재 단계에서는 핸들 생성과 네트워크 연결 성공을 구별하고, 지원되지 않는
    전송은 명시적으로 실패시킨다. 생성 실패 시 출력 핸들도 일관되게 처리한다.
-2. 완성 단계에서는 `erd-app::ClientSession`의 인증·페어링·Ready 상태를
+2. 완성 단계에서는 `maho-app::ClientSession`의 인증·페어링·Ready 상태를
    재사용하고 실제 전송 성공/실패를 C ABI에 연결한다.
 3. Rust/네이티브 경계의 포인터 소유권, 유효 기간, 동시 접근 및 파괴 계약을
    문서화한다. 잘못된 임의 포인터를 안전하게 검증할 수 있다고 주장하지 않는다.
@@ -55,8 +55,8 @@ Android APK 및 iOS 앱으로 완성하여 개인 휴대폰에 설치하는 것�
 
 근거:
 
-- `clients/rust/erd-mobile/src/android.rs:47-80,104-119`
-- `clients/rust/erd-mobile/src/ios.rs:45-75,99-112`
+- `clients/rust/maho-mobile/src/android.rs:47-80,104-119`
+- `clients/rust/maho-mobile/src/ios.rs:45-75,99-112`
 
 Android 디코더는 비어 있지 않은 바이트열에 대해 `frames_decoded`만 증가시킨다.
 iOS도 `frames_rendered`만 증가시킨다. Surface와 Metal layer는 실제 객체가
@@ -76,14 +76,14 @@ iOS도 `frames_rendered`만 증가시킨다. Surface와 Metal layer는 실제 �
 
 ### F3 · 높음: 설치 가능한 Android/iOS 앱 대상이 없음
 
-근거: `clients/rust/erd-mobile/Cargo.toml:19-21`,
+근거: `clients/rust/maho-mobile/Cargo.toml:19-21`,
 `clients/rust/tauri-shell/Cargo.toml`,
 `clients/rust/tauri-shell/tauri.conf.json`.
 
 `lib/cdylib/staticlib`는 라이브러리 산출물이지 설치 가능한 앱이 아니다.
 `clients` 파일 목록에 AndroidManifest, Gradle 프로젝트, Kotlin/Java 앱 진입점,
 iOS 앱 프로젝트, Info.plist 및 모바일 entitlement 파일이 없다.
-기존 Tauri 설정은 데스크톱 윈도우 설정이며 `erd-mobile` 의존성도 없다.
+기존 Tauri 설정은 데스크톱 윈도우 설정이며 `maho-mobile` 의존성도 없다.
 다만 `clients/rust/tauri-shell/src-tauri/src/lib.rs:1650-1652`에는
 `#[cfg_attr(mobile, tauri::mobile_entry_point)]`가 이미 있다. 따라서 모바일
 진입점 표식조차 없다는 판단은 부정확하다. 이 표식은 생성된 앱 프로젝트,
@@ -97,16 +97,16 @@ Tauri 생성 프로젝트가 필요하다는 사실과 과거 Swift 앱을 복�
 
 ### F4 · 높음: 데스크톱 미디어 의존성이 모바일 라이브러리에 그대로 유입
 
-근거: `clients/rust/erd-mobile/Cargo.toml:9-13`,
-`clients/rust/erd-app/Cargo.toml:9-12`,
-`clients/rust/erd-decode/Cargo.toml:9-16`,
-`clients/rust/erd-render/Cargo.toml:9-13`.
+근거: `clients/rust/maho-mobile/Cargo.toml:9-13`,
+`clients/rust/maho-app/Cargo.toml:9-12`,
+`clients/rust/maho-decode/Cargo.toml:9-16`,
+`clients/rust/maho-render/Cargo.toml:9-13`.
 
-`erd-mobile`의 직접 의존성뿐 아니라 `erd-app`을 통해서도 기본 FFmpeg,
-CPAL 경로가 활성화된다. `erd-mobile` 한 곳에서만
+`maho-mobile`의 직접 의존성뿐 아니라 `maho-app`을 통해서도 기본 FFmpeg,
+CPAL 경로가 활성화된다. `maho-mobile` 한 곳에서만
 `default-features = false`를 설정해도 전이 의존성의 feature 활성화가 남는다.
 Linux에서 FFmpeg 7을 찾는 빌드 환경은 Android/iOS용 바이너리와 링커 설정을
-제공하지 않는다. `erd-net`의 vendored OpenSSL도 타깃별 C 툴체인이 필요하다.
+제공하지 않는다. `maho-net`의 vendored OpenSSL도 타깃별 C 툴체인이 필요하다.
 
 개선: 공통 세션·프로토콜과 데스크톱 미디어를 feature 또는 크레이트 경계로
 분리하고, Android/iOS 타깃의 네이티브 미디어 어댑터를 선택한다.
@@ -115,7 +115,7 @@ Linux에서 FFmpeg 7을 찾는 빌드 환경은 Android/iOS용 바이너리와 �
 
 ### F5 · 높음: 멀티터치 및 모드 전환에서 마우스 버튼 상태 불일치
 
-근거: `clients/rust/erd-mobile/src/touch.rs:128-197`.
+근거: `clients/rust/maho-mobile/src/touch.rs:128-197`.
 
 모든 손가락의 Began이 LeftMouseDown, 모든 Ended/Cancelled가 LeftMouseUp을
 발생시킨다. 첫 손가락으로 드래그하는 중 두 번째 손가락을 떼면 첫 드래그가
@@ -129,7 +129,7 @@ Linux에서 FFmpeg 7을 찾는 빌드 환경은 Android/iOS용 바이너리와 �
 
 ### F6 · 높음: 비유한 입력과 오류가 터치 상태를 오염시킴
 
-근거: `clients/rust/erd-mobile/src/touch.rs:65-97,133-177`.
+근거: `clients/rust/maho-mobile/src/touch.rs:65-97,133-177`.
 
 `set_zoom`은 중심점의 NaN/Infinity를 검사하지 않고 먼저 상태를 바꾼다.
 공개 viewport 필드가 잘못된 값이어도 `transform_to_host`는 일부만 검사한다.
@@ -142,7 +142,7 @@ Linux에서 FFmpeg 7을 찾는 빌드 환경은 Android/iOS용 바이너리와 �
 
 ### F7 · 중간: 발열 제한이 오히려 비트레이트를 올리거나 overflow 발생
 
-근거: `clients/rust/erd-mobile/src/power.rs:72-96`.
+근거: `clients/rust/maho-mobile/src/power.rs:72-96`.
 
 Fair 상태의 `(target_bitrate * 4 / 5).max(1_000)`는 기본/절약 한도가
 1,000 kbps보다 작으면 그 한도를 초과한다. 공개 설정에 큰 u32 값을 넣으면
@@ -153,9 +153,9 @@ Fair 상태의 `(target_bitrate * 4 / 5).max(1_000)`는 기본/절약 한도가
 
 ### F8 · 높음: 보안 저장 및 앱 수명주기는 아직 실서비스와 연결되지 않음
 
-근거: `clients/rust/erd-mobile/src/storage.rs:18-58,61-108`,
-`clients/rust/erd-mobile/src/lifecycle.rs`,
-`clients/rust/erd-mobile/src/keyboard.rs`.
+근거: `clients/rust/maho-mobile/src/storage.rs:18-58,61-108`,
+`clients/rust/maho-mobile/src/lifecycle.rs`,
+`clients/rust/maho-mobile/src/keyboard.rs`.
 
 SecureStorageBackend의 제공 구현은 메모리 HashMap인 MockSecureStorage뿐이다.
 이름이 Mock이므로 실제 암호화 저장이라고 해석하면 안 된다. lifecycle은
@@ -230,11 +230,11 @@ Omarchy 검증을 수행했다. 도중의 API 502 오류는 저장된 부분 패
 
 | 항목 | 수정 후 상태 | 최종 코드 근거 |
 |---|---|---|
-| F1 허위 접속/전송 성공 | 핸들 생성은 로컬 할당만 의미. 가짜 연결 플래그 제거, 유효한 전송 요청은 `BackendUnavailable = 5` 반환. 실패 출력 슬롯 null 초기화 | `clients/rust/erd-mobile/src/bridge.rs:12-110` |
-| F2 허위 영상·오디오 출력 | 임의 바이트의 decode/render/write 성공 제거. 실제 출력 카운터 증가 없음. iOS start는 명시적 오류 반환 | `clients/rust/erd-mobile/src/android.rs:73-127`, `clients/rust/erd-mobile/src/ios.rs:65-110` |
-| F5 터치 소유권 | 두 모드 모두 한 터치가 포인터를 소유. 보조 터치·중복 종료가 버튼 상태를 훼손하지 않음. 모드 전환은 해제 이벤트 반환 | `clients/rust/erd-mobile/src/touch.rs:215-347` |
-| F6 좌표/취소 복구 | 좌표·viewport·계산 결과 검사. 오류 시 기준점 보존. 두 모드의 취소는 비유한 좌표 검사보다 먼저 처리 | `clients/rust/erd-mobile/src/touch.rs:72-155,238-265` |
-| F7 발열 제한 | u32 몫/나머지 연산으로 overflow 제거, 이미 계산한 비트레이트 상한을 넘지 않음 | `clients/rust/erd-mobile/src/power.rs:72-99` |
+| F1 허위 접속/전송 성공 | 핸들 생성은 로컬 할당만 의미. 가짜 연결 플래그 제거, 유효한 전송 요청은 `BackendUnavailable = 5` 반환. 실패 출력 슬롯 null 초기화 | `clients/rust/maho-mobile/src/bridge.rs:12-110` |
+| F2 허위 영상·오디오 출력 | 임의 바이트의 decode/render/write 성공 제거. 실제 출력 카운터 증가 없음. iOS start는 명시적 오류 반환 | `clients/rust/maho-mobile/src/android.rs:73-127`, `clients/rust/maho-mobile/src/ios.rs:65-110` |
+| F5 터치 소유권 | 두 모드 모두 한 터치가 포인터를 소유. 보조 터치·중복 종료가 버튼 상태를 훼손하지 않음. 모드 전환은 해제 이벤트 반환 | `clients/rust/maho-mobile/src/touch.rs:215-347` |
+| F6 좌표/취소 복구 | 좌표·viewport·계산 결과 검사. 오류 시 기준점 보존. 두 모드의 취소는 비유한 좌표 검사보다 먼저 처리 | `clients/rust/maho-mobile/src/touch.rs:72-155,238-265` |
+| F7 발열 제한 | u32 몫/나머지 연산으로 overflow 제거, 이미 계산한 비트레이트 상한을 넘지 않음 | `clients/rust/maho-mobile/src/power.rs:72-99` |
 
 공개 API 변경:
 
@@ -255,9 +255,9 @@ Android/iOS 타깃 빌드 성공을 뜻하지 않는다.
 |---|---|
 | 최초 RED | 회귀 24개 중 23개 실패, 1개 통과. 실제 결함으로 실패함을 확인 |
 | 추가 취소 경계 RED | 회귀 32개 중 상대 터치 NaN 취소 1개 실패, 31개 통과 |
-| 최종 `cargo test -p erd-mobile` | 단위 27개 + 공개 API 회귀 32개 = **59개 통과**, 실패/무시 0 |
-| 최종 `cargo clippy -p erd-mobile --all-targets --no-deps -- -D warnings` | **종료 코드 0**, 경고 억제 없음 |
-| 최종 `cargo build -p erd-mobile` | **종료 코드 0**, Linux 라이브러리 빌드 |
+| 최종 `cargo test -p maho-mobile` | 단위 27개 + 공개 API 회귀 32개 = **59개 통과**, 실패/무시 0 |
+| 최종 `cargo clippy -p maho-mobile --all-targets --no-deps -- -D warnings` | **종료 코드 0**, 경고 억제 없음 |
+| 최종 `cargo build -p maho-mobile` | **종료 코드 0**, Linux 라이브러리 빌드 |
 | 수정된 Rust 파일의 `rustfmt --check` | **종료 코드 0**. Mac에서 포맷만 검사했으며 컴파일하지 않음 |
 | 실기기·에뮬레이터 설치/실행 | 사용자 승인 범위 밖이므로 미실시 |
 | APK/IPA 생성·네이티브 codec 검증 | 미실시. 관련 제품 구현/패키징이 아직 없음 |

@@ -52,7 +52,7 @@ cd ffmpeg-7.0.2
   --disable-network --disable-autodetect --enable-shared --disable-static \
   --enable-gpl --enable-libx264 --enable-vaapi --enable-ffnvcodec --enable-nvenc --enable-nonfree \
   --enable-x86asm
-make -j"${ERD_BUILD_JOBS:-6}"
+make -j"${MAHO_BUILD_JOBS:-6}"
 make install
 export LD_LIBRARY_PATH="$prefix/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 "$prefix/bin/ffmpeg" -version

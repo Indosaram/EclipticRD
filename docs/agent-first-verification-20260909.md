@@ -37,7 +37,7 @@ replaced. No public binary release or permanent deployment was performed.
   to manufacture freshness. Static repeats retain original content identity
   while publication residence is measured separately.
 - README onboarding, `docs/agent-setup.md`, and the YAML-frontmatter skill at
-  `skills/eclipticrd-remote-control/SKILL.md` describe automatic pairing
+  `skills/mahord-remote-control/SKILL.md` describe automatic pairing
   persistence, MCP registration, skill installation/context injection, exact
   response formats, input limits, and cleanup.
 
@@ -48,7 +48,7 @@ replaced. No public binary release or permanent deployment was performed.
 | Initial fresh non-iOS Rust workspace suite | 493 passed, including doctests; one existing installed-Tailscale observation excluded by its own ignore attribute |
 | Explicit installed-Tailscale observation | 1 passed; observed list was empty, not proof of device discovery |
 | iOS library tests compiled on Linux | 15 passed; not native iPhone/VideoToolbox QA |
-| erd-app library without default features | 100 passed |
+| maho-app library without default features | 100 passed |
 | Desktop JavaScript | 35 Bun tests, 4 Bun icon tests, 32 actual-Node tests passed |
 | Mobile JavaScript | 53 Bun tests passed |
 | QA driver syntax | Passed on Omarchy |
@@ -70,12 +70,12 @@ regressions. The corrected runners above passed.
 
 Strict `cargo clippy --all-targets --no-deps -- -D warnings` failed:
 
-- `erd-app/src/pairing.rs`: one needless return and three `io_other_error`
+- `maho-app/src/pairing.rs`: one needless return and three `io_other_error`
   diagnostics.
-- `erd-host/src/inject_linux.rs`: two unused items.
-- `erd-host/src/encode_linux.rs`: range-loop, manual-contains, and range-pattern
+- `maho-host/src/inject_linux.rs`: two unused items.
+- `maho-host/src/encode_linux.rs`: range-loop, manual-contains, and range-pattern
   diagnostics.
-- `erd-host/src/session.rs`: an unchanged redundant error-mapping closure.
+- `maho-host/src/session.rs`: an unchanged redundant error-mapping closure.
 
 These diagnostics are in pre-existing code; none was suppressed. Clippy stopping
 there is not an exhaustive clean result for all later targets. Repository-wide

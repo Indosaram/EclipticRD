@@ -5,19 +5,19 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use erd_app::{
+use maho_app::{
     ClientSession, IpcErrorCode, IpcErrorStage, PairingEndpoint, PairingRecord, PairingStore,
     SessionConfig, SessionState,
 };
-use erd_net::{PskIdentity, TlsPskClient, TlsPskServer};
-use erd_proto::WireCodec;
+use maho_net::{PskIdentity, TlsPskClient, TlsPskServer};
+use maho_proto::WireCodec;
 
 use super::commands::{self, authenticate_client_session, list_pairings_internal};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-fn make_packet(kind: erd_proto::PacketType, payload: &[u8]) -> Vec<u8> {
-    let mut bytes = erd_proto::PacketHeader::new(kind, 0, 0, 0).encode().unwrap();
+fn make_packet(kind: maho_proto::PacketType, payload: &[u8]) -> Vec<u8> {
+    let mut bytes = maho_proto::PacketHeader::new(kind, 0, 0, 0).encode().unwrap();
     bytes.extend_from_slice(payload);
     bytes
 }
@@ -37,14 +37,14 @@ impl TempStoreGuard {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("erd-pairing-test-{unique}"));
-        let store_dir = dir.join("EclipticRD");
+        let dir = std::env::temp_dir().join(format!("maho-pairing-test-{unique}"));
+        let store_dir = dir.join("MahoRD");
         fs::create_dir_all(&store_dir).unwrap();
 
         let mac_store_dir = dir
             .join("Library")
             .join("Application Support")
-            .join("EclipticRD");
+            .join("MahoRD");
         fs::create_dir_all(&mac_store_dir).unwrap();
 
         let prev_xdg = std::env::var("XDG_DATA_HOME").ok();
@@ -74,19 +74,19 @@ impl TempStoreGuard {
   }}
 ]"#
         );
-        let linux_client = self.dir.join("EclipticRD").join("client-pairings.json");
-        let linux_legacy = self.dir.join("EclipticRD").join("pairing-keys.json");
+        let linux_client = self.dir.join("MahoRD").join("client-pairings.json");
+        let linux_legacy = self.dir.join("MahoRD").join("pairing-keys.json");
         let mac_client = self
             .dir
             .join("Library")
             .join("Application Support")
-            .join("EclipticRD")
+            .join("MahoRD")
             .join("client-pairings.json");
         let mac_legacy = self
             .dir
             .join("Library")
             .join("Application Support")
-            .join("EclipticRD")
+            .join("MahoRD")
             .join("pairing-keys.json");
 
         let _ = fs::write(&linux_client, &json);
@@ -369,10 +369,10 @@ impl CancellableServer {
                                 .get_ref()
                                 .set_read_timeout(Some(Duration::from_millis(500)));
                             if let Ok(frame) = tls_stream.read_frame() {
-                                if frame.len() >= erd_proto::PacketHeader::SIZE {
+                                if frame.len() >= maho_proto::PacketHeader::SIZE {
                                     let _ = tls_stream.write_frame(&make_packet(
-                                        erd_proto::PacketType::HandshakeAck,
-                                        &frame[erd_proto::PacketHeader::SIZE..],
+                                        maho_proto::PacketType::HandshakeAck,
+                                        &frame[maho_proto::PacketHeader::SIZE..],
                                     ));
                                 }
                             }

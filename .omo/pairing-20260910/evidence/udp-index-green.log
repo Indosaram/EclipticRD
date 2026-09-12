@@ -1,12 +1,12 @@
 status: completed exit_code: 0
-   Compiling erd-proto v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-proto)
-   Compiling erd-render v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-render)
-   Compiling erd-net v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-net)
-   Compiling erd-decode v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-decode)
-   Compiling erd-app v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-app)
-   Compiling erd-host v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-host)
+   Compiling maho-proto v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-proto)
+   Compiling maho-render v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-render)
+   Compiling maho-net v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-net)
+   Compiling maho-decode v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-decode)
+   Compiling maho-app v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-app)
+   Compiling maho-host v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-host)
     Finished `test` profile [unoptimized + debuginfo] target(s) in 9.51s
-     Running unittests src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_app-69c02d64751524b9)
+     Running unittests src/lib.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/maho_app-69c02d64751524b9)
 
 running 125 tests
 test agent_input::tests::action_budget_rejects_click_expansion ... ok
@@ -31,7 +31,7 @@ test agent_input::tests::tracker_records_and_releases_all ... ok
 test agent_input::tests::types_multilingual_text_with_unicode_char_events ... ok
 test agent_input::tests::encodes_nv12_screenshot_to_valid_png_and_jpeg ... ok
 test agent_server::tests::health_endpoint_requires_no_auth ... ok
-test agent_server::tests::authorized_request_with_x_erd_token_returns_200 ... ok
+test agent_server::tests::authorized_request_with_x_maho_token_returns_200 ... ok
 test agent_server::tests::disconnect_release_failure_never_reports_success ... ok
 test agent_server::tests::disconnect_answers_then_stops_worker_listener_and_backend_session ... ok
 test agent_server::tests::disconnect_on_unsupported_backend_refuses_without_stopping ... ok
@@ -137,7 +137,7 @@ test session::tcp_write_tests::runtime_pressure_drains_ordered_controls_input_an
 
 test result: ok. 125 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.57s
 
-     Running unittests src/bin/erd_client.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_client-5fc8e45c292a244f)
+     Running unittests src/bin/maho_client.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/maho_client-5fc8e45c292a244f)
 
 running 16 tests
 test continuity_tests::frame_ids_wrap_without_false_recovery ... ok
@@ -159,7 +159,7 @@ test pipeline_tests::agent_runtime_returns_timeout_before_blocked_backend_is_rel
 
 test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.00s
 
-     Running tests/agent_control_e2e.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/agent_control_e2e-93b84ab6fa3e8e12)
+     Running tests/agent_control_e2e.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/agent_control_e2e-93b84ab6fa3e8e12)
 
 running 3 tests
 test e2e_coordinate_normalization_across_resolutions ... ok
@@ -168,7 +168,7 @@ test e2e_agent_http_and_mcp_servers_integration ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/cli_mcp_contract.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/cli_mcp_contract-47f721f09816202a)
+     Running tests/cli_mcp_contract.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/cli_mcp_contract-47f721f09816202a)
 
 running 5 tests
 test corrupt_store_keeps_stdout_protocol_only ... ok
@@ -179,7 +179,7 @@ test occupied_http_port_exits_without_a_default_deadline ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
-     Running tests/cli_receiver_telemetry.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/cli_receiver_telemetry-803fbfd9463accd8)
+     Running tests/cli_receiver_telemetry.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/cli_receiver_telemetry-803fbfd9463accd8)
 
 running 3 tests
 test actual_executable_exports_receiver_on_media_error_and_closes_transport ... ok
@@ -188,7 +188,7 @@ test actual_executable_exports_authenticated_receiver_and_legacy_decode_statisti
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
 
-     Running tests/client_copy_cost.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/client_copy_cost-20efa0e7273088b9)
+     Running tests/client_copy_cost.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/client_copy_cost-20efa0e7273088b9)
 
 running 3 tests
 test exact_statistics_when_using_receive_to_decode_end_boundary ... ok
@@ -210,8 +210,8 @@ test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 
 running 8 tests
-     Running tests/core_semantics.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/core_semantics-0dbca497f219176f)
-     Running tests/media_reassembly.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/media_reassembly-73dc39a482a95db0)
+     Running tests/core_semantics.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/core_semantics-0dbca497f219176f)
+     Running tests/media_reassembly.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/media_reassembly-73dc39a482a95db0)
 test cursor_updates_are_clamped_for_overlay_use ... ok
 test clear_discards_orphans_and_preserves_header_first_recovery ... ok
 test later_orphan_chunks_do_not_refresh_expiry ... ok
@@ -225,7 +225,7 @@ test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 
 running 5 tests
-     Running tests/receiver_telemetry.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/receiver_telemetry-7b882ef4b400aa50)
+     Running tests/receiver_telemetry.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/receiver_telemetry-7b882ef4b400aa50)
 test receiver_trace_attributes_authenticated_and_rejected_ingress ... ok
 test mixed_udp_kinds_share_packet_inference_but_tcp_stats_and_invalid_auth_do_not ... ok
 test authenticated_tls_udp_ingress_records_stats_and_assembly_without_changing_ping ... ok
@@ -237,7 +237,7 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 9 tests
 test pre_ready_input_is_refused ... ok
-     Running tests/session_mock.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/session_mock-407d2d580ca3ca52)
+     Running tests/session_mock.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/session_mock-407d2d580ca3ca52)
 test mock_server_stream_config_negotiation_round_trip ... ok
 test udp_client_sends_authenticated_registration_and_preserves_nonce ... ok
 test udp_client_rejects_host_missing_authenticated_registration_capability ... ok
@@ -249,7 +249,7 @@ test handshake_ack_timeout_is_reported ... ok
 
 test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.20s
 
-     Running unittests src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_host-835efa225caa25a5)
+     Running unittests src/lib.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/maho_host-835efa225caa25a5)
 
 running 93 tests
 test audio_linux::tests::empty_audio_does_not_create_invalid_zero_count_fragment ... ok
@@ -392,13 +392,13 @@ test session::tests::test_bootstrap_normal_b_and_paired_a_work ... ok
 
 test result: ok. 93 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.14s
 
-     Running unittests src/bin/captest.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/captest-ad70a6135ee31c68)
+     Running unittests src/bin/captest.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/captest-ad70a6135ee31c68)
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running unittests src/main.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_host-49e839d9857884ff)
+     Running unittests src/main.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/maho_host-49e839d9857884ff)
 
 running 5 tests
 test tests::test_pin_default_selects_injected_generator_branch ... ok
@@ -411,7 +411,7 @@ test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 
 running 6 tests
-     Running tests/linux_audio_selection.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/linux_audio_selection-928f6e4256e60948)
+     Running tests/linux_audio_selection.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/linux_audio_selection-928f6e4256e60948)
 
 running 1 test
 
@@ -457,7 +457,7 @@ test audio_selection_pulse_default ... ok
 
 test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.05s
 
-     Running tests/pairing_isolation.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/pairing_isolation-09d8e662825c3aa2)
+     Running tests/pairing_isolation.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/pairing_isolation-09d8e662825c3aa2)
 
 running 2 tests
 
@@ -477,7 +477,7 @@ test test_outbound_client_pairing_rejected_as_host_authorization ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
 
-     Running unittests src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_net-cd1e93684e852b06)
+     Running unittests src/lib.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/maho_net-cd1e93684e852b06)
 
 running 46 tests
 test signaling::tests::candidate_json_uses_wire_property_names ... ok
@@ -537,8 +537,8 @@ test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 18 tests
 test parse_service_metadata_accepts_publicly_numbered_ethernet_ip ... ok
-     Running unittests src/bin/erd_discover.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_discover-3e8b8f9de2e10006)
-     Running tests/discovery_metadata.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/discovery_metadata-ff5953ec6a109d9a)
+     Running unittests src/bin/maho_discover.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/maho_discover-3e8b8f9de2e10006)
+     Running tests/discovery_metadata.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/discovery_metadata-ff5953ec6a109d9a)
 test parse_service_metadata_accepts_usable_ipv6_when_ipv4_absent ... ok
 test parse_service_metadata_rejects_empty_addresses ... ok
 test parse_service_metadata_rejects_invalid_fullname ... ok
@@ -565,7 +565,7 @@ test control::tests::control_message_input_ack_roundtrip ... ok
 test control::tests::input_ack_message_roundtrip ... ok
 test control::tests::input_ack_message_with_error ... ok
 test input::tests::encodes_and_decodes_unicode_char_event ... ok
-     Running unittests src/lib.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/erd_proto-464c920fc27a990d)
+     Running unittests src/lib.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/maho_proto-464c920fc27a990d)
 test framing::tests::test_coalesced_burst_without_tail_zero_compactions ... ok
 test framing::tests::test_burst_1024_coalesced_frames_plus_partial_tail_compaction_limit ... ok
 
@@ -582,8 +582,8 @@ test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; fini
 
 running 48 tests
 test audio_fragment_rejects_invalid_index_count_and_data_length ... ok
-     Running tests/framing_burst.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/framing_burst-a0822a701836ba3a)
-     Running tests/protocol_v3.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/protocol_v3-26e531d5b3f6bd07)
+     Running tests/framing_burst.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/framing_burst-a0822a701836ba3a)
+     Running tests/protocol_v3.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/protocol_v3-26e531d5b3f6bd07)
 test capabilities_color_444_round_trip ... ok
 test capabilities_authenticated_udp_registration_round_trip ... ok
 test clipboard_update_rejects_more_than_four_kib_utf8 ... ok
@@ -644,38 +644,38 @@ test round_trip_preserves_zero_maximum_and_unordered_timestamps ... ok
 
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running tests/timestamp_stats.rs (/home/indo/projects/erd-pairing-20260910/clients/rust/target/debug/deps/timestamp_stats-3eb1e692e9a8b648)
-   Doc-tests erd_app
+     Running tests/timestamp_stats.rs (/home/indo/projects/maho-pairing-20260910/clients/rust/target/debug/deps/timestamp_stats-3eb1e692e9a8b648)
+   Doc-tests maho_app
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests erd_host
+   Doc-tests maho_host
 
 running 3 tests
-test erd-host/src/session.rs - session (line 59) ... ok
-test erd-host/src/session.rs - session::TimestampStats (line 59) ... ok
-test erd-host/src/session.rs - session::TIMESTAMP_STATS_MAGIC (line 59) ... ok
+test maho-host/src/session.rs - session (line 59) ... ok
+test maho-host/src/session.rs - session::TimestampStats (line 59) ... ok
+test maho-host/src/session.rs - session::TIMESTAMP_STATS_MAGIC (line 59) ... ok
 
 test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.26s
 
-   Doc-tests erd_net
+   Doc-tests maho_net
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-   Doc-tests erd_proto
+   Doc-tests maho_proto
 
 running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-    Checking erd-proto v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-proto)
-    Checking erd-render v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-render)
-    Checking erd-net v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-net)
-    Checking erd-decode v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-decode)
-    Checking erd-host v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-host)
-    Checking erd-app v0.1.0 (/home/indo/projects/erd-pairing-20260910/.omo/r3-index-check/clients/rust/erd-app)
+    Checking maho-proto v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-proto)
+    Checking maho-render v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-render)
+    Checking maho-net v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-net)
+    Checking maho-decode v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-decode)
+    Checking maho-host v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-host)
+    Checking maho-app v0.1.0 (/home/indo/projects/maho-pairing-20260910/.omo/r3-index-check/clients/rust/maho-app)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.84s

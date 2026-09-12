@@ -12,12 +12,12 @@
 ## 현재 결과
 
 Gemini 3.8 Flash에 실제 iOS 구현을 위임하여 `clients/rust/ios-shell`
-(`erd-ios`, `com.eclipticrd.ios`)을 추가했다. 실제 iPhone용 ARM64 앱 빌드,
+(`maho-ios`, `com.projectmaho.mahord`)을 추가했다. 실제 iPhone용 ARM64 앱 빌드,
 개발 서명, IPA 생성이 완료됐다. **실기기 설치·접속 검증은 아직 완료되지 않았다.**
 
 생성된 IPA:
 
-`clients/rust/ios-shell/gen/apple/build/arm64/EclipticRD.ipa`
+`clients/rust/ios-shell/gen/apple/build/arm64/MahoRD.ipa`
 
 생성 앱은 `iphoneos` 대상이다. 에뮬레이터나 시뮬레이터를 실행하거나 그
 타깃으로 테스트하지 않았다. 사용자 승인에 따라 iOS 타깃 컴파일·빌드만
@@ -47,7 +47,7 @@ Mac/Xcode에서 수행했고, 공통 Rust/JS 테스트는 Omarchy에서 수행�
 | 기존 iOS 교차 컴파일 장애 | FFmpeg pkg-config 교차 컴파일 오류 재현 |
 | VideoToolbox 단독 iOS 타깃 검사 | 종료 코드 0, 마지막 검사 경고 0 |
 | iOS 앱 라이브러리/테스트 타깃 검사 | Flash 실행 결과 둘 다 종료 코드 0, 경고 0 |
-| Omarchy 공통 Rust 회귀 | `erd-app`, `erd-decode`, `erd-mobile`: 199개 통과 |
+| Omarchy 공통 Rust 회귀 | `maho-app`, `maho-decode`, `maho-mobile`: 199개 통과 |
 | Omarchy UI 회귀 | 수명주기·입력 큐 실패 수정 후 29개 통과 |
 | iPhone ARM64 전체 빌드 | `BUILD SUCCEEDED`, 최종 명령 종료 코드 0 |
 | 앱 코드 서명 확인 | `codesign --verify --deep --strict`: 종료 코드 0 |

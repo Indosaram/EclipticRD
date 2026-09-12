@@ -1,3 +1,3 @@
 fn main() {
-    erd_ios_lib::run();
+    maho_ios_lib::run();
 }

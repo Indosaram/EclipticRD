@@ -1,5 +1,5 @@
 [package]
-name = "erd-pairing-qa-host"
+name = "maho-pairing-qa-host"
 version = "0.0.0"
 edition = "2021"
 publish = false
@@ -7,4 +7,4 @@ publish = false
 [workspace]
 
 [dependencies]
-erd-host = { path = "../../../../clients/rust/erd-host" }
+maho-host = { path = "../../../../clients/rust/maho-host" }

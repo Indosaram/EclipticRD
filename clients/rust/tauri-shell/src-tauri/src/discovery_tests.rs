@@ -62,8 +62,8 @@ fn null_peer_map_has_no_hosts() {
     );
 }
 
-fn record(id: &str, name: &str) -> erd_app::PairingRecord {
-    erd_app::PairingRecord {
+fn record(id: &str, name: &str) -> maho_app::PairingRecord {
+    maho_app::PairingRecord {
         id: id.into(),
         name: name.into(),
         key: vec![0; 32],
@@ -148,8 +148,8 @@ fn non_host_mobile_platforms_are_excluded_from_host_list() {
     assert_eq!(hosts[0].ip, "100.91.254.71");
 }
 
-fn lan_host(id: &str, name: &str, ip: &str, os: &str, tcp_port: u16, udp_port: u16) -> erd_net::discovery::DiscoveredHost {
-    erd_net::discovery::DiscoveredHost {
+fn lan_host(id: &str, name: &str, ip: &str, os: &str, tcp_port: u16, udp_port: u16) -> maho_net::discovery::DiscoveredHost {
+    maho_net::discovery::DiscoveredHost {
         id: id.into(),
         name: name.into(),
         ip: ip.into(),
@@ -161,11 +161,11 @@ fn lan_host(id: &str, name: &str, ip: &str, os: &str, tcp_port: u16, udp_port: u
 
 #[test]
 fn lan_survives_missing_or_failed_tailscale() {
-    let lan = Ok(vec![lan_host("host1._erd._tcp.local.", "host1", "192.168.1.50", "linux", 19730, 19731)]);
+    let lan = Ok(vec![lan_host("host1._maho-rd._tcp.local.", "host1", "192.168.1.50", "linux", 19730, 19731)]);
     let tailscale = Err("Tailscale status execution failed: not found".to_string());
     let merged = super::commands::merge_discovery_results(lan, tailscale, &[]).unwrap();
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].id, "host1._erd._tcp.local.");
+    assert_eq!(merged[0].id, "host1._maho-rd._tcp.local.");
     assert_eq!(merged[0].ip, "192.168.1.50");
     assert!(merged[0].online);
     assert_eq!(merged[0].tcp_port, Some(19730));
@@ -174,7 +174,7 @@ fn lan_survives_missing_or_failed_tailscale() {
 
 #[test]
 fn source_dedup_prioritizes_lan_over_tailscale() {
-    let lan = Ok(vec![lan_host("desk._erd._tcp.local.", "desk-lan", "100.91.254.71", "linux", 19740, 19741)]);
+    let lan = Ok(vec![lan_host("desk._maho-rd._tcp.local.", "desk-lan", "100.91.254.71", "linux", 19740, 19741)]);
     let tailscale = Ok(vec![super::HostItem {
         id: "100.91.254.71".into(),
         name: "desk-ts".into(),
@@ -188,7 +188,7 @@ fn source_dedup_prioritizes_lan_over_tailscale() {
     }]);
     let merged = super::commands::merge_discovery_results(lan, tailscale, &[]).unwrap();
     assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].id, "desk._erd._tcp.local.");
+    assert_eq!(merged[0].id, "desk._maho-rd._tcp.local.");
     assert_eq!(merged[0].name, "desk-lan");
     assert!(merged[0].online);
     assert_eq!(merged[0].tcp_port, Some(19740));
@@ -198,7 +198,7 @@ fn source_dedup_prioritizes_lan_over_tailscale() {
 #[test]
 fn source_dedup_keeps_identical_name_distinct_endpoints_and_does_not_inherit_pairing() {
     let lan = Ok(vec![lan_host(
-        "desktop-lan._erd._tcp.local.",
+        "desktop-lan._maho-rd._tcp.local.",
         "DESKTOP-1LAPJMP",
         "192.168.0.60",
         "windows",
@@ -233,7 +233,7 @@ fn source_dedup_keeps_identical_name_distinct_endpoints_and_does_not_inherit_pai
         !lan_card.paired,
         "LAN card must remain unpaired; must not inherit pairing trust from Tailscale"
     );
-    assert_eq!(lan_card.id, "desktop-lan._erd._tcp.local.");
+    assert_eq!(lan_card.id, "desktop-lan._maho-rd._tcp.local.");
     assert_eq!(lan_card.tcp_port, Some(19730));
     assert_eq!(lan_card.udp_port, Some(19731));
 
@@ -256,7 +256,7 @@ fn empty_successful_lan_with_failed_tailscale_yields_empty_success() {
 
 #[test]
 fn both_sources_failing_yields_an_error() {
-    let lan = Err(erd_net::discovery::DiscoveryError::Backend("LAN daemon unavailable".into()));
+    let lan = Err(maho_net::discovery::DiscoveryError::Backend("LAN daemon unavailable".into()));
     let tailscale = Err("Tailscale status execution failed: not found".to_string());
     let result = super::commands::merge_discovery_results(lan, tailscale, &[]);
     assert!(result.is_err());
@@ -265,12 +265,12 @@ fn both_sources_failing_yields_an_error() {
 #[test]
 fn lan_host_with_matching_stored_name_remains_unpaired() {
     let records = [record("auth-pair-key-123", "indo")];
-    let lan = Ok(vec![lan_host("indo._erd._tcp.local.", "indo", "192.168.1.150", "linux", 19730, 19731)]);
+    let lan = Ok(vec![lan_host("indo._maho-rd._tcp.local.", "indo", "192.168.1.150", "linux", 19730, 19731)]);
     let tailscale = Ok(vec![]);
     let merged = super::commands::merge_discovery_results(lan, tailscale, &records).unwrap();
     assert_eq!(merged.len(), 1);
     assert!(!merged[0].paired);
-    assert_eq!(merged[0].id, "indo._erd._tcp.local.");
+    assert_eq!(merged[0].id, "indo._maho-rd._tcp.local.");
     assert_ne!(merged[0].id, "auth-pair-key-123");
 }
 

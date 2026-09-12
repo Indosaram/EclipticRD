@@ -1,7 +1,7 @@
 // allow: SIZE_OK — iOS shell unit and framing test suite
-use erd_decode::Nv12Frame;
-use erd_mobile::{TouchGestureHandler, TouchMode, TouchPhase, TouchPoint, ViewportState};
-use erd_proto::{InputEventType, Modifiers};
+use maho_decode::Nv12Frame;
+use maho_mobile::{TouchGestureHandler, TouchMode, TouchPhase, TouchPoint, ViewportState};
+use maho_proto::{InputEventType, Modifiers};
 use crate::frame::repack_nv12_frame;
 use crate::state::{AppState, SessionStats};
 
@@ -278,8 +278,8 @@ use crate::state::{AppState, SessionStats};
     fn build_session_config_normalizes_ipv6_brackets_and_preserves_scope() {
         let c1 = crate::state::build_session_config("192.168.1.50", None, None, "iOS").unwrap();
         assert_eq!(c1.host, "192.168.1.50");
-        assert_eq!(c1.tcp_port, erd_app::DEFAULT_TCP_PORT);
-        assert_eq!(c1.udp_port, erd_app::DEFAULT_UDP_PORT);
+        assert_eq!(c1.tcp_port, maho_app::DEFAULT_TCP_PORT);
+        assert_eq!(c1.udp_port, maho_app::DEFAULT_UDP_PORT);
         assert_eq!(c1.tcp_port, 19730);
         assert_eq!(c1.udp_port, 19731);
 
@@ -311,9 +311,9 @@ use crate::state::{AppState, SessionStats};
     fn pairing_lookup_by_host_address_never_infers_pairing_from_advertised_hostname() {
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join("pairing.json");
-        let store = erd_app::PairingStore::new(&store_path);
+        let store = maho_app::PairingStore::new(&store_path);
 
-        let paired_record = erd_app::PairingRecord {
+        let paired_record = maho_app::PairingRecord {
             id: "192.168.1.50".to_string(),
             name: "Workstation".to_string(),
             key: vec![0x42; 32],
@@ -342,8 +342,8 @@ use crate::state::{AppState, SessionStats};
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.code, erd_app::IpcErrorCode::PairingRequired);
-        assert_eq!(err.stage, erd_app::IpcErrorStage::Preauth);
+        assert_eq!(err.code, maho_app::IpcErrorCode::PairingRequired);
+        assert_eq!(err.stage, maho_app::IpcErrorStage::Preauth);
         assert!(!err.retryable);
     }
 
@@ -361,8 +361,8 @@ use crate::state::{AppState, SessionStats};
             .await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert_eq!(err.code, erd_app::IpcErrorCode::PairingRequired);
-        assert_eq!(err.stage, erd_app::IpcErrorStage::Preauth);
+        assert_eq!(err.code, maho_app::IpcErrorCode::PairingRequired);
+        assert_eq!(err.stage, maho_app::IpcErrorStage::Preauth);
         assert!(err.message.contains("NONEXISTENT-PAIRING-ID"));
     }
 
@@ -370,15 +370,15 @@ use crate::state::{AppState, SessionStats};
     fn test_connect_exact_id_loads_correct_stored_pairing() {
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join("client-pairings.json");
-        let store = erd_app::PairingStore::new(&store_path);
+        let store = maho_app::PairingStore::new(&store_path);
 
-        let record_a = erd_app::PairingRecord::new(
+        let record_a = maho_app::PairingRecord::new(
             "ID-TARGET-HOST-A",
             "SharedHostName",
             vec![0xAA; 32],
             1000,
         );
-        let record_b = erd_app::PairingRecord::new(
+        let record_b = maho_app::PairingRecord::new(
             "ID-TARGET-HOST-B",
             "SharedHostName",
             vec![0xBB; 32],
@@ -403,25 +403,25 @@ use crate::state::{AppState, SessionStats};
     fn test_list_pairings_excludes_secret_key_bytes() {
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join("client-pairings.json");
-        let store = erd_app::PairingStore::new(&store_path);
+        let store = maho_app::PairingStore::new(&store_path);
 
         let mut secret_key = vec![0x42; 32];
         secret_key[0..8].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22, 0x33, 0x44]);
-        let record = erd_app::PairingRecord::new(
+        let record = maho_app::PairingRecord::new(
             "PAIRING-EXCLUDE-KEY-TEST",
             "TestSecureHost",
             secret_key,
             1725900000000,
         )
         .with_endpoints(
-            Some(erd_app::PairingEndpoint::new("100.91.254.71", 19730, 19731)),
+            Some(maho_app::PairingEndpoint::new("100.91.254.71", 19730, 19731)),
             Vec::new(),
         );
         store.save(record).unwrap();
 
         let records = store.load_all().unwrap();
-        let summaries: Vec<erd_app::PairingSummary> =
-            records.into_iter().map(erd_app::PairingSummary::from).collect();
+        let summaries: Vec<maho_app::PairingSummary> =
+            records.into_iter().map(maho_app::PairingSummary::from).collect();
 
         assert_eq!(summaries.len(), 1);
         let summary_json = serde_json::to_string(&summaries[0]).unwrap();
@@ -439,10 +439,10 @@ use crate::state::{AppState, SessionStats};
     fn test_remember_endpoint_survives_store_reload() {
         let tmp = tempfile::tempdir().unwrap();
         let store_path = tmp.path().join("client-pairings.json");
-        let store = erd_app::PairingStore::new(&store_path);
+        let store = maho_app::PairingStore::new(&store_path);
 
         let key = vec![0x55; 32];
-        let record = erd_app::PairingRecord::new(
+        let record = maho_app::PairingRecord::new(
             "ID-PERSISTENCE-TEST",
             "PersistHost",
             key.clone(),
@@ -450,19 +450,19 @@ use crate::state::{AppState, SessionStats};
         );
         store.save(record).unwrap();
 
-        let ep1 = erd_app::PairingEndpoint::new("192.168.1.50", 19730, 19731);
+        let ep1 = maho_app::PairingEndpoint::new("192.168.1.50", 19730, 19731);
         let ok = store.remember_endpoint("ID-PERSISTENCE-TEST", &key, ep1.clone()).unwrap();
         assert!(ok);
 
-        let store2 = erd_app::PairingStore::new(&store_path);
+        let store2 = maho_app::PairingStore::new(&store_path);
         let reloaded = store2.load("ID-PERSISTENCE-TEST").unwrap().unwrap();
         assert_eq!(reloaded.last_endpoint, Some(ep1));
 
-        let ep2 = erd_app::PairingEndpoint::new("100.91.254.71", 19730, 19731);
+        let ep2 = maho_app::PairingEndpoint::new("100.91.254.71", 19730, 19731);
         let ok2 = store2.remember_endpoint("ID-PERSISTENCE-TEST", &key, ep2.clone()).unwrap();
         assert!(ok2);
 
-        let store3 = erd_app::PairingStore::new(&store_path);
+        let store3 = maho_app::PairingStore::new(&store_path);
         let reloaded2 = store3.load("ID-PERSISTENCE-TEST").unwrap().unwrap();
         assert_eq!(reloaded2.last_endpoint, Some(ep2));
         assert_eq!(reloaded2.endpoint_aliases.len(), 1);
@@ -475,7 +475,7 @@ use crate::state::{AppState, SessionStats};
         let docs_dir = tmp.path().join("Documents");
         std::fs::create_dir_all(&docs_dir).unwrap();
 
-        let qa_file = docs_dir.join("erd-device-qa.json");
+        let qa_file = docs_dir.join("maho-device-qa.json");
         let unique_id = "QA-PROVISIONED-UNIQUE-UUID";
         let qa_json = serde_json::json!({
             "host": "192.168.1.188",
@@ -516,7 +516,7 @@ use crate::state::{AppState, SessionStats};
     fn test_inject_audio_event_seam_and_error_handling() {
         let app_state = AppState::new();
         // Without active sender, injecting returns error:
-        let res = app_state.inject_audio_event_for_test(erd_render::AudioOutputEvent::Error("test".into()));
+        let res = app_state.inject_audio_event_for_test(maho_render::AudioOutputEvent::Error("test".into()));
         assert!(res.is_err());
 
         // Set up active sender channel:
@@ -526,12 +526,12 @@ use crate::state::{AppState, SessionStats};
             *inner.audio_events_sender.lock().unwrap() = Some(tx);
         }
 
-        let send_res = app_state.inject_audio_event_for_test(erd_render::AudioOutputEvent::Error("real-audio-failure".into()));
+        let send_res = app_state.inject_audio_event_for_test(maho_render::AudioOutputEvent::Error("real-audio-failure".into()));
         assert!(send_res.is_ok());
 
         let received = rx.recv_timeout(std::time::Duration::from_millis(500)).unwrap();
         match received {
-            erd_render::AudioOutputEvent::Error(msg) => assert_eq!(msg, "real-audio-failure"),
+            maho_render::AudioOutputEvent::Error(msg) => assert_eq!(msg, "real-audio-failure"),
             _ => panic!("Expected Error event"),
         }
     }

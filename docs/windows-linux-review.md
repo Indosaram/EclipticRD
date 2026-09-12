@@ -1,7 +1,7 @@
-# erd-host Windows/Linux 코드 리뷰 및 개선 방안
+# maho-host Windows/Linux 코드 리뷰 및 개선 방안
 
 **리뷰 일자:** 2026-09-04
-**대상:** `clients/rust/erd-host/src/` 내 Windows·Linux 플랫폼 모듈
+**대상:** `clients/rust/maho-host/src/` 내 Windows·Linux 플랫폼 모듈
 **범위:** `capture_windows.rs`, `capture_linux.rs`, `encode_windows.rs`, `encode_linux.rs`, `inject_windows.rs`, `inject_linux.rs`, `clipboard_windows.rs`, `clipboard_linux.rs`, `audio_linux.rs`, `windows_logic.rs`, `session.rs` 플랫폼 분기
 
 ---
@@ -192,7 +192,7 @@
 - 클립보드 히스토리/클우드 제외 포맷을 등록해 원격 쓰기를 로컬 히스토리에서 제외한다.
 
 **개선 방안:**
-- `ClipboardEchoSuppressor`를 `windows_logic.rs`에서 `erd-proto` 또는 공통 모듈로 이동해 Linux와 공유한다.
+- `ClipboardEchoSuppressor`를 `windows_logic.rs`에서 `maho-proto` 또는 공통 모듈로 이동해 Linux와 공유한다.
 
 ### 7.3 Linux (`clipboard_linux.rs`)
 - `wl-copy`/`wl-paste` 또는 `xclip`을 외부 프로세스로 실행한다. 폴타 로직이 명확하다.
@@ -270,10 +270,10 @@
 
 > **정정 (2026-09-12):** 아래 원문의 진단은 코드와 대조한 결과 틀렸다. 실제 상태는 다음과 같다.
 >
-> `erd-host/src/session.rs`의 `bgra_to_nv12`는 `y = (77R + 150G + 29B) >> 8`, `u = 128 + ((-43R - 85G + 128B) >> 8)`,
+> `maho-host/src/session.rs`의 `bgra_to_nv12`는 `y = (77R + 150G + 29B) >> 8`, `u = 128 + ((-43R - 85G + 128B) >> 8)`,
 > `v = 128 + ((128R - 107G - 21B) >> 8)`를 사용한다. 256으로 나누면 luma 0.301/0.586/0.113,
 > chroma -0.168/-0.332/0.500 및 0.500/-0.418/-0.082이며, **luma에 +16 오프셋이 없다**. 즉 limited-range가 아니라
-> **BT.601 full-range(JPEG range, Y 0..255)** 이다. `erd-host/src/encode_vt.rs`가
+> **BT.601 full-range(JPEG range, Y 0..255)** 이다. `maho-host/src/encode_vt.rs`가
 > `set_color_range(ffmpeg::color::Range::JPEG)`를 호출하는 것도 이와 일치한다.
 >
 > 클라이언트는 BT.709로 렌더링하지 않는다. `tauri-shell`의 셰이더 행렬은

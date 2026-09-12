@@ -6,10 +6,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use erd_app::{PairingRecord, PairingStore};
-use erd_ios_lib::{AppState, AudioOutputEvent, ConnectionState, IpcErrorCode, WorkerKind};
-use erd_net::{PskIdentity, TlsPskServer};
-use erd_proto::{PacketHeader, PacketType, WireCodec};
+use maho_app::{PairingRecord, PairingStore};
+use maho_ios_lib::{AppState, AudioOutputEvent, ConnectionState, IpcErrorCode, WorkerKind};
+use maho_net::{PskIdentity, TlsPskServer};
+use maho_proto::{PacketHeader, PacketType, WireCodec};
 
 fn make_packet(packet_type: PacketType, payload: &[u8]) -> Vec<u8> {
     let mut header = PacketHeader::new(packet_type, 0, 0, 0).to_bytes().to_vec();
@@ -610,7 +610,7 @@ async fn test_audio_init_failure_triggers_clean_rollback() {
 
     // If runner has no CPAL device (or on headless CI), connect fails and rolls back cleanly:
     if let Err(err) = connect_res {
-        assert_eq!(err.stage, erd_app::IpcErrorStage::Runtime);
+        assert_eq!(err.stage, maho_app::IpcErrorStage::Runtime);
         let stats = app_state.stats().expect("stats");
         assert!(matches!(stats.state.as_str(), "error" | "idle"));
     }

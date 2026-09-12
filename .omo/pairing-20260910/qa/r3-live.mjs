@@ -95,14 +95,14 @@ function send(socket, payload, port) {
 }
 
 async function scenario(adversarial) {
-  const directory = await mkdtemp(join(tmpdir(), 'erd-r3-qa-'));
+  const directory = await mkdtemp(join(tmpdir(), 'maho-r3-qa-'));
   const errors = [];
   const sockets = [];
   let host;
   let client;
   let result;
   try {
-    host = start('erd-pairing-qa-host', [join(directory, 'host.json')]);
+    host = start('maho-pairing-qa-host', [join(directory, 'host.json')]);
     const ports = await ready(host);
     let udp = ports.udp;
     let roguePackets = 0;
@@ -134,7 +134,7 @@ async function scenario(adversarial) {
         })().catch(error => errors.push(String(error)));
       });
     }
-    client = start('erd-client', [
+    client = start('maho-client', [
       '--host', '127.0.0.1', '--tcp-port', String(ports.tcp),
       '--udp-port', String(udp), '--pairing-id', 'qa-r3-registration',
       '--psk-hex', key, '--frames', '1', '--timeout-secs', '5',

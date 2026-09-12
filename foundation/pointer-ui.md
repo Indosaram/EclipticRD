@@ -235,7 +235,7 @@ The following wire payloads are emitted by the UI and must be decoded in `client
   "scroll_dy": 0.0
 }
 ```
-Rust mapping target: `erd_proto::InputEventType::MiddleMouseDown`.
+Rust mapping target: `maho_proto::InputEventType::MiddleMouseDown`.
 
 ### 2. `MiddleMouseUp` (Wire ID: 12)
 ```json
@@ -250,7 +250,7 @@ Rust mapping target: `erd_proto::InputEventType::MiddleMouseDown`.
   "scroll_dy": 0.0
 }
 ```
-Rust mapping target: `erd_proto::InputEventType::MiddleMouseUp`.
+Rust mapping target: `maho_proto::InputEventType::MiddleMouseUp`.
 
 ### 3. `RelativeMove` (Wire ID: 14)
 ```json
@@ -265,13 +265,13 @@ Rust mapping target: `erd_proto::InputEventType::MiddleMouseUp`.
   "scroll_dy": -16.0
 }
 ```
-Rust mapping target: `erd_proto::InputEventType::RelativeMove`.
-Note: Relative deltas are stored in `scroll_dx` (horizontal delta) and `scroll_dy` (vertical delta) per `erd-host` injection implementations on Linux (`inject_linux.rs:358`) and Windows (`inject_windows.rs:106`).
+Rust mapping target: `maho_proto::InputEventType::RelativeMove`.
+Note: Relative deltas are stored in `scroll_dx` (horizontal delta) and `scroll_dy` (vertical delta) per `maho-host` injection implementations on Linux (`inject_linux.rs:358`) and Windows (`inject_windows.rs:106`).
 
 ---
 
 ## 7. Out-of-Scope Discoveries for Lead Registration
 
 1. **Rust backend string parsing**: `convert_input_payload` in `tauri-shell/src-tauri/src/lib.rs` currently lacks branches for `"MiddleMouseDown"`, `"MiddleMouseUp"`, and `"RelativeMove"`. These will return `Unknown event type: ...` when received in native Tauri builds until `desktop-integration` connects them.
-2. **Mac host RelativeMove injection**: In `erd-host/src/inject_macos.rs:193`, `InputEventType::RelativeMove` currently returns `Ok(None)`. Relative pointer injection on macOS host daemon is a known platform limitation.
+2. **Mac host RelativeMove injection**: In `maho-host/src/inject_macos.rs:193`, `InputEventType::RelativeMove` currently returns `Ok(None)`. Relative pointer injection on macOS host daemon is a known platform limitation.
 3. **Duplicate `index.html` copy**: An identical duplicate exists at `clients/rust/tauri-shell/src-tauri/ui/index.html`. `tauri.conf.json` defines `"frontendDist": "../ui"`, so the authoritative copy is `clients/rust/tauri-shell/ui/index.html`.

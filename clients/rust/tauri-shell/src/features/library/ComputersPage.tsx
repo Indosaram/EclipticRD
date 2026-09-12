@@ -17,7 +17,7 @@ import {
   type HostItem,
   type PairingSummary,
   type HostStatus,
-  type ErdCommand,
+  type MahoCommand,
 } from "@/lib/ipc"
 import {
   createLibrary,
@@ -61,7 +61,7 @@ export function ComputersPage({
   const library: Library<LibraryHost> = useMemo(() => {
     return createLibrary<LibraryHost>({
       invoke: (cmd: string, ...args: unknown[]) =>
-        invokeCommand(cmd as ErdCommand, args[0] as Record<string, unknown> | undefined),
+        invokeCommand(cmd as MahoCommand, args[0] as Record<string, unknown> | undefined),
       storage: typeof window !== "undefined" ? window.localStorage : null,
       nativeAvailable: native,
     })
@@ -72,7 +72,7 @@ export function ComputersPage({
       propConnection ??
       createConnection({
         invoke: (cmd: string, args?: unknown) =>
-          invokeCommand(cmd as ErdCommand, args as Record<string, unknown> | undefined),
+          invokeCommand(cmd as MahoCommand, args as Record<string, unknown> | undefined),
         nativeAvailable: native,
         releaseInputs: async () => {
           try {

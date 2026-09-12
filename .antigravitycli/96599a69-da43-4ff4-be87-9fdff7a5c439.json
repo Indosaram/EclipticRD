@@ -1,1 +1,15 @@
-/Users/indo/.gemini/config/projects/96599a69-da43-4ff4-be87-9fdff7a5c439.json
+{
+  "id": "96599a69-da43-4ff4-be87-9fdff7a5c439",
+  "name": "/Users/indo/code/project/MahoRD",
+  "projectResources": {
+    "resources": [
+      {
+        "gitFolder": {
+          "folderUri": "file:///Users/indo/code/project/MahoRD",
+          "defaultBranch": "main",
+          "allowWrite": true
+        }
+      }
+    ]
+  }
+}

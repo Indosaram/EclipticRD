@@ -1,7 +1,7 @@
 status: completed exit_code: 0
 R3_LEAD_CLEANUP_VERIFIED
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.23s
-     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_app-69c02d64751524b9)
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_app-69c02d64751524b9)
 
 running 2 tests
 test session::cancellation_tests::udp_cancel_wakes_registered_receive ... ok
@@ -9,7 +9,7 @@ test session::cancellation_tests::client_session_udp_receive_reuses_buffer_acros
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 123 filtered out; finished in 0.01s
 
-     Running unittests src/bin/erd_client.rs (clients/rust/target/debug/deps/erd_client-5fc8e45c292a244f)
+     Running unittests src/bin/maho_client.rs (clients/rust/target/debug/deps/maho_client-5fc8e45c292a244f)
 
 running 0 tests
 
@@ -67,7 +67,7 @@ test udp_client_sends_authenticated_registration_and_preserves_nonce ... ok
 
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.01s
 
-     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_host-835efa225caa25a5)
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_host-835efa225caa25a5)
 
 running 4 tests
 test session::tests::test_udp_registration_rejects_prior_session_datagram ... ok
@@ -83,7 +83,7 @@ running 0 tests
 
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 
-     Running unittests src/main.rs (clients/rust/target/debug/deps/erd_host-49e839d9857884ff)
+     Running unittests src/main.rs (clients/rust/target/debug/deps/maho_host-49e839d9857884ff)
 
 running 0 tests
 
@@ -102,7 +102,7 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
 
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.08s
-     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_proto-5f387c95064025f6)
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_proto-5f387c95064025f6)
 
 running 0 tests
 
@@ -127,7 +127,7 @@ running 0 tests
 test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
 
     Finished `test` profile [unoptimized + debuginfo] target(s) in 0.11s
-     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_net-432e7ef324e21db6)
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_net-432e7ef324e21db6)
 
 running 22 tests
 test udp_gcm::tests::media_decode_rejects_invalid_audio_header_before_copy ... ok
@@ -155,7 +155,7 @@ test udp_gcm::tests::stale_datagram_outside_window_rejected ... ok
 
 test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.03s
 
-     Running unittests src/bin/erd_discover.rs (clients/rust/target/debug/deps/erd_discover-63c032c64ed6f050)
+     Running unittests src/bin/maho_discover.rs (clients/rust/target/debug/deps/maho_discover-63c032c64ed6f050)
 
 running 0 tests
 

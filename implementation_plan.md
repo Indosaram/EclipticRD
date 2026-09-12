@@ -1,6 +1,6 @@
-# /init-deep Implementation Plan (EclipticRD Rewrite)
+# /init-deep Implementation Plan (MahoRD Rewrite)
 
-This plan outlines the generation of a hierarchical knowledge base for the EclipticRD Rewrite project.
+This plan outlines the generation of a hierarchical knowledge base for the MahoRD Rewrite project.
 
 ## User Review Required
 
@@ -9,16 +9,16 @@ This plan outlines the generation of a hierarchical knowledge base for the Eclip
 
 ## Proposed Changes
 
-### [Root AGENTS.md](file:///Users/indo/code/project/EclipticRD/EclipticRD_Rewrite/AGENTS.md)
+### [Root AGENTS.md](file:///Users/indo/code/project/MahoRD/MahoRD_Rewrite/AGENTS.md)
 [NEW] Create a comprehensive overview of the remote desktop system, modules, and build instructions (XcodeGen).
 
-### [HostCore AGENTS.md](file:///Users/indo/code/project/EclipticRD/EclipticRD_Rewrite/Sources/HostCore/AGENTS.md)
+### [HostCore AGENTS.md](file:///Users/indo/code/project/MahoRD/MahoRD_Rewrite/Sources/HostCore/AGENTS.md)
 [NEW] Document host-side logic: screen capture, input handling, and system sessions.
 
-### [ClientCore AGENTS.md](file:///Users/indo/code/project/EclipticRD/EclipticRD_Rewrite/Sources/ClientCore/AGENTS.md)
+### [ClientCore AGENTS.md](file:///Users/indo/code/project/MahoRD/MahoRD_Rewrite/Sources/ClientCore/AGENTS.md)
 [NEW] Document client-side logic: rendering, network interpretation, and UI feedback.
 
-### [Shared AGENTS.md](file:///Users/indo/code/project/EclipticRD/EclipticRD_Rewrite/Sources/Shared/AGENTS.md)
+### [Shared AGENTS.md](file:///Users/indo/code/project/MahoRD/MahoRD_Rewrite/Sources/Shared/AGENTS.md)
 [NEW] Document common protocols, models, and network primitives.
 
 ## Verification Plan

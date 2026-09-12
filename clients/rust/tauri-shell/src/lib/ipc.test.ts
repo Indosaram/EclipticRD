@@ -1,6 +1,6 @@
 import { describe, expect, it, beforeEach, afterEach, mock } from "bun:test";
 import {
-  ERD_COMMANDS,
+  MAHO_COMMANDS,
   isNativeAvailable,
   invokeCommand,
   listHosts,
@@ -73,20 +73,20 @@ const DYNAMIC_7_COMMANDS = [
   "set_audio_device",
 ] as const;
 
-describe("ERD_COMMANDS registry", () => {
+describe("MAHO_COMMANDS registry", () => {
   it("has exact length of 22 commands", () => {
-    expect(ERD_COMMANDS.length).toBe(22);
+    expect(MAHO_COMMANDS.length).toBe(22);
   });
 
   it("contains all 22 authoritative backend commands", () => {
     for (const cmd of ALL_22_COMMANDS) {
-      expect(ERD_COMMANDS).toContain(cmd);
+      expect(MAHO_COMMANDS).toContain(cmd);
     }
   });
 
   it("contains all 7 dynamically invoked commands", () => {
     for (const cmd of DYNAMIC_7_COMMANDS) {
-      expect(ERD_COMMANDS).toContain(cmd);
+      expect(MAHO_COMMANDS).toContain(cmd);
     }
   });
 });

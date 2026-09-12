@@ -29,7 +29,7 @@ const FS_SOURCE_WEBGL2 = `#version 300 es
   uniform sampler2D u_yPlane;
   uniform sampler2D u_uvPlane;
   void main() {
-    // Full range: erd-host session.rs bgra_to_nv12 produces full-range BT.601 (JPEG) with no luma offset
+    // Full range: maho-host session.rs bgra_to_nv12 produces full-range BT.601 (JPEG) with no luma offset
     float y = texture(u_yPlane, v_texCoord).r;
     vec2 uv = texture(u_uvPlane, v_texCoord).rg - vec2(0.5, 0.5);
     float u = uv.r;
@@ -58,7 +58,7 @@ const FS_SOURCE_WEBGL1 = `
   uniform sampler2D u_yPlane;
   uniform sampler2D u_uvPlane;
   void main() {
-    // Full range: erd-host session.rs bgra_to_nv12 produces full-range BT.601 (JPEG) with no luma offset
+    // Full range: maho-host session.rs bgra_to_nv12 produces full-range BT.601 (JPEG) with no luma offset
     float y = texture2D(u_yPlane, v_texCoord).r;
     vec2 uv = texture2D(u_uvPlane, v_texCoord).ra - vec2(0.5, 0.5);
     float u = uv.r;

@@ -1,4 +1,4 @@
-# EclipticRD desktop design contract
+# MahoRD desktop design contract
 
 Status: implementation contract, not a claim that the redesign has shipped.
 Scope: the Tauri shell served from `ui/`; preserve Rust pairing, streaming,
@@ -12,7 +12,7 @@ input. This is a desktop operator's tool, often used beside a bright remote
 screen; charcoal chrome reduces competition with that screen. The signature is
 the continuity of computer identity from library card to compact session bar.
 No marketing hero, decorative performance dashboard, glowing gradients, or
-decorative card motion. EclipticRD retains its own name and simple E mark.
+decorative card motion. MahoRD retains its own name and simple E mark.
 
 Real references reviewed on 2026-09-05, via text rendering at `r.jina.ai` because
 direct requests to Parsec were challenged/403:
@@ -22,14 +22,14 @@ direct requests to Parsec were challenged/403:
   <https://support.parsec.app/hc/article_attachments/32381655249812> and describes
   accessing a computer from the client. Benchmark: computer-first navigation
   and obvious connection action. The article also distinguishes web and native
-  performance; do not transfer Parsec performance claims to EclipticRD.
+  performance; do not transfer Parsec performance claims to MahoRD.
 - [Parsec: Immersive Mode Setting](https://support.parsec.app/hc/en-us/articles/32361385571860-Immersive-Mode-Setting).
   Benchmark: explicit local versus remote input ownership and a way back to
-  local control. EclipticRD must not claim Parsec's immersive mode or hotkeys.
+  local control. MahoRD must not claim Parsec's immersive mode or hotkeys.
 
 The reference documents were read; their linked screenshot pixels were not
 inspected in this foundation pass. Exact geometry/colors below are authored
-EclipticRD decisions, not sampled Parsec values or a literal clone. Search,
+MahoRD decisions, not sampled Parsec values or a literal clone. Search,
 favorites, restrained red-orange, and session-overlay coherence are explicit
 project requirements, not claims established by those reference texts.
 
@@ -50,11 +50,11 @@ without an existing executable data/action source.
 | Surface/data | Actual source and honest presentation |
 | --- | --- |
 | Computer library | `list_hosts`: `id`, `name`, `ip`, `os`, `online`, `paired`, nullable `last_seen`. Show returned records only. |
-| Availability | `online` includes Tailscale presence and always-true fallback testbeds. Use “Available” / “Offline” as discovery hints, with nearby library helper “Availability is a discovery hint, not an ERD readiness check. Default testbeds may appear available without a probe.” Never “Ready”, “Reachable”, or a service-health guarantee. |
+| Availability | `online` includes Tailscale presence and always-true fallback testbeds. Use “Available” / “Offline” as discovery hints, with nearby library helper “Availability is a discovery hint, not an MahoRD readiness check. Default testbeds may appear available without a probe.” Never “Ready”, “Reachable”, or a service-health guarantee. |
 | Pairing | `paired` is store matching, not active authentication. Use “Saved pairing” or “PIN may be needed”. Do not expose keys or pairing IDs. |
 | Search | Local case-insensitive substring match on name, IP, OS. No network request and no search of secret PINs. |
-| Available filter (C1) | Required alongside Favorites. Locally include only records with `online === true`; compose with search and Favorites. Preserve the nearby discovery-only helper: this is not an ERD readiness filter. All clears both filters. |
-| Favorites | Local preference, not cloud state. Store a versioned list of normalized IP keys in localStorage (`eclipticrd.favorites.v1`); IP is used because current `id` can change when paired. Never store PINs. Explain persistence errors; keep session-only choice if storage is unavailable. |
+| Available filter (C1) | Required alongside Favorites. Locally include only records with `online === true`; compose with search and Favorites. Preserve the nearby discovery-only helper: this is not an MahoRD readiness filter. All clears both filters. |
+| Favorites | Local preference, not cloud state. Store a versioned list of normalized IP keys in localStorage (`mahord.favorites.v1`); IP is used because current `id` can change when paired. Never store PINs. Explain persistence errors; keep session-only choice if storage is unavailable. |
 | Direct connection | Existing `connect` with host, fixed TCP 19730 / UDP 19731, optional PIN. No unsupported port editing or URL-format promise. |
 | Session state | `connect` result + `stats.connected` / `stats.state`; first valid rendered frame is separate from successful connection. |
 | Video | Preserve the working shader, raw NV12 `poll_frame_raw` pipeline, texture upload and aspect-fit canvas unchanged during this redesign. No fake preview thumbnails. |
@@ -120,7 +120,7 @@ All dimensions are CSS client-area pixels, excluding OS window decoration.
   the direct panel over cards or hide overflow to mask sizing defects.
 
 ```text
-| EclipticRD     | Computers                           Refresh |
+| MahoRD     | Computers                           Refresh |
 | Computers     | Find a computer or connect by address.        |
 | Favorites     | [ Search computers            ] All/Avail/Fav |
 |               | Listed computers (actual result count)       |
@@ -129,7 +129,7 @@ All dimensions are CSS client-area pixels, excluding OS window decoration.
 |               | Direct connection                            |
 |               | Host address       Pairing PIN (optional)    |
 |               | [ host           ] [ PIN       ] [ Connect ] |
-| EclipticRD    | inline notice/error region                    |
+| MahoRD    | inline notice/error region                    |
 ```
 
 ### Compact: 900x650
@@ -186,7 +186,7 @@ disabled, pending, and failure feedback where asynchronous work applies.
 | Available filter | Off/on, matching records, no available matches, refresh changing availability. Empty results offer Clear filters; selection uses `aria-pressed`. No network request or service probe is implied. |
 | Favorites | Unselected/selected star, all/favorites filter, empty favorites with explanation, missing previously favorited host not invented as a live record, persistence unavailable notice. Toggle without initiating connection. |
 | Computer | Available, offline, saved pairing, pairing unknown/new, unknown OS, long/malformed display text. Availability is only a discovery hint, explained beside the library. Offline connect is disabled with reason; direct form remains available for explicit address attempts. Busy disables competing Connect actions. |
-| Direct/PIN | Pristine, editing, blank address validation, invalid PIN, submitting, pairing rejection, other command rejection, cancelled, connected. Trim address; do not impose unsupported DNS/IP restrictions. Nonblank PIN must be exactly 8 ASCII digits (`^[0-9]{8}$`), proven by `erd-net/src/tls_psk.rs:323-325`; reject other lengths and non-ASCII digits inline. Blank is allowed for saved reconnect, not new pairing. For unpaired card, populate direct form and focus PIN before intentional submit. Keep PIN as a string to preserve leading zeros; backend remains authoritative. |
+| Direct/PIN | Pristine, editing, blank address validation, invalid PIN, submitting, pairing rejection, other command rejection, cancelled, connected. Trim address; do not impose unsupported DNS/IP restrictions. Nonblank PIN must be exactly 8 ASCII digits (`^[0-9]{8}$`), proven by `maho-net/src/tls_psk.rs:323-325`; reject other lengths and non-ASCII digits inline. Blank is allowed for saved reconnect, not new pairing. For unpaired card, populate direct form and focus PIN before intentional submit. Keep PIN as a string to preserve leading zeros; backend remains authoritative. |
 | Connection | Connecting -> command success/waiting for video -> first valid rendered frame/streaming. Cancel during pending must invalidate late completion and use existing disconnect path. Rejected connect shows exact safe error detail plus Edit address/Retry; no blocking browser alert. No automatic reconnect or blind timed retry. |
 | Session | Collapsed/expanded launcher; windowed/fullscreen; unavailable fullscreen error; video unavailable/renderer failure; stats pending/available/unavailable; remote session ended; explicit disconnect pending/success/failure. Never retain old FPS or Decode as current data after failure or new connection. |
 | Session return | Home and Disconnect both release held inputs and end the session, clear viewport, exit fullscreen, restore library focus and query/favorites. If teardown fails, disclose it and offer retry rather than claiming success. |

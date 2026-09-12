@@ -9,7 +9,7 @@
 
 ## 1. Executive Summary
 
-This deliverable implements all production-ready AI agent remote desktop improvements across `erd-proto`, `erd-app`, `erd-host`, `tauri-shell`, and `erd-client`, resolving security vulnerabilities, input safety issues, protocol gaps, coordinate ambiguities, multilingual typing limitations, and perception loop latency identified in `docs/ai-agent-remote-desktop-audit.md`.
+This deliverable implements all production-ready AI agent remote desktop improvements across `maho-proto`, `maho-app`, `maho-host`, `tauri-shell`, and `maho-client`, resolving security vulnerabilities, input safety issues, protocol gaps, coordinate ambiguities, multilingual typing limitations, and perception loop latency identified in `docs/ai-agent-remote-desktop-audit.md`.
 
 All phases were executed through structured DAGs delegating implementations to Gemini 3.8 Flash (`quick`/`unspecified-low`), verified locally and synced to Omarchy Linux (`indo@100.91.254.71`). The full Rust workspace compiles cleanly (`cargo check` exit code 0) and passes all test suites (`cargo test` exit code 0, 45 test suites, 530+ tests passing, 0 failures).
 
@@ -19,8 +19,8 @@ All phases were executed through structured DAGs delegating implementations to G
 
 | Success Criteria | Requirement | Status | Evidence |
 |---|---|---|---|
-| **SC1: HTTP Auth & CORS** | Local HTTP server rejects unauthorized requests with 401, accepts valid token (Bearer or X-ERD-Token), removes CORS wildcard. | **VERIFIED** | Unit tests `unauthorized_request_returns_401`, `authorized_request_with_bearer_token_returns_200`, `authorized_request_with_x_erd_token_returns_200`, and `response_headers_omit_access_control_allow_origin_wildcard` pass. |
-| **SC2: Input Safety & ACK** | Watchdog loop and disconnect auto-release held keys/buttons; wire protocol supports input ACK from host to client. | **VERIFIED** | `ControlMessage::InputAck` packet defined in `erd-proto/src/control.rs`; `InputSafetyTracker` watchdog tick loop; `Reset` packet handling across macOS, Linux, and Windows; unit tests in `erd-proto`, `erd-app`, and `erd-host` pass. |
+| **SC1: HTTP Auth & CORS** | Local HTTP server rejects unauthorized requests with 401, accepts valid token (Bearer or X-MAHO-Token), removes CORS wildcard. | **VERIFIED** | Unit tests `unauthorized_request_returns_401`, `authorized_request_with_bearer_token_returns_200`, `authorized_request_with_x_maho_token_returns_200`, and `response_headers_omit_access_control_allow_origin_wildcard` pass. |
+| **SC2: Input Safety & ACK** | Watchdog loop and disconnect auto-release held keys/buttons; wire protocol supports input ACK from host to client. | **VERIFIED** | `ControlMessage::InputAck` packet defined in `maho-proto/src/control.rs`; `InputSafetyTracker` watchdog tick loop; `Reset` packet handling across macOS, Linux, and Windows; unit tests in `maho-proto`, `maho-app`, and `maho-host` pass. |
 | **SC3: Coordinate & High-DPI** | `screen_info` and screenshot API report physical/logical resolution and scale factor; multi-monitor enumeration. | **VERIFIED** | `ScreenInfo` struct extended with `logical_width`, `logical_height`, and `monitors: Vec<MonitorInfo>`; serialization/deserialization tests pass with backward compatibility. |
 | **SC4: Unicode Text Injection** | `TypeText` handles Unicode without dropping non-ASCII/multilingual characters. | **VERIFIED** | `InputEventType::UnicodeChar = 21` in wire protocol; `AgentAction::TypeText` generates UTF-16 code units; Windows `KEYEVENTF_UNICODE`, Linux keysym/unicode, and macOS `CGEventKeyboardSetUnicodeString` injection verified. |
 | **SC5: Screen Freshness & Perception** | Screenshot API includes `frame_id`, `age_ms`, `timestamp_ms`; reactive `wait_for_change` endpoint and MCP tool. | **VERIFIED** | `FrameMetadata` struct; `GET /api/v1/screen/screenshot` returns metadata; `GET /api/v1/screen/wait_change` and `remote_wait_for_screen_change` MCP tool implemented and tested. |
@@ -31,17 +31,17 @@ All phases were executed through structured DAGs delegating implementations to G
 ## 3. Detailed Architectural Review
 
 ### 3.1 HTTP Control Plane Authentication & CORS Hardening
-- **Location:** `clients/rust/erd-app/src/agent_server.rs`, `clients/rust/erd-app/src/bin/erd_client.rs`
+- **Location:** `clients/rust/maho-app/src/agent_server.rs`, `clients/rust/maho-app/src/bin/maho_client.rs`
 - **Mechanism:**
   - `AgentServer` enforces authentication via `set_auth_token(&str)`.
   - Constant-time comparison protects against timing attacks.
-  - Accepts both `Authorization: Bearer <token>` and `X-ERD-Token: <token>` headers.
+  - Accepts both `Authorization: Bearer <token>` and `X-MAHO-Token: <token>` headers.
   - Unauthenticated requests to protected endpoints return `401 Unauthorized` with JSON `{"ok": false, "error": "Unauthorized"}`.
   - `/health` and `/api/v1/health` remain open for daemon health probing.
   - Wildcard CORS (`Access-Control-Allow-Origin: *`) was completely eliminated. Only explicit local origins (`http://localhost:*`, `http://127.0.0.1:*`, `tauri://*`) are permitted.
 
 ### 3.2 Input Safety, Watchdog & Disconnect Cleanup
-- **Location:** `clients/rust/erd-app/src/agent_input.rs`, `clients/rust/erd-app/src/agent_server.rs`, `clients/rust/erd-host/src/session.rs`
+- **Location:** `clients/rust/maho-app/src/agent_input.rs`, `clients/rust/maho-app/src/agent_server.rs`, `clients/rust/maho-host/src/session.rs`
 - **Mechanism:**
   - `InputSafetyTracker` runs a periodic watchdog loop checking for unreleased keys or mouse buttons exceeding timeout.
   - Upon server shutdown or `POST /api/v1/session/disconnect`, `disconnect_releases_held_input_with_reset_transaction` executes: sends individual key-up/button-up events followed by a wire `InputEvent::reset()`.
@@ -51,14 +51,14 @@ All phases were executed through structured DAGs delegating implementations to G
     - Windows dispatches `SendInput` with `KEYEVENTF_KEYUP` for all virtual keys and mouse up flags.
 
 ### 3.3 Wire Input ACK Protocol & Event Completeness
-- **Location:** `clients/rust/erd-proto/src/control.rs`, `clients/rust/erd-proto/src/input.rs`, `clients/rust/erd-app/src/agent_input.rs`
+- **Location:** `clients/rust/maho-proto/src/control.rs`, `clients/rust/maho-proto/src/input.rs`, `clients/rust/maho-app/src/agent_input.rs`
 - **Mechanism:**
   - Added `ControlMessage::InputAck { sequence: u32, status: u8, timestamp_us: u64 }` with opcode `0x19`.
   - Added `InputEventType::RightMouseDragged = 13` and `AgentAction::RightDrag`.
   - Added full modifier tracking for Shift, Control, Alt, and Meta in `InputSafetyTracker`.
 
 ### 3.4 Coordinate Contract & High-DPI Unification
-- **Location:** `clients/rust/erd-app/src/agent_input.rs`, `clients/rust/erd-app/src/agent_server.rs`, `clients/rust/tauri-shell/src-tauri/src/lib.rs`
+- **Location:** `clients/rust/maho-app/src/agent_input.rs`, `clients/rust/maho-app/src/agent_server.rs`, `clients/rust/tauri-shell/src-tauri/src/lib.rs`
 - **Mechanism:**
   - Added `MonitorInfo` struct representing per-display topology:
     ```rust
@@ -77,7 +77,7 @@ All phases were executed through structured DAGs delegating implementations to G
   - Maintained full backward compatibility with legacy serialization/deserialization.
 
 ### 3.5 Multilingual & Unicode Text Injection
-- **Location:** `clients/rust/erd-proto/src/input.rs`, `clients/rust/erd-app/src/agent_input.rs`, `clients/rust/erd-host/src/inject_*`
+- **Location:** `clients/rust/maho-proto/src/input.rs`, `clients/rust/maho-app/src/agent_input.rs`, `clients/rust/maho-host/src/inject_*`
 - **Mechanism:**
   - Added `InputEventType::UnicodeChar = 21` taking UTF-16 code units in wire payload.
   - `AgentAction::TypeText` decomposes non-ASCII and CJK (Korean, Chinese, Japanese, emoji) into `UnicodeChar` events without dropping characters.
@@ -86,7 +86,7 @@ All phases were executed through structured DAGs delegating implementations to G
   - Linux host safely consumes unicode events with graceful fallback.
 
 ### 3.6 Screen Freshness & Wait-for-Change Feedback Loop
-- **Location:** `clients/rust/erd-app/src/agent_input.rs`, `clients/rust/erd-app/src/agent_server.rs`, `clients/rust/erd-app/src/mcp_server.rs`, `clients/rust/erd-app/src/mcp_dispatch.rs`
+- **Location:** `clients/rust/maho-app/src/agent_input.rs`, `clients/rust/maho-app/src/agent_server.rs`, `clients/rust/maho-app/src/mcp_server.rs`, `clients/rust/maho-app/src/mcp_dispatch.rs`
 - **Mechanism:**
   - `FrameMetadata` tracks `frame_id`, `timestamp_ms`, and `age_ms`.
   - `GET /api/v1/screen/screenshot` returns metadata in JSON responses.
@@ -99,12 +99,12 @@ All phases were executed through structured DAGs delegating implementations to G
 
 ### 4.1 Remote Host Environment
 - **Host:** `indo@100.91.254.71` (Omarchy Linux, Arch Linux x86_64, Ryzen 5 5600X)
-- **FFmpeg 7:** `/home/indo/erd-ffmpeg7`
+- **FFmpeg 7:** `/home/indo/maho-ffmpeg7`
 
 ### 4.2 Cargo Check
 ```
 Command:
-ssh indo@100.91.254.71 "cd ~/projects/EclipticRD-Rewrite && bash -lc 'PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig:\$PKG_CONFIG_PATH cargo check --manifest-path clients/rust/Cargo.toml'"
+ssh indo@100.91.254.71 "cd ~/projects/EclipticRD-Rewrite && bash -lc 'PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig:\$PKG_CONFIG_PATH cargo check --manifest-path clients/rust/Cargo.toml'"
 
 Result:
 Exit code: 0
@@ -115,7 +115,7 @@ Errors: 0
 ### 4.3 Cargo Test
 ```
 Command:
-ssh indo@100.91.254.71 "cd ~/projects/EclipticRD-Rewrite && bash -lc 'LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:\$LD_LIBRARY_PATH PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig:\$PKG_CONFIG_PATH cargo test --manifest-path clients/rust/Cargo.toml'"
+ssh indo@100.91.254.71 "cd ~/projects/EclipticRD-Rewrite && bash -lc 'LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:\$LD_LIBRARY_PATH PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig:\$PKG_CONFIG_PATH cargo test --manifest-path clients/rust/Cargo.toml'"
 
 Result:
 Exit code: 0
@@ -132,7 +132,7 @@ An independent adversarial code review was delegated to a ChatGPT Web worker via
 
 1. **Default HTTP Auth Fail-Open Hardening**:
    - **Finding:** If `--agent-server` was passed without `--agent-token`, authentication remained disabled by default.
-   - **Remediation:** Added `--allow-unauthenticated-agent` flag. `erd-client` now generates a cryptographically secure 32-char hex random token by default and prints it to stderr unless explicitly opted out with `--allow-unauthenticated-agent`.
+   - **Remediation:** Added `--allow-unauthenticated-agent` flag. `maho-client` now generates a cryptographically secure 32-char hex random token by default and prints it to stderr unless explicitly opted out with `--allow-unauthenticated-agent`.
 
 2. **Wait-for-Change Worker Pool Starvation**:
    - **Finding:** `wait_change` executed inside `work.blocking(...)`, consuming one of only 4 threadpool slots and conflicting with screenshot tasks.
@@ -152,10 +152,10 @@ An independent adversarial code review was delegated to a ChatGPT Web worker via
 
 6. **Primary Monitor Topology Initialization**:
    - **Finding:** `monitors: Vec<MonitorInfo>` defaulted to an empty array.
-   - **Remediation:** Default `ScreenInfo` initializers across `erd_client.rs` and `tauri-shell` now populate a primary `MonitorInfo` (`id: 0`, `is_primary: true`, matching active dimensions).
+   - **Remediation:** Default `ScreenInfo` initializers across `maho_client.rs` and `tauri-shell` now populate a primary `MonitorInfo` (`id: 0`, `is_primary: true`, matching active dimensions).
 
 ---
 
 ## 6. Conclusion
 
-All initial requirements and follow-up Web Worker audit findings are fully resolved, passing 100% of workspace tests on Omarchy Linux without errors. EclipticRD is fully production-hardened for AI agent remote desktop workflows.
+All initial requirements and follow-up Web Worker audit findings are fully resolved, passing 100% of workspace tests on Omarchy Linux without errors. MahoRD is fully production-hardened for AI agent remote desktop workflows.

@@ -1,6 +1,6 @@
-name: erd-ios
+name: maho-ios
 options:
-  bundleIdPrefix: com.eclipticrd.ios
+  bundleIdPrefix: com.projectmaho.mahord
   deploymentTarget:
     iOS: 16.0
 fileGroups: [../../src]
@@ -10,8 +10,8 @@ configs:
 settingGroups:
   app:
     base:
-      PRODUCT_NAME: EclipticRD
-      PRODUCT_BUNDLE_IDENTIFIER: com.eclipticrd.ios
+      PRODUCT_NAME: MahoRD
+      PRODUCT_BUNDLE_IDENTIFIER: com.projectmaho.mahord
       DEVELOPMENT_TEAM: 5DUM8WPB4C
 targetTemplates:
   app:
@@ -25,20 +25,20 @@ targetTemplates:
     settings:
       groups: [app]
 targets:
-  erd-ios_iOS:
+  maho-ios_iOS:
     type: application
     platform: iOS
     sources:
       - path: Sources
       - path: Assets.xcassets
       - path: Externals
-      - path: erd-ios_iOS
+      - path: maho-ios_iOS
       - path: assets
         buildPhase: resources
         type: folder
       - path: LaunchScreen.storyboard
     info:
-      path: erd-ios_iOS/Info.plist
+      path: maho-ios_iOS/Info.plist
       properties:
         LSRequiresIPhoneOS: true
         UILaunchStoryboardName: LaunchScreen
@@ -55,7 +55,7 @@ targets:
         CFBundleShortVersionString: 0.1.0
         CFBundleVersion: "0.1.0"
     entitlements:
-      path: erd-ios_iOS/erd-ios_iOS.entitlements
+      path: maho-ios_iOS/maho-ios_iOS.entitlements
     scheme:
       environmentVariables:
         RUST_BACKTRACE: full

@@ -17,11 +17,11 @@ const transport = option("--transport", "http");
 const performance = argv.includes("--performance");
 assert(host, "--host is required");
 assert(["http", "mcp"].includes(transport), "--transport must be http or mcp");
-assert(process.env.ERD_CLIENT, "ERD_CLIENT must point to a compiled erd-client");
-assert(process.env.ERD_PAIRING_ID || process.env.ERD_QA_PIN,
-  "ERD_PAIRING_ID or an isolated host's ERD_QA_PIN is required");
-const evidence = resolve(process.env.ERD_EVIDENCE_DIR ?? `.omo/agent-first-qa-${Date.now()}`);
-const port = process.env.ERD_API_PORT ?? "28735";
+assert(process.env.MAHO_CLIENT, "MAHO_CLIENT must point to a compiled maho-client");
+assert(process.env.MAHO_PAIRING_ID || process.env.MAHO_QA_PIN,
+  "MAHO_PAIRING_ID or an isolated host's MAHO_QA_PIN is required");
+const evidence = resolve(process.env.MAHO_EVIDENCE_DIR ?? `.omo/agent-first-qa-${Date.now()}`);
+const port = process.env.MAHO_API_PORT ?? "28735";
 await mkdir(evidence, { recursive: true, mode: 0o700 });
 
 function deferred() {
@@ -49,11 +49,11 @@ async function bounded(promise, label, milliseconds = 20000) {
 
 const args = ["--host", host,
   "--timeout-secs", "90", "--stats-json", resolve(evidence, "receiver.json")];
-if (process.env.ERD_PAIRING_ID) args.push("--pairing-id", process.env.ERD_PAIRING_ID);
-else args.push("--pin", process.env.ERD_QA_PIN);
-if (process.env.ERD_TCP_PORT) args.push("--tcp-port", process.env.ERD_TCP_PORT);
-if (process.env.ERD_UDP_PORT) args.push("--udp-port", process.env.ERD_UDP_PORT);
-if (process.env.ERD_PAIRING_STORE) args.push("--pairing-store", process.env.ERD_PAIRING_STORE);
+if (process.env.MAHO_PAIRING_ID) args.push("--pairing-id", process.env.MAHO_PAIRING_ID);
+else args.push("--pin", process.env.MAHO_QA_PIN);
+if (process.env.MAHO_TCP_PORT) args.push("--tcp-port", process.env.MAHO_TCP_PORT);
+if (process.env.MAHO_UDP_PORT) args.push("--udp-port", process.env.MAHO_UDP_PORT);
+if (process.env.MAHO_PAIRING_STORE) args.push("--pairing-store", process.env.MAHO_PAIRING_STORE);
 if (performance) args.push("--frames", "120", "--nudge-ms", "50");
 if (transport === "mcp") args.push("--mcp");
 else args.push("--agent-server", port);
@@ -69,7 +69,7 @@ let stdout = "";
 let stderr = "";
 let protocolError;
 let completed = false;
-const child = spawn(process.env.ERD_CLIENT, args, { stdio: ["pipe", "pipe", "pipe"] });
+const child = spawn(process.env.MAHO_CLIENT, args, { stdio: ["pipe", "pipe", "pipe"] });
 child.once("error", error => {
   frameReady.reject(error);
   listenerReady.reject(error);
@@ -188,7 +188,7 @@ try {
   } else {
     const initialized = await rpc("initialize", {
       protocolVersion: "2024-11-05", capabilities: {},
-      clientInfo: { name: "erd-agent-first-qa", version: "1.0" },
+      clientInfo: { name: "maho-agent-first-qa", version: "1.0" },
     });
     assert(initialized.result?.capabilities?.tools);
     child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" })}\n`);
@@ -219,8 +219,8 @@ try {
     assert.equal((await bounded(exit.promise, "MCP EOF cleanup", 5000)).code, 0);
     assert.equal(protocolError, undefined);
   }
-  if (process.env.ERD_RECEIVER_TRACE_PATH) {
-    const [trace] = JSON.parse(await readFile(process.env.ERD_RECEIVER_TRACE_PATH, "utf8"));
+  if (process.env.MAHO_RECEIVER_TRACE_PATH) {
+    const [trace] = JSON.parse(await readFile(process.env.MAHO_RECEIVER_TRACE_PATH, "utf8"));
     assert(trace.records.some(record => record.event === "QueueAdmission"),
       "real CLI queue must share the session receiver trace");
   }

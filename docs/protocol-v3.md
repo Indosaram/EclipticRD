@@ -1,6 +1,6 @@
-# EclipticRD Wire Protocol Version 3
+# MahoRD Wire Protocol Version 3
 
-This document is the implementation contract for EclipticRD protocol version 3. It defines the bytes exchanged by a client and host. A conforming implementation must not depend on Swift object layout, native struct padding, or host byte order.
+This document is the implementation contract for MahoRD protocol version 3. It defines the bytes exchanged by a client and host. A conforming implementation must not depend on Swift object layout, native struct padding, or host byte order.
 
 ## 1. Conventions
 
@@ -14,7 +14,7 @@ This document is the implementation contract for EclipticRD protocol version 3. 
 - A receiver may accept trailing bytes unless a message-specific rule says otherwise. Senders must emit only the defined bytes.
 - TCP carries control-plane packets. UDP carries media and cursor packets after session keys are installed.
 
-Default ports are TCP 19730 and UDP 19731. Bonjour discovery uses service type `_eclipticrd._tcp` in domain `local.`.
+Default ports are TCP 19730 and UDP 19731. Bonjour discovery uses service type `_mahord._tcp` in domain `local.`.
 
 ## 2. Common packet envelope
 
@@ -93,8 +93,8 @@ The offered identity selects the key:
 
 | Connection kind | PSK identity | PSK bytes |
 |---|---|---|
-| First-time bootstrap | ASCII `erd-b1` | Bootstrap PSK derived from the 8-digit PIN |
-| Previously paired | UTF-8 `erd-p1.<uuid>` | Raw 32-byte pairing key |
+| First-time bootstrap | ASCII `maho-b1` | Bootstrap PSK derived from the 8-digit PIN |
+| Previously paired | UTF-8 `maho-p1.<uuid>` | Raw 32-byte pairing key |
 
 `<uuid>` is the exact pairing ID issued in `PairingGrantPayload`. Treat it as an opaque UTF-8 string even though the host currently generates a UUID string.
 
@@ -111,14 +111,14 @@ The bootstrap PIN expires after 300 seconds. Five failed bootstrap TLS authentic
 
 ### 4.3 First-time pairing sequence
 
-1. The host opens a pairing window and offers PSK identity `erd-b1` with the PIN-derived bootstrap PSK.
-2. The client connects over TLS using identity `erd-b1` and the same derived key.
+1. The host opens a pairing window and offers PSK identity `maho-b1` with the PIN-derived bootstrap PSK.
+2. The client connects over TLS using identity `maho-b1` and the same derived key.
 3. Once TLS is ready, the client sends `PacketType.pairingRequest`.
 4. The host asks its user to approve the named client. No screen, input, or media capability may be granted on the bootstrap connection before approval.
 5. On approval, the host generates a random 32-byte pairing key, persists it under a new pairing ID, and sends `pairingGrant`.
 6. On denial or unavailable pairing, the host sends `pairingReject`.
 7. The client persists the grant. It then sends the normal v3 `handshake` using the granted pairing ID and a fresh 16-byte session salt. The current implementation can send this handshake on the still-encrypted bootstrap connection.
-8. Later TCP connections use identity `erd-p1.<pairingID>` and the raw 32-byte pairing key.
+8. Later TCP connections use identity `maho-p1.<pairingID>` and the raw 32-byte pairing key.
 
 The host must cross-check the `pairingID` in the application handshake against its pairing store. A successful TLS channel alone doesn't authorize screen or input traffic. The host must also receive a valid v3 handshake with a known pairing ID and a 16-byte session salt.
 

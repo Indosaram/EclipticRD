@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>EclipticRD requires local network access to discover and stream from remote desktop hosts.</string>
+	<string>MahoRD requires local network access to discover and stream from remote desktop hosts.</string>
 	<key>NSBonjourServices</key>
 	<array>
-		<string>_erd._tcp</string>
-		<string>_erd._udp</string>
+		<string>_maho-rd._tcp</string>
+		<string>_maho-rd._udp</string>
 	</array>
 	<key>UISupportedInterfaceOrientations</key>
 	<array>

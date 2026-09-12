@@ -8,15 +8,15 @@ use std::{
     time::Duration,
 };
 
-use erd_app::{
+use maho_app::{
     ClientSession, IpcError, IpcErrorCode, IpcErrorStage, PairingEndpoint, PairingStore,
     ReadySession, SessionConfig, SessionError, SessionEvent, SessionRuntime,
 };
-use erd_mobile::{
+use maho_mobile::{
     TouchGestureHandler, TouchMode, TouchPhase, TouchPoint, ViewportState,
 };
-use erd_proto::{ControlMessage, InputEvent, InputEventType, Modifiers};
-use erd_render::{AudioOutputEvent, AudioQueue, CpalAudioOutput};
+use maho_proto::{ControlMessage, InputEvent, InputEventType, Modifiers};
+use maho_render::{AudioOutputEvent, AudioQueue, CpalAudioOutput};
 use serde::{Deserialize, Serialize};
 
 use crate::frame::repack_nv12_frame;
@@ -149,7 +149,7 @@ pub struct AppState {
     pub inner: Arc<Mutex<SessionInner>>,
     pub lifecycle_lock: Arc<tokio::sync::Mutex<()>>,
     pub active_connect: Arc<Mutex<Option<ActiveConnectState>>>,
-    pub discovery: Arc<Mutex<Option<erd_net::discovery::LanDiscovery>>>,
+    pub discovery: Arc<Mutex<Option<maho_net::discovery::LanDiscovery>>>,
     pub cancel_pending: Arc<AtomicBool>,
     pub teardown_coord: Arc<(Mutex<TeardownCoordInner>, std::sync::Condvar)>,
 }
@@ -403,7 +403,7 @@ impl AppState {
         Ok(())
     }
 
-    pub async fn list_discovered_hosts(&self) -> Result<Vec<erd_net::discovery::DiscoveredHost>, String> {
+    pub async fn list_discovered_hosts(&self) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
         let state_clone = self.clone();
         tokio::task::spawn_blocking(move || state_clone.discovery_snapshot_blocking())
             .await
@@ -429,13 +429,13 @@ impl AppState {
         Ok(())
     }
 
-    pub fn discovery_snapshot_blocking(&self) -> Result<Vec<erd_net::discovery::DiscoveredHost>, String> {
+    pub fn discovery_snapshot_blocking(&self) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
         let mut disc_guard = self
             .discovery
             .lock()
             .map_err(|_| "Discovery mutex is poisoned".to_string())?;
         if disc_guard.is_none() {
-            let browser = match erd_net::discovery::LanDiscovery::new() {
+            let browser = match maho_net::discovery::LanDiscovery::new() {
                 Ok(b) => b,
                 Err(e) => {
                     return Err(format!("LAN discovery initialization error: {e}"));
@@ -470,7 +470,7 @@ impl AppState {
         if inner.state == ConnectionState::Ready {
             if let Some(ref session) = inner.session {
                 if let Ok(sess_state) = session.state() {
-                    if sess_state == erd_app::SessionState::Disconnected {
+                    if sess_state == maho_app::SessionState::Disconnected {
                         state_str = "disconnected".to_string();
                     }
                 }
@@ -801,7 +801,7 @@ impl AppState {
             inner.pairing_store.clone()
         };
 
-        let stored_record: Option<erd_app::PairingRecord> = if trimmed_pin.is_none() {
+        let stored_record: Option<maho_app::PairingRecord> = if trimmed_pin.is_none() {
             let id = trimmed_id.unwrap();
             let store = match custom_store.as_ref() {
                 Some(s) => s.clone(),
@@ -828,7 +828,7 @@ impl AppState {
             None
         };
 
-        let mut config = match build_session_config(&host, tcp_port, udp_port, "EclipticRD iOS") {
+        let mut config = match build_session_config(&host, tcp_port, udp_port, "MahoRD iOS") {
             Ok(c) => c,
             Err(e) => {
                 let err = IpcError::connection_failed(IpcErrorStage::Client, format!("Configuration error: {e}"));
@@ -1023,7 +1023,7 @@ impl AppState {
         };
         let supervisor_completions = worker_completions.clone();
         let supervisor_worker = thread::Builder::new()
-            .name("erd-ios-supervisor".to_string())
+            .name("maho-ios-supervisor".to_string())
             .spawn(move || {
                 while !stop_supervisor.load(Ordering::Relaxed) {
                     match event_rx.recv_timeout(Duration::from_millis(50)) {
@@ -1094,7 +1094,7 @@ impl AppState {
         let stop_audio = stop_flag.clone();
         let audio_completions = worker_completions.clone();
         let audio_worker = thread::Builder::new()
-            .name("erd-ios-audio".to_string())
+            .name("maho-ios-audio".to_string())
             .spawn(move || {
                 let headless_tx = if headless_audio {
                     Some(audio_events_tx.clone())
@@ -1104,7 +1104,7 @@ impl AppState {
 
                 let mut audio_output = None;
                 if !headless_audio {
-                    if let Err(e) = erd_render::activate_ios_audio_session() {
+                    if let Err(e) = maho_render::activate_ios_audio_session() {
                         let err_msg = format!("Failed to activate iOS audio session: {e}");
                         tracing::error!(%err_msg);
                         let _ = audio_init_tx.send(Err(err_msg));
@@ -1212,9 +1212,9 @@ impl AppState {
         let session_udp = session.clone();
         let media_completions = worker_completions.clone();
         let media_worker = thread::Builder::new()
-            .name("erd-ios-media".to_string())
+            .name("maho-ios-media".to_string())
             .spawn(move || {
-                let mut decoder: Option<erd_decode::HevcDecoder> = None;
+                let mut decoder: Option<maho_decode::HevcDecoder> = None;
                 let mut frames_received_local = 0u64;
                 let mut frames_decoded_local = 0u64;
                 let mut audio_packets_local = 0u64;
@@ -1230,10 +1230,10 @@ impl AppState {
 
                             let mut decode_failed = false;
                             if decoder.is_none() {
-                                match erd_decode::detect_codec(&assembled_frame.data) {
+                                match maho_decode::detect_codec(&assembled_frame.data) {
                                     Ok(kind) => match kind {
-                                        erd_decode::CodecKind::Hevc => {
-                                            match erd_decode::HevcDecoder::from_keyframe(&assembled_frame.data) {
+                                        maho_decode::CodecKind::Hevc => {
+                                            match maho_decode::HevcDecoder::from_keyframe(&assembled_frame.data) {
                                                 Ok(dec) => {
                                                     tracing::info!("Decoder initialized from HEVC keyframe");
                                                     decoder = Some(dec);
@@ -1244,9 +1244,9 @@ impl AppState {
                                                 }
                                             }
                                         }
-                                        erd_decode::CodecKind::H264 => {
-                                            match erd_decode::h264_parameter_set_blob(&assembled_frame.data)
-                                                .and_then(|ps| erd_decode::HevcDecoder::new_h264(&ps))
+                                        maho_decode::CodecKind::H264 => {
+                                            match maho_decode::h264_parameter_set_blob(&assembled_frame.data)
+                                                .and_then(|ps| maho_decode::HevcDecoder::new_h264(&ps))
                                             {
                                                 Ok(dec) => {
                                                     tracing::info!("Decoder initialized from H.264 parameter sets");
@@ -1475,13 +1475,13 @@ pub fn build_session_config(
 pub fn classify_session_error(err: &SessionError) -> IpcError {
     match err {
         SessionError::PairingRejected(reason) => match reason {
-            erd_proto::PairingRejectReason::DeniedByHost => {
+            maho_proto::PairingRejectReason::DeniedByHost => {
                 IpcError::new(IpcErrorCode::PairingDenied, IpcErrorStage::Preauth, "Connection rejected by host")
             }
-            erd_proto::PairingRejectReason::LockedOut => {
+            maho_proto::PairingRejectReason::LockedOut => {
                 IpcError::new(IpcErrorCode::PairingLockedOut, IpcErrorStage::Preauth, "Host locked out pairing due to excessive attempts")
             }
-            erd_proto::PairingRejectReason::PairingDisabled => {
+            maho_proto::PairingRejectReason::PairingDisabled => {
                 IpcError::new(IpcErrorCode::PairingDisabled, IpcErrorStage::Preauth, "Host pairing window expired or pairing disabled")
             }
         },
@@ -1497,7 +1497,7 @@ pub fn classify_session_error(err: &SessionError) -> IpcError {
         SessionError::MissingAuthenticatedRegistration => {
             IpcError::incompatible_peer("Host lacks authenticated UDP registration capability")
         }
-        SessionError::Tls(erd_net::tls_psk::TlsPskError::Io(io_err)) => {
+        SessionError::Tls(maho_net::tls_psk::TlsPskError::Io(io_err)) => {
             classify_io_error(io_err, IpcErrorStage::TlsPsk)
         }
         SessionError::Tls(tls_err) => {

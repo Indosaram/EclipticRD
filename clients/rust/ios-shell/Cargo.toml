@@ -1,5 +1,5 @@
 [package]
-name = "erd-ios"
+name = "maho-ios"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
@@ -12,11 +12,11 @@ skip = true
 tauri-build = { version = "2", default-features = false, features = [] }
 
 [dependencies]
-erd-app = { path = "../erd-app", default-features = false }
-erd-mobile = { path = "../erd-mobile" }
-erd-net = { path = "../erd-net" }
-erd-proto = { path = "../erd-proto" }
-erd-render = { path = "../erd-render" }
+maho-app = { path = "../maho-app", default-features = false }
+maho-mobile = { path = "../maho-mobile" }
+maho-net = { path = "../maho-net" }
+maho-proto = { path = "../maho-proto" }
+maho-render = { path = "../maho-render" }
 tauri = { version = "2", default-features = false, features = ["wry"] }
 tokio.workspace = true
 serde.workspace = true
@@ -26,22 +26,22 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 
 [target.'cfg(target_os = "ios")'.dependencies]
-erd-decode = { path = "../erd-decode", default-features = false, features = ["ios-videotoolbox"] }
+maho-decode = { path = "../maho-decode", default-features = false, features = ["ios-videotoolbox"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 core-foundation = { version = "0.10", default-features = false }
 
 [target.'cfg(not(target_os = "ios"))'.dependencies]
-erd-decode = { path = "../erd-decode", features = ["ffmpeg"] }
+maho-decode = { path = "../maho-decode", features = ["ffmpeg"] }
 
 [dev-dependencies]
 tempfile = "3"
 
 [lib]
-name = "erd_ios_lib"
+name = "maho_ios_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 path = "src/lib.rs"
 
 [[bin]]
-name = "erd-ios"
+name = "maho-ios"
 path = "src/main.rs"

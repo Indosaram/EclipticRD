@@ -1,21 +1,21 @@
 # Optimized FFmpeg 7 on Omarchy
 
 Run builds only on the Omarchy Linux x86_64 builder. The scripts create a private
-prefix; they do not replace `/home/indo/erd-ffmpeg7`, install system packages or
+prefix; they do not replace `/home/indo/maho-ffmpeg7`, install system packages or
 restart a deployed service.
 
 ```sh
 bash scripts/build-ffmpeg-omarchy.sh \
-  /home/indo/erd-ffmpeg7-optimized \
+  /home/indo/maho-ffmpeg7-optimized \
   /home/indo/build-ffmpeg7-optimized
-bash scripts/with-ffmpeg7.sh /home/indo/erd-ffmpeg7-optimized \
-  cargo build --manifest-path clients/rust/Cargo.toml --release -p erd-host
-bash scripts/with-ffmpeg7.sh /home/indo/erd-ffmpeg7-optimized \
-  clients/rust/target/release/erd-host --help
+bash scripts/with-ffmpeg7.sh /home/indo/maho-ffmpeg7-optimized \
+  cargo build --manifest-path clients/rust/Cargo.toml --release -p maho-host
+bash scripts/with-ffmpeg7.sh /home/indo/maho-ffmpeg7-optimized \
+  clients/rust/target/release/maho-host --help
 ```
 
 Both build paths must be new, separate absolute paths. Failed partial builds remain
-for diagnosis; choose fresh paths after correcting the cause. `ERD_BUILD_JOBS`
+for diagnosis; choose fresh paths after correcting the cause. `MAHO_BUILD_JOBS`
 controls parallel compilation (default 6).
 
 The script pins FFmpeg 7.0.2, NVIDIA codec headers n12.1.14.0 and NASM 3.02 with

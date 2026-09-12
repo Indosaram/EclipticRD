@@ -1,4 +1,4 @@
-# EclipticRD Cross-Platform Logo & App Icon Assets
+# MahoRD Cross-Platform Logo & App Icon Assets
 
 Unified cross-platform icon pack designed for **iOS**, **macOS**, **Windows**, **Linux**, **Web**, and **Tauri v2**.
 Derived with mathematical precision from the reference orbital device sync design.
@@ -20,10 +20,10 @@ Derived with mathematical precision from the reference orbital device sync desig
 ```
 assets/icons/
 ├── master/                          # Master Vector Sources
-│   ├── eclipticrd-symbol.svg        # Pure vector symbol (transparent bg)
-│   ├── eclipticrd-appicon.svg       # Master squircle icon (1024x1024)
-│   ├── eclipticrd-ios.svg           # iOS full-bleed square master (1024x1024)
-│   └── eclipticrd-macos.svg         # macOS squircle + drop shadow (1024x1024)
+│   ├── mahord-symbol.svg        # Pure vector symbol (transparent bg)
+│   ├── mahord-appicon.svg       # Master squircle icon (1024x1024)
+│   ├── mahord-ios.svg           # iOS full-bleed square master (1024x1024)
+│   └── mahord-macos.svg         # macOS squircle + drop shadow (1024x1024)
 │
 ├── macos/                           # Apple macOS Assets
 │   ├── icon.icns                    # Multi-resolution ICNS (16px up to 1024px Retina)
@@ -42,10 +42,10 @@ assets/icons/
 │   └── StoreLogo.png                # Windows Store icon (50x50)
 │
 ├── linux/                           # Linux Freedesktop Assets
-│   ├── eclipticrd.desktop           # Freedesktop application entry
+│   ├── mahord.desktop           # Freedesktop application entry
 │   └── hicolor/                     # Standard XDG icon theme hierarchy
-│       ├── scalable/apps/           # Scalable vector (eclipticrd.svg)
-│       ├── symbolic/apps/           # Monochrome/symbolic vector (eclipticrd-symbolic.svg)
+│       ├── scalable/apps/           # Scalable vector (mahord.svg)
+│       ├── symbolic/apps/           # Monochrome/symbolic vector (mahord-symbolic.svg)
 │       └── <size>x<size>/apps/      # 16, 24, 32, 48, 64, 96, 128, 256, 512, 1024 PNGs
 │
 ├── web/                             # Web & PWA Assets
@@ -79,10 +79,10 @@ assets/icons/
 - **System Installation**:
   ```bash
   sudo cp -r assets/icons/linux/hicolor/* /usr/share/icons/hicolor/
-  sudo cp assets/icons/linux/eclipticrd.desktop /usr/share/applications/
+  sudo cp assets/icons/linux/mahord.desktop /usr/share/applications/
   sudo gtk-update-icon-cache /usr/share/icons/hicolor/
   ```
-- **Scalable Vector**: `/usr/share/icons/hicolor/scalable/apps/eclipticrd.svg` renders crisply on 4K/HiDPI displays.
+- **Scalable Vector**: `/usr/share/icons/hicolor/scalable/apps/mahord.svg` renders crisply on 4K/HiDPI displays.
 
 ### 5. Tauri v2 Desktop Client (`tauri-shell`)
 - All required bundle assets have been synchronized directly into `clients/rust/tauri-shell/icons/`:

@@ -1,6 +1,6 @@
 use super::*;
-use erd_app::AssembledFrame;
-use erd_proto::{ControlMessage, FrameHeader};
+use maho_app::AssembledFrame;
+use maho_proto::{ControlMessage, FrameHeader};
 use std::sync::mpsc;
 
 const DEADLINE: Duration = Duration::from_secs(3);
@@ -21,7 +21,7 @@ fn frame(id: u32, key: bool) -> SessionEvent {
 }
 
 fn encoded_frame(id: u32, fixture_index: usize) -> SessionEvent {
-    let hex = include_str!("../../../erd-app/tests/fixtures/hevc-continuity.hex")
+    let hex = include_str!("../../../maho-app/tests/fixtures/hevc-continuity.hex")
         .lines()
         .nth(fixture_index)
         .unwrap();
@@ -29,7 +29,7 @@ fn encoded_frame(id: u32, fixture_index: usize) -> SessionEvent {
         .step_by(2)
         .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
         .collect();
-    let key = erd_decode::parse_length_prefixed_nalus(&data)
+    let key = maho_decode::parse_length_prefixed_nalus(&data)
         .unwrap()
         .iter()
         .any(|nalu| matches!(nalu.nal_type, 19 | 20));

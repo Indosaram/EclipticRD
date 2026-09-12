@@ -7,7 +7,7 @@
 // Authoritative Command Registry
 // =============================================================================
 
-export const ERD_COMMANDS = [
+export const MAHO_COMMANDS = [
   "list_hosts",
   "connect",
   "get_cursor_position",
@@ -32,7 +32,7 @@ export const ERD_COMMANDS = [
   "stop_host",
 ] as const;
 
-export type ErdCommand = (typeof ERD_COMMANDS)[number];
+export type MahoCommand = (typeof MAHO_COMMANDS)[number];
 
 // =============================================================================
 // Data Interfaces Derived from lib.rs and Core Crates
@@ -265,7 +265,7 @@ export function isNativeAvailable(): boolean {
  * Resolves invoke from window.__TAURI__?.core?.invoke ?? window.__TAURI__?.tauri.
  */
 export async function invokeCommand<T>(
-  command: ErdCommand,
+  command: MahoCommand,
   args?: Record<string, unknown>
 ): Promise<T> {
   const tauri =

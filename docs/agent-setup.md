@@ -1,7 +1,7 @@
-# Connect an agent to EclipticRD
+# Connect an agent to MahoRD
 
-EclipticRD provides a stdio MCP server and a separate loopback HTTP API. Both
-operate a real remote desktop through `erd-client`; neither replaces host
+MahoRD provides a stdio MCP server and a separate loopback HTTP API. Both
+operate a real remote desktop through `maho-client`; neither replaces host
 pairing or installs an agent on the remote computer.
 
 ## Pair once
@@ -10,15 +10,15 @@ Build the host and client using the [README prerequisites](../README.md#build-fr
 Run the host inside the desktop session you intend to share:
 
 ```sh
-erd-host --pin generate
+maho-host --pin generate
 ```
 
 On the agent's computer, replace `HOST` and `PIN` with the actual values:
 
 ```sh
-mkdir -p "$HOME/.config/eclipticrd"
-erd-client --host HOST --pin PIN \
-  --pairing-store "$HOME/.config/eclipticrd/pairings.json" \
+mkdir -p "$HOME/.config/mahord"
+maho-client --host HOST --pin PIN \
+  --pairing-store "$HOME/.config/mahord/pairings.json" \
   --frames 10 --timeout-secs 60
 ```
 
@@ -30,7 +30,7 @@ before repeating enrollment. The bootstrap window lasts five minutes.
 Read only the saved IDs and names (requires `jq`):
 
 ```sh
-jq -r '.[] | [.id, .name] | @tsv' "$HOME/.config/eclipticrd/pairings.json"
+jq -r '.[] | [.id, .name] | @tsv' "$HOME/.config/mahord/pairings.json"
 ```
 
 Use that ID and the same store for reconnects. The store contains secret keys;
@@ -48,28 +48,28 @@ FFmpeg libraries in the agent process environment.
 From the project where the tools should be available:
 
 ```sh
-claude mcp add --transport stdio --scope project eclipticrd \
-  -- /absolute/path/to/erd-client --host HOST \
+claude mcp add --transport stdio --scope project mahord \
+  -- /absolute/path/to/maho-client --host HOST \
   --pairing-id PAIRING-ID \
   --pairing-store /absolute/path/to/pairings.json --mcp
-claude mcp get eclipticrd
+claude mcp get mahord
 ```
 
 ### Codex
 
 ```sh
-codex mcp add eclipticrd \
-  -- /absolute/path/to/erd-client --host HOST \
+codex mcp add mahord \
+  -- /absolute/path/to/maho-client --host HOST \
   --pairing-id PAIRING-ID \
   --pairing-store /absolute/path/to/pairings.json --mcp
-codex mcp get eclipticrd
+codex mcp get mahord
 ```
 
 The equivalent table in `~/.codex/config.toml` is:
 
 ```toml
-[mcp_servers.eclipticrd]
-command = "/absolute/path/to/erd-client"
+[mcp_servers.mahord]
+command = "/absolute/path/to/maho-client"
 args = ["--host", "HOST", "--pairing-id", "PAIRING-ID", "--pairing-store", "/absolute/path/to/pairings.json", "--mcp"]
 ```
 
@@ -83,8 +83,8 @@ is `%APPDATA%\Claude\claude_desktop_config.json`.
 ```json
 {
   "mcpServers": {
-    "eclipticrd": {
-      "command": "/absolute/path/to/erd-client",
+    "mahord": {
+      "command": "/absolute/path/to/maho-client",
       "args": [
         "--host", "HOST",
         "--pairing-id", "PAIRING-ID",
@@ -102,34 +102,34 @@ the command; a successful `get` alone does not prove remote screen access.
 ## Install or inject the reusable skill
 
 The canonical instruction file is
-[`skills/eclipticrd-remote-control/SKILL.md`](../skills/eclipticrd-remote-control/SKILL.md).
+[`skills/mahord-remote-control/SKILL.md`](../skills/mahord-remote-control/SKILL.md).
 It has YAML frontmatter and explains tool arguments, screenshot interpretation,
 input verification, and cleanup.
 
-For a project-local installation, run from the EclipticRD checkout:
+For a project-local installation, run from the MahoRD checkout:
 
 ```sh
 # Claude Code project skill
-mkdir -p /path/to/your-project/.claude/skills/eclipticrd-remote-control
-cp skills/eclipticrd-remote-control/SKILL.md \
-  /path/to/your-project/.claude/skills/eclipticrd-remote-control/SKILL.md
+mkdir -p /path/to/your-project/.claude/skills/mahord-remote-control
+cp skills/mahord-remote-control/SKILL.md \
+  /path/to/your-project/.claude/skills/mahord-remote-control/SKILL.md
 
 # Codex project skill
-mkdir -p /path/to/your-project/.agents/skills/eclipticrd-remote-control
-cp skills/eclipticrd-remote-control/SKILL.md \
-  /path/to/your-project/.agents/skills/eclipticrd-remote-control/SKILL.md
+mkdir -p /path/to/your-project/.agents/skills/mahord-remote-control
+cp skills/mahord-remote-control/SKILL.md \
+  /path/to/your-project/.agents/skills/mahord-remote-control/SKILL.md
 ```
 
 For clients without a skill loader, attach that file as task context or paste
 its instructions into the agent's context. Skill injection supplies operating
 instructions, not executable tools: register MCP separately, or explicitly
-provide access to the HTTP API. EclipticRD does not edit global agent settings.
+provide access to the HTTP API. MahoRD does not edit global agent settings.
 
 ## Verify with an agent
 
 Ask the connected agent:
 
-> Use EclipticRD to read the screen dimensions, take and inspect a screenshot,
+> Use MahoRD to read the screen dimensions, take and inspect a screenshot,
 > move the pointer without clicking, take another screenshot, and release all
 > inputs. Report actual observations and any tool errors.
 
@@ -146,7 +146,7 @@ printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"smoke","version":"1"}}}' \
   '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-  | erd-client --host HOST --pairing-id PAIRING-ID \
+  | maho-client --host HOST --pairing-id PAIRING-ID \
       --pairing-store /absolute/path/to/pairings.json --mcp
 ```
 
@@ -158,7 +158,7 @@ explicit one. Closing MCP stdin releases tracked inputs and ends the session.
 ## HTTP alternative
 
 ```sh
-erd-client --host HOST --pairing-id PAIRING-ID \
+maho-client --host HOST --pairing-id PAIRING-ID \
   --pairing-store /absolute/path/to/pairings.json --agent-server 19735
 ```
 

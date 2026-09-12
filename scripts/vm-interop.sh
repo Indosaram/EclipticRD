@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# EclipticRD Tart VM Interoperability E2E Test Runner
+# MahoRD Tart VM Interoperability E2E Test Runner
 # Verifies full pipeline: Bootstrap pairing -> Handshake -> UDP arming -> HEVC video encode/decode >= 10 frames -> Clean teardown
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,7 +16,7 @@ SSH_KEY="${SSH_KEY:-$HOME/.ssh/id_ed25519}"
 SSH_OPTS="-o BindInterface=bridge100 -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i ${SSH_KEY}"
 
 echo "========================================================"
-echo "  EclipticRD VM Interop E2E Test"
+echo "  MahoRD VM Interop E2E Test"
 echo "  Target: ${VM_USER}@${VM_IP}"
 echo "========================================================"
 
@@ -25,61 +25,61 @@ rsync -e "ssh ${SSH_OPTS}" -avz --delete \
     --exclude 'target' \
     --exclude 'target-tauri' \
     --exclude '.git' \
-    "${ROOT_DIR}/clients/rust/" "${VM_USER}@${VM_IP}:~/erd/"
+    "${ROOT_DIR}/clients/rust/" "${VM_USER}@${VM_IP}:~/maho/"
 
-echo "[2/4] Building erd-host and erd-client (debug) inside VM..."
+echo "[2/4] Building maho-host and maho-client (debug) inside VM..."
 ssh ${SSH_OPTS} "${VM_USER}@${VM_IP}" '
     export PATH="/opt/homebrew/bin:/usr/local/bin:$HOME/.cargo/bin:$PATH"
     export PKG_CONFIG_PATH="/opt/homebrew/lib/pkgconfig:$PKG_CONFIG_PATH"
-    cd ~/erd
-    cargo build -p erd-host --features macos-host -p erd-app --bins
+    cd ~/maho
+    cargo build -p maho-host --features macos-host -p maho-app --bins
 '
 
 echo "[3/4] Running E2E pairing and frame decoding test in VM..."
 ssh ${SSH_OPTS} "${VM_USER}@${VM_IP}" '
     set -euo pipefail
-    echo admin | sudo -S killall -9 erd-host erd-client 2>/dev/null || true
-    rm -rf /tmp/erd-interop "$HOME/Library/Application Support/EclipticRD"
-    mkdir -p /tmp/erd-interop
+    echo admin | sudo -S killall -9 maho-host maho-client 2>/dev/null || true
+    rm -rf /tmp/maho-interop "$HOME/Library/Application Support/MahoRD"
+    mkdir -p /tmp/maho-interop
 
     PIN="12345678"
     FRAMES=15
     TIMEOUT=45
 
-    echo "Starting erd-host on 127.0.0.1:19730..."
-    ~/erd/target/debug/erd-host --bootstrap-pin "${PIN}" --auto-approve > /tmp/erd-interop/host.log 2>&1 &
+    echo "Starting maho-host on 127.0.0.1:19730..."
+    ~/maho/target/debug/maho-host --bootstrap-pin "${PIN}" --auto-approve > /tmp/maho-interop/host.log 2>&1 &
     HOST_PID=$!
     sleep 2
 
-    echo "Running erd-client with PIN=${PIN}, target_frames=${FRAMES}..."
+    echo "Running maho-client with PIN=${PIN}, target_frames=${FRAMES}..."
     CLIENT_STATUS=0
-    ~/erd/target/debug/erd-client \
+    ~/maho/target/debug/maho-client \
         --host 127.0.0.1 \
         --tcp-port 19730 \
         --pin "${PIN}" \
         --frames "${FRAMES}" \
         --timeout-secs "${TIMEOUT}" \
-        --pairing-store /tmp/erd-interop/client-pairing.json \
-        --stats-json /tmp/erd-interop/stats.json > /tmp/erd-interop/client.log 2>&1 || CLIENT_STATUS=$?
+        --pairing-store /tmp/maho-interop/client-pairing.json \
+        --stats-json /tmp/maho-interop/stats.json > /tmp/maho-interop/client.log 2>&1 || CLIENT_STATUS=$?
 
     kill -9 "${HOST_PID}" 2>/dev/null || true
 
     if [ "${CLIENT_STATUS}" -ne 0 ]; then
-        echo "ERROR: erd-client failed with exit code ${CLIENT_STATUS}"
+        echo "ERROR: maho-client failed with exit code ${CLIENT_STATUS}"
         echo "=== Host Log ==="
-        cat /tmp/erd-interop/host.log
+        cat /tmp/maho-interop/host.log
         echo "=== Client Log ==="
-        cat /tmp/erd-interop/client.log
+        cat /tmp/maho-interop/client.log
         exit 1
     fi
 
-    if [ ! -f /tmp/erd-interop/stats.json ]; then
+    if [ ! -f /tmp/maho-interop/stats.json ]; then
         echo "ERROR: stats.json was not produced"
         exit 1
     fi
 
     echo "=== Interop Test Output ==="
-    cat /tmp/erd-interop/stats.json
+    cat /tmp/maho-interop/stats.json
     echo ""
 '
 

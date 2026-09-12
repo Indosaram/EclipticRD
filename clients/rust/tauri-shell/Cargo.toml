@@ -12,12 +12,12 @@ skip = true
 tauri-build = { version = "2", default-features = false , features = [] }
 
 [dependencies]
-erd-app = { path = "../erd-app" }
-erd-decode = { path = "../erd-decode", features = ["ffmpeg"] }
-erd-host = { path = "../erd-host" }
-erd-net = { path = "../erd-net" }
-erd-proto = { path = "../erd-proto" }
-erd-render = { path = "../erd-render" }
+maho-app = { path = "../maho-app" }
+maho-decode = { path = "../maho-decode", features = ["ffmpeg"] }
+maho-host = { path = "../maho-host" }
+maho-net = { path = "../maho-net" }
+maho-proto = { path = "../maho-proto" }
+maho-render = { path = "../maho-render" }
 tauri = { version = "2", default-features = false, features = ["wry"] }
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 tokio.workspace = true

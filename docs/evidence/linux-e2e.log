@@ -1,4 +1,4 @@
 # Linux E2E evidence — 2026-09-02, Mac(100.78.73.127) ↔ indo(100.91.254.71, Arch/Hyprland) via Tailscale
-# Host: erd-host --bootstrap-pin 12345678 --auto-approve (output: HDMI-A-1 3840x1600, x264 software encoder — NVIDIA has no VAAPI)
+# Host: maho-host --bootstrap-pin 12345678 --auto-approve (output: HDMI-A-1 3840x1600, x264 software encoder — NVIDIA has no VAAPI)
 # Session: pairing(PIN) -> TLS-PSK handshake v3 -> AES-GCM UDP -> 30 frames decoded -> clean teardown, exit 0
 # Client flags: --frames 30 --nudge-ms 400 (cursor nudge drives screencopy commits on static wlroots sessions + exercises uinput injection)

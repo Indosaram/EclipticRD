@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use erd_app::{
+use maho_app::{
     agent_input::{
         convert_agent_action_to_events, encode_nv12_screenshot, AgentAction, InputStateTracker,
         ScreenInfo, ScreenshotFormat,
@@ -18,17 +18,17 @@ use erd_app::{
     SessionState, DEFAULT_TCP_PORT, DEFAULT_UDP_PORT,
 };
 #[cfg(target_os = "macos")]
-use erd_app::ClipboardMonitor;
-use erd_decode::HevcDecoder;
-use erd_proto::{InputEvent, InputEventType, Modifiers};
+use maho_app::ClipboardMonitor;
+use maho_decode::HevcDecoder;
+use maho_proto::{InputEvent, InputEventType, Modifiers};
 #[cfg(target_os = "macos")]
-use erd_proto::{ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdate};
-use erd_render::{AudioOutputDevice, AudioOutputStatus, AudioQueue, CpalAudioOutput};
+use maho_proto::{ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdate};
+use maho_render::{AudioOutputDevice, AudioOutputStatus, AudioQueue, CpalAudioOutput};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
 #[cfg(target_os = "macos")]
-use erd_app::platform::SystemClipboard;
+use maho_app::platform::SystemClipboard;
 
 #[cfg(test)]
 mod discovery_tests;
@@ -41,7 +41,7 @@ pub struct HostItem {
     pub name: String,
     pub ip: String,
     pub os: String,
-    /// Tailscale presence only; this does not establish ERD service readiness.
+    /// Tailscale presence only; this does not establish MahoRD service readiness.
     pub online: bool,
     /// Legacy exact-hostname store match, not proof of peer identity.
     pub paired: bool,
@@ -57,7 +57,7 @@ pub struct ConnectResponse {
     pub server_name: String,
 }
 
-pub use erd_app::{IpcError, IpcErrorCode, IpcErrorStage, PairingEndpoint, PairingSummary};
+pub use maho_app::{IpcError, IpcErrorCode, IpcErrorStage, PairingEndpoint, PairingSummary};
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SessionStats {
@@ -187,8 +187,8 @@ impl Default for HostRuntime {
     fn default() -> Self {
         Self {
             running: Arc::new(AtomicBool::new(false)),
-            pin: Arc::new(Mutex::new(erd_host::random_pin())),
-            port: erd_host::session::DEFAULT_TCP_PORT,
+            pin: Arc::new(Mutex::new(maho_host::random_pin())),
+            port: maho_host::session::DEFAULT_TCP_PORT,
             stop_flag: Arc::new(AtomicBool::new(false)),
             thread_handle: Mutex::new(None),
             auto_approve: Arc::new(AtomicBool::new(false)),
@@ -245,7 +245,7 @@ pub struct AppState {
 }
 
 pub struct DesktopDiscoveryState {
-    pub lan_browser: Mutex<Option<erd_net::discovery::LanDiscovery>>,
+    pub lan_browser: Mutex<Option<maho_net::discovery::LanDiscovery>>,
     pub tailscale_cache: Mutex<Option<TailscaleCache>>,
     pub tailscale_refreshing: Arc<AtomicBool>,
 }
@@ -543,7 +543,7 @@ impl AudioRuntime {
     ) -> Result<Self, String> {
         let (sender, receiver) = std::sync::mpsc::channel::<AudioRequest>();
         let worker = thread::Builder::new()
-            .name("erd-audio-output".into())
+            .name("maho-audio-output".into())
             .spawn(move || {
                 // CPAL Stream is deliberately thread-affine on some platforms.
                 // Create, control and drop it on this owner, never on Tokio/UI threads.
@@ -702,7 +702,7 @@ impl AppState {
                 .lock()
                 .map_err(|e| format!("Failed to lock PIN: {e}"))?;
             if guard.is_empty() {
-                let fresh = erd_host::random_pin();
+                let fresh = maho_host::random_pin();
                 *guard = fresh.clone();
                 fresh
             } else {
@@ -710,26 +710,26 @@ impl AppState {
             }
         };
 
-        let store = erd_host::PairingStore::host_default()
+        let store = maho_host::PairingStore::host_default()
             .map_err(|e| format!("Failed to open host pairing store: {e}"))?;
 
         #[cfg(target_os = "macos")]
-        let mut config = erd_host::HostConfig::macos_default(Some(pin), store)
+        let mut config = maho_host::HostConfig::macos_default(Some(pin), store)
             .map_err(|e| format!("Failed to create macOS host config: {e}"))?;
 
         #[cfg(target_os = "windows")]
-        let mut config = erd_host::HostConfig::windows_default(Some(pin), store)
+        let mut config = maho_host::HostConfig::windows_default(Some(pin), store)
             .map_err(|e| format!("Failed to create Windows host config: {e}"))?;
 
         #[cfg(target_os = "linux")]
         let mut config = {
-            let monitors = erd_host::probe_hyprland_monitors();
-            let output = erd_host::resolve_output_target(
+            let monitors = maho_host::probe_hyprland_monitors();
+            let output = maho_host::resolve_output_target(
                 None,
-                std::env::var("ERD_OUTPUT").ok(),
+                std::env::var("MAHO_OUTPUT").ok(),
                 monitors.as_ref(),
             );
-            erd_host::HostConfig::linux_default(Some(pin), store, output)
+            maho_host::HostConfig::linux_default(Some(pin), store, output)
                 .map_err(|e| format!("Failed to create Linux host config: {e}"))?
         };
 
@@ -737,9 +737,9 @@ impl AppState {
         return Err("Host server is not supported on this platform".to_string());
 
         let auto_approve = self.host_runtime.auto_approve.clone();
-        let (consent_tx, consent_rx) = std::sync::mpsc::channel::<erd_host::ConsentPrompt>();
+        let (consent_tx, consent_rx) = std::sync::mpsc::channel::<maho_host::ConsentPrompt>();
         let _ = std::thread::Builder::new()
-            .name("erd-host-consent".into())
+            .name("maho-host-consent".into())
             .spawn(move || {
                 while let Ok(prompt) = consent_rx.recv() {
                     let approved = auto_approve.load(Ordering::SeqCst);
@@ -755,7 +755,7 @@ impl AppState {
         config.consent_sender = Some(consent_tx);
         config.tcp_addr = std::net::SocketAddr::from(([0, 0, 0, 0], self.host_runtime.port));
 
-        let server = erd_host::HostServer::bind(config).map_err(|e| e.to_string())?;
+        let server = maho_host::HostServer::bind(config).map_err(|e| e.to_string())?;
 
         self.host_runtime.stop_flag.store(false, Ordering::SeqCst);
         self.host_runtime.running.store(true, Ordering::SeqCst);
@@ -764,7 +764,7 @@ impl AppState {
         let running_flag = Arc::clone(&self.host_runtime.running);
 
         let handle = std::thread::Builder::new()
-            .name("erd-host-server".into())
+            .name("maho-host-server".into())
             .spawn(move || {
                 let _ = server.serve_with_stop(stop_flag);
                 running_flag.store(false, Ordering::SeqCst);
@@ -921,7 +921,7 @@ pub mod commands {
         let lan_res = {
             let mut browser_guard = state.discovery.lan_browser.lock().unwrap();
             if browser_guard.is_none() {
-                match erd_net::discovery::LanDiscovery::new() {
+                match maho_net::discovery::LanDiscovery::new() {
                     Ok(browser) => {
                         *browser_guard = Some(browser);
                     }
@@ -932,7 +932,7 @@ pub mod commands {
             }
             match browser_guard.as_ref() {
                 Some(browser) => browser.snapshot(),
-                None => Err(erd_net::discovery::DiscoveryError::Unavailable),
+                None => Err(maho_net::discovery::DiscoveryError::Unavailable),
             }
         };
 
@@ -1021,7 +1021,7 @@ pub mod commands {
 
     pub(super) fn hosts_from_tailscale_output(
         output: std::io::Result<std::process::Output>,
-        records: &[erd_app::PairingRecord],
+        records: &[maho_app::PairingRecord],
     ) -> Result<Vec<HostItem>, String> {
         let output = output.map_err(|e| format!("Tailscale status execution failed: {e}"))?;
         if !output.status.success() {
@@ -1052,7 +1052,7 @@ pub mod commands {
         for value in peers.values() {
             let peer: Peer = serde_json::from_value(value.clone())
                 .map_err(|_| "Invalid Tailscale peer fields".to_string())?;
-            // Mobile and non-host platforms cannot run erd-host.
+            // Mobile and non-host platforms cannot run maho-host.
             if let Some(ref os) = peer.os {
                 let os_lower = os.to_ascii_lowercase();
                 if matches!(
@@ -1083,9 +1083,9 @@ pub mod commands {
     }
 
     pub fn merge_discovery_results(
-        lan: Result<Vec<erd_net::discovery::DiscoveredHost>, erd_net::discovery::DiscoveryError>,
+        lan: Result<Vec<maho_net::discovery::DiscoveredHost>, maho_net::discovery::DiscoveryError>,
         tailscale: Result<Vec<HostItem>, String>,
-        _records: &[erd_app::PairingRecord],
+        _records: &[maho_app::PairingRecord],
     ) -> Result<Vec<HostItem>, String> {
         match (lan, tailscale) {
             (Err(lan_err), Err(ts_err)) => {
@@ -1142,38 +1142,38 @@ pub mod commands {
         }
     }
 
-    pub fn classify_session_error(err: &erd_app::SessionError) -> IpcError {
+    pub fn classify_session_error(err: &maho_app::SessionError) -> IpcError {
         match err {
-            erd_app::SessionError::PairingRejected(reason) => match reason {
-                erd_proto::PairingRejectReason::DeniedByHost => {
+            maho_app::SessionError::PairingRejected(reason) => match reason {
+                maho_proto::PairingRejectReason::DeniedByHost => {
                     IpcError::new(IpcErrorCode::PairingDenied, IpcErrorStage::Preauth, "Connection rejected by host")
                 }
-                erd_proto::PairingRejectReason::LockedOut => {
+                maho_proto::PairingRejectReason::LockedOut => {
                     IpcError::new(IpcErrorCode::PairingLockedOut, IpcErrorStage::Preauth, "Host locked out pairing due to excessive attempts")
                 }
-                erd_proto::PairingRejectReason::PairingDisabled => {
+                maho_proto::PairingRejectReason::PairingDisabled => {
                     IpcError::new(IpcErrorCode::PairingDisabled, IpcErrorStage::Preauth, "Host pairing window expired or pairing disabled")
                 }
             },
-            erd_app::SessionError::PairingNotFound(id) => {
+            maho_app::SessionError::PairingNotFound(id) => {
                 IpcError::pairing_required(format!("No saved pairing credential found for '{id}'"))
             }
-            erd_app::SessionError::HandshakeAckTimeout => {
+            maho_app::SessionError::HandshakeAckTimeout => {
                 IpcError::new(IpcErrorCode::HandshakeTimeout, IpcErrorStage::Handshake, "Host did not acknowledge handshake within deadline")
             }
-            erd_app::SessionError::MissingAuthenticatedRegistration => {
+            maho_app::SessionError::MissingAuthenticatedRegistration => {
                 IpcError::incompatible_peer("Host lacks authenticated UDP registration capability")
             }
-            erd_app::SessionError::Tls(erd_net::tls_psk::TlsPskError::Io(io_err)) => {
+            maho_app::SessionError::Tls(maho_net::tls_psk::TlsPskError::Io(io_err)) => {
                 classify_io_error(io_err, IpcErrorStage::TlsPsk)
             }
-            erd_app::SessionError::Tls(tls_err) => {
+            maho_app::SessionError::Tls(tls_err) => {
                 IpcError::new(IpcErrorCode::ConnectionFailed, IpcErrorStage::TlsPsk, format!("TLS connection failed: {tls_err}"))
             }
-            erd_app::SessionError::Io(io_err) => {
+            maho_app::SessionError::Io(io_err) => {
                 classify_io_error(io_err, IpcErrorStage::Connect)
             }
-            erd_app::SessionError::NoAddress => {
+            maho_app::SessionError::NoAddress => {
                 IpcError::new(IpcErrorCode::NetworkUnreachable, IpcErrorStage::Connect, "Address resolution returned no endpoints")
             }
             other => {
@@ -1315,7 +1315,7 @@ pub mod commands {
         let tcp = tcp_port.unwrap_or(DEFAULT_TCP_PORT);
         let udp = udp_port.unwrap_or(DEFAULT_UDP_PORT);
 
-        let mut config = SessionConfig::direct(host.clone(), "EclipticRD-Tauri");
+        let mut config = SessionConfig::direct(host.clone(), "MahoRD-Tauri");
         config.tcp_port = tcp;
         config.udp_port = udp;
 
@@ -1377,7 +1377,7 @@ pub mod commands {
 
         // Ask for an immediate keyframe so the canvas paints as soon as the
         // host's first (possibly keepalive) frame arrives.
-        let _ = session.send_control(erd_proto::ControlMessage::RequestKeyFrame);
+        let _ = session.send_control(maho_proto::ControlMessage::RequestKeyFrame);
 
         let stop_flag = state.worker_stop_flag();
         let stop_flag_thread = stop_flag.clone();
@@ -1391,7 +1391,7 @@ pub mod commands {
         let audio_playback = state.audio_playback.clone();
 
         let media_thread = thread::Builder::new()
-            .name("erd-media-pipeline".to_string())
+            .name("maho-media-pipeline".to_string())
             .spawn(move || {
                 let mut decoder: Option<HevcDecoder> = None;
                 let request_session = session_udp.clone();
@@ -1499,8 +1499,8 @@ pub mod commands {
         let session = state.session.lock().map_err(|e| e.to_string())?;
         let session = session.as_ref().ok_or("Not connected")?;
         session
-            .send_control(erd_proto::ControlMessage::BitrateAdjust(
-                erd_proto::BitrateAdjust { target_bitrate: target },
+            .send_control(maho_proto::ControlMessage::BitrateAdjust(
+                maho_proto::BitrateAdjust { target_bitrate: target },
             ))
             .map_err(|e| e.to_string())
     }
@@ -1530,7 +1530,7 @@ pub mod commands {
                 text,
             };
             if let Err(error) =
-                session.send_control(erd_proto::ControlMessage::ClipboardSyncUpdate(update))
+                session.send_control(maho_proto::ControlMessage::ClipboardSyncUpdate(update))
             {
                 tracing::debug!(%error, "clipboard push failed");
             }
@@ -1565,8 +1565,8 @@ pub mod commands {
         poll_frame_with_clipboard(&state, |text| {
             #[cfg(target_os = "macos")]
             {
-                use erd_app::PlatformClipboard;
-                erd_app::platform::SystemClipboard
+                use maho_app::PlatformClipboard;
+                maho_app::platform::SystemClipboard
                     .set_text(text)
                     .map(|_| ())
                     .map_err(|e| e.to_string())
@@ -1846,7 +1846,7 @@ pub mod commands {
                 scale: 1.0,
                 logical_width: Some(frame.width),
                 logical_height: Some(frame.height),
-                monitors: vec![erd_app::agent_input::MonitorInfo {
+                monitors: vec![maho_app::agent_input::MonitorInfo {
                     id: 0,
                     name: "Primary Display".to_string(),
                     x: 0,
@@ -1865,7 +1865,7 @@ pub mod commands {
                 scale: 1.0,
                 logical_width: Some(1920),
                 logical_height: Some(1080),
-                monitors: vec![erd_app::agent_input::MonitorInfo {
+                monitors: vec![maho_app::agent_input::MonitorInfo {
                     id: 0,
                     name: "Primary Display".to_string(),
                     x: 0,
@@ -2001,8 +2001,8 @@ fn dispatch_media_event(
 // Reset a failed codec before the shared queue admits another reference chain.
 fn decode_media_frame(
     decoder: &mut Option<HevcDecoder>,
-    frame: &erd_app::AssembledFrame,
-) -> Result<Vec<erd_decode::Nv12Frame>, String> {
+    frame: &maho_app::AssembledFrame,
+) -> Result<Vec<maho_decode::Nv12Frame>, String> {
     let result = (|| {
         let dec = match decoder {
             Some(dec) => dec,
@@ -2013,7 +2013,7 @@ fn decode_media_frame(
         };
         dec.decode(&frame.data, frame.timestamp_ms as i64)
     })();
-    result.map_err(|error: erd_decode::DecodeError| {
+    result.map_err(|error: maho_decode::DecodeError| {
         *decoder = None;
         error.to_string()
     })
@@ -2024,11 +2024,11 @@ fn decode_media_frame(
 fn run_media_pipeline(
     stop: Arc<AtomicBool>,
     mut receive: impl FnMut() -> Result<SessionEvent, SessionError>,
-    request: impl Fn(erd_proto::ControlMessage) -> Result<(), SessionError> + Send + Sync + 'static,
-    mut decode: impl FnMut(erd_app::AssembledFrame, Instant) -> Result<(), String> + Send + 'static,
+    request: impl Fn(maho_proto::ControlMessage) -> Result<(), SessionError> + Send + Sync + 'static,
+    mut decode: impl FnMut(maho_app::AssembledFrame, Instant) -> Result<(), String> + Send + 'static,
     mut other: impl FnMut(SessionEvent),
 ) {
-    use erd_app::frame_queue::FrameQueue;
+    use maho_app::frame_queue::FrameQueue;
 
     // Scope owns exactly one decoder. Closing the queue also happens on unwind,
     // before scope joins, so an idle decoder can never strand its UDP owner.
@@ -2043,14 +2043,14 @@ fn run_media_pipeline(
 
     let queue = FrameQueue::new();
     let request_keyframe = || {
-        if let Err(error) = request(erd_proto::ControlMessage::RequestKeyFrame) {
+        if let Err(error) = request(maho_proto::ControlMessage::RequestKeyFrame) {
             tracing::warn!(%error, "Media recovery keyframe request failed");
         }
     };
     thread::scope(|scope| {
         let close = CloseQueue(&queue);
         let decoder = match thread::Builder::new()
-            .name("erd-media-decode".to_string())
+            .name("maho-media-decode".to_string())
             .spawn_scoped(scope, || {
                 while let Ok((frame, received)) = queue.recv() {
                     if stop.load(Ordering::Relaxed) {
@@ -2494,7 +2494,7 @@ mod tests {
         assert_eq!(status.pin.len(), 8);
         assert!(status.pin.bytes().all(|b| b.is_ascii_digit()));
         assert_ne!(status.pin, "12345678");
-        assert_eq!(status.port, erd_host::session::DEFAULT_TCP_PORT);
+        assert_eq!(status.port, maho_host::session::DEFAULT_TCP_PORT);
         assert!(!status.auto_approve);
         assert!(!status.ip.is_empty());
     }

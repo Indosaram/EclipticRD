@@ -1,6 +1,6 @@
 use std::{io::Write, net::SocketAddr, path::PathBuf};
 
-use erd_host::{HostConfig, HostServer, PairingRecord, PairingStore};
+use maho_host::{HostConfig, HostServer, PairingRecord, PairingStore};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store_path = PathBuf::from(
@@ -16,10 +16,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         added_at_unix_ms: 0,
     })?;
     let mut config =
-        HostConfig::linux_default(None, store, std::env::var("ERD_OUTPUT").ok())?;
+        HostConfig::linux_default(None, store, std::env::var("MAHO_OUTPUT").ok())?;
     config.tcp_addr = SocketAddr::from(([127, 0, 0, 1], 0));
     config.udp_addr = SocketAddr::from(([127, 0, 0, 1], 0));
-    config.host_name = "ERD isolated R3 QA".into();
+    config.host_name = "MahoRD isolated R3 QA".into();
     config.capture_audio = false;
     let server = HostServer::bind(config)?;
     println!("QA_READY {} {}", server.tcp_addr()?.port(), server.udp_addr()?.port());

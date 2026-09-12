@@ -15,11 +15,11 @@ Read the actual loopback tests for no-consent rejection, mismatched granted ID, 
 
 ```bash
 ssh -o BatchMode=yes indo@100.91.254.71 \
-  'export PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig
-   export LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH
-   cd /home/indo/projects/erd-pairing-20260910 &&
+  'export PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig
+   export LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH
+   cd /home/indo/projects/maho-pairing-20260910 &&
    cargo test --manifest-path clients/rust/Cargo.toml \
-     -p erd-host -p erd-app -p tauri-shell'
+     -p maho-host -p maho-app -p tauri-shell'
 ```
 
 Final related run: 340 tests and 3 doc tests passed; 0 failed. Isolated subprocess sub-results are not counted twice. One existing ignored test remains: `discovery_tests::observe_installed_tailscale`, which explicitly requires `--ignored --nocapture`. No skips or weakened assertions were added. The `paired_tls` name filter in an earlier command selected zero tests and is not counted; paired-TLS behavior is covered by the actual named bootstrap success/duplicate scenarios.

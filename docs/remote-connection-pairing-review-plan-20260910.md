@@ -30,7 +30,7 @@ P1은 다음 배포 전에 해결해야 하는 권한·비밀정보·주요 접�
 
 ### 작업 트리 경계
 
-리뷰 시작 시 `clients/rust/tauri-shell/src-tauri/src/lib.rs`와 `discovery_tests.rs`에 기존 수정이 있었다. 리뷰 중 `clients/rust/erd-host/src/main.rs`, 데스크톱 `ui/index.html`, `lib.rs`의 추가 변경을 관찰했다. 이 리뷰 작업은 해당 파일을 수정하지 않았다.
+리뷰 시작 시 `clients/rust/tauri-shell/src-tauri/src/lib.rs`와 `discovery_tests.rs`에 기존 수정이 있었다. 리뷰 중 `clients/rust/maho-host/src/main.rs`, 데스크톱 `ui/index.html`, `lib.rs`의 추가 변경을 관찰했다. 이 리뷰 작업은 해당 파일을 수정하지 않았다.
 
 R11은 시작 시점에는 없던 동시 변경이다. 문서 저장 전 관련 코드를 다시 읽어 반영했다. 데스크톱 `lib.rs`와 `index.html`의 줄 번호는 이 재확인 시점을 기준으로 한다. 이후 동시 변경으로 줄 번호가 이동하면 함께 적힌 함수명을 기준으로 찾는다. 추가된 WebGL 변경의 렌더링 품질은 이번 접속·페어링 리뷰 대상에 포함하지 않았다.
 
@@ -40,10 +40,10 @@ R11은 시작 시점에는 없던 동시 변경이다. 문서 저장 전 관련 
 
 **근거**
 
-- `clients/rust/erd-app/src/pairing.rs:216-255`: 데스크톱 클라이언트의 기본 파일은 사용자 데이터 디렉터리의 `EclipticRD/pairing-keys.json`이다. iOS는 별도 Keychain을 사용한다.
-- `clients/rust/erd-host/src/session.rs:115-120`: 호스트도 사용자 데이터 디렉터리의 같은 파일을 사용한다.
-- `clients/rust/erd-app/src/session.rs:258-266`: 원격 호스트가 발급한 ID·키를 클라이언트가 저장한다.
-- `clients/rust/erd-host/src/session.rs:2078-2085,2420-2435`: 호스트는 해당 저장소의 레코드를 인바운드 TLS PSK 및 handshake 인증에 사용한다.
+- `clients/rust/maho-app/src/pairing.rs:216-255`: 데스크톱 클라이언트의 기본 파일은 사용자 데이터 디렉터리의 `MahoRD/pairing-keys.json`이다. iOS는 별도 Keychain을 사용한다.
+- `clients/rust/maho-host/src/session.rs:115-120`: 호스트도 사용자 데이터 디렉터리의 같은 파일을 사용한다.
+- `clients/rust/maho-app/src/session.rs:258-266`: 원격 호스트가 발급한 ID·키를 클라이언트가 저장한다.
+- `clients/rust/maho-host/src/session.rs:2078-2085,2420-2435`: 호스트는 해당 저장소의 레코드를 인바운드 TLS PSK 및 handshake 인증에 사용한다.
 
 **조건과 영향:** 같은 OS 계정으로 클라이언트와 호스트를 기본 설정에서 실행하는 경우다. 로컬 클라이언트가 원격 호스트 B에 페어링하면 B가 발급해 알고 있는 키가 로컬 호스트의 허용 자격증명으로도 사용될 수 있다. 로컬 호스트가 B의 인바운드 접근을 승인한 적이 없어도 발생한다. 사용자 지정 저장소를 이미 분리한 구성과 iOS Keychain에 같은 파일 충돌을 주장하지 않는다.
 
@@ -55,11 +55,11 @@ R11은 시작 시점에는 없던 동시 변경이다. 문서 저장 전 관련 
 
 **근거**
 
-- `clients/rust/erd-host/src/session.rs:381-392`: `PreAuth`에서 `Handshake`를 허용하고, `Authenticated`에서도 재차 허용한다.
-- `clients/rust/erd-host/src/session.rs:2405-2418`: 승인 후 레코드를 발급하지만 연결 상태에는 승인받은 ID를 보관하지 않는다.
-- `clients/rust/erd-host/src/session.rs:2420-2459`: 요청의 pairing ID를 읽고 bootstrap TLS identity이면 승인 여부나 방금 승인한 ID와의 일치를 요구하지 않은 채 `Authenticated`로 전환한다.
-- `clients/rust/erd-host/src/session.rs:2485-2490`: 이 상태의 TCP 입력은 입력 주입기로 전달된다.
-- `clients/rust/erd-net/src/tls_psk.rs:52-61,157-168`: pairing ID는 TLS PSK identity에 실리는 식별자다. 비밀키 자체와 동등한 비밀로 취급할 수 없다.
+- `clients/rust/maho-host/src/session.rs:381-392`: `PreAuth`에서 `Handshake`를 허용하고, `Authenticated`에서도 재차 허용한다.
+- `clients/rust/maho-host/src/session.rs:2405-2418`: 승인 후 레코드를 발급하지만 연결 상태에는 승인받은 ID를 보관하지 않는다.
+- `clients/rust/maho-host/src/session.rs:2420-2459`: 요청의 pairing ID를 읽고 bootstrap TLS identity이면 승인 여부나 방금 승인한 ID와의 일치를 요구하지 않은 채 `Authenticated`로 전환한다.
+- `clients/rust/maho-host/src/session.rs:2485-2490`: 이 상태의 TCP 입력은 입력 주입기로 전달된다.
+- `clients/rust/maho-net/src/tls_psk.rs:52-61,157-168`: pairing ID는 TLS PSK identity에 실리는 식별자다. 비밀키 자체와 동등한 비밀로 취급할 수 없다.
 
 **조건과 영향:** 유효한 현재 PIN과 기존 pairing ID를 아는 피어가 bootstrap TLS를 연 뒤 `PairingRequest` 없이 해당 ID의 `Handshake`를 보내는 경우다. 해당 페어링 키를 몰라도 호스트 승인 없이 인증된 TCP 입력 경로에 도달할 수 있다. 이 사실만으로 UDP 영상 복호화까지 가능하다고 결론내리지 않는다.
 
@@ -76,9 +76,9 @@ R11은 시작 시점에는 없던 동시 변경이다. 문서 저장 전 관련 
 
 **근거**
 
-- `clients/rust/erd-host/src/session.rs:2645-2661`: TCP 피어와 IP가 같은 `0xff` 패킷을 인증 없이 등록한다. 다른 패킷도 `open_datagram`의 실패를 무시하고 `udp_peer`를 변경한다.
-- `clients/rust/erd-host/src/session.rs:2184-2220`: 최초 등록 주소를 송신 스레드가 값으로 캡처한다. 이후 `udp_peer` 변경이 실제 송신 목적지에 반영되지 않는다.
-- `clients/rust/erd-app/src/session.rs:839`: 정상 클라이언트도 평문 probe를 사용한다.
+- `clients/rust/maho-host/src/session.rs:2645-2661`: TCP 피어와 IP가 같은 `0xff` 패킷을 인증 없이 등록한다. 다른 패킷도 `open_datagram`의 실패를 무시하고 `udp_peer`를 변경한다.
+- `clients/rust/maho-host/src/session.rs:2184-2220`: 최초 등록 주소를 송신 스레드가 값으로 캡처한다. 이후 `udp_peer` 변경이 실제 송신 목적지에 반영되지 않는다.
+- `clients/rust/maho-app/src/session.rs:839`: 정상 클라이언트도 평문 probe를 사용한다.
 
 **조건과 영향:** 같은 클라이언트 머신 또는 같은 NAT 외부 IP의 다른 송신자가 다른 포트에서 먼저 패킷을 보내거나, 이전 연결의 probe가 소켓에 남아 있는 경우다. TCP 접속은 성공해도 암호화된 영상이 잘못된 UDP 포트로 계속 전송될 수 있다. 평문 노출이 아니라 목적지 오등록·접속 실패 문제로 분류한다.
 
@@ -90,8 +90,8 @@ R11은 시작 시점에는 없던 동시 변경이다. 문서 저장 전 관련 
 
 **근거**
 
-- `clients/rust/tauri-shell/src-tauri/src/lib.rs:1438-1444`: `list_pairings`가 `Vec<erd_app::PairingRecord>` 전체를 반환한다.
-- `clients/rust/erd-app/src/pairing.rs:13-19`: `PairingRecord`는 `Serialize` 대상이며 `key`도 직렬화한다.
+- `clients/rust/tauri-shell/src-tauri/src/lib.rs:1438-1444`: `list_pairings`가 `Vec<maho_app::PairingRecord>` 전체를 반환한다.
+- `clients/rust/maho-app/src/pairing.rs:13-19`: `PairingRecord`는 `Serialize` 대상이며 `key`도 직렬화한다.
 - `clients/rust/tauri-shell/src-tauri/src/lib.rs:1908`: 해당 명령이 invoke handler에 등록된다.
 - 데스크톱의 두 `tauri.conf.json`은 `withGlobalTauri: true`, `security.csp: null`이다.
 
@@ -105,7 +105,7 @@ R11은 시작 시점에는 없던 동시 변경이다. 문서 저장 전 관련 
 
 **근거**
 
-- `clients/rust/erd-app/src/session.rs:513-540`: TCP runtime 오류를 이벤트로 전달하고 공통 세션을 `Disconnected`로 바꾼다.
+- `clients/rust/maho-app/src/session.rs:513-540`: TCP runtime 오류를 이벤트로 전달하고 공통 세션을 `Disconnected`로 바꾼다.
 - `clients/rust/ios-shell/src/state.rs:545-565`: runtime을 만들고 저장하지만 이 파일의 실행 경로는 `RuntimeEvents`를 소비하지 않는다.
 - `clients/rust/ios-shell/src/state.rs:188-206`: `stats()`는 별도의 `inner.state`를 반환하며 공통 세션 종료 상태를 확인하지 않는다.
 - `clients/rust/ios-shell/src/state.rs:658-659,775-778`: 미디어 worker는 UDP를 읽고 UDP timeout은 계속 대기한다.
@@ -165,8 +165,8 @@ R11은 시작 시점에는 없던 동시 변경이다. 문서 저장 전 관련 
 - `clients/rust/ios-shell/ui/connection-state.js:307-350`: 선택한 발견 호스트는 항상 `isPaired: false`이며 `connectSelectedHost`는 PIN 없이는 호출을 거부한다.
 - `clients/rust/ios-shell/ui/app.js:357-367`: 선택한 카드 주소이면 별도로 PIN을 무조건 요구한다.
 - `clients/rust/ios-shell/src/state.rs:823-833`: PIN 없는 연결은 입력 host를 `find_by_host`에 넘긴다.
-- `clients/rust/erd-app/src/pairing.rs:297-306`: 검색 대상은 레코드의 이름 또는 ID다.
-- `clients/rust/erd-app/src/session.rs:258-266`: 저장되는 이름은 접속 IP가 아니라 `PairingGrant.host_name`이다.
+- `clients/rust/maho-app/src/pairing.rs:297-306`: 검색 대상은 레코드의 이름 또는 ID다.
+- `clients/rust/maho-app/src/session.rs:258-266`: 저장되는 이름은 접속 IP가 아니라 `PairingGrant.host_name`이다.
 
 **조건과 영향:** IP로 처음 페어링한 뒤 같은 IP로 PIN 없이 직접 연결하면 저장 레코드를 못 찾는다. 발견 카드를 통해서는 키가 저장되어 있어도 PIN 없이 네이티브 조회를 시도하지 않는다. JS 재현에서도 선택 객체의 `isPaired`는 false였고 PIN 없는 연결의 native connect 호출은 0회였다.
 
@@ -178,9 +178,9 @@ R11은 시작 시점에는 없던 동시 변경이다. 문서 저장 전 관련 
 
 **근거**
 
-- `clients/rust/erd-net/src/discovery/apple.rs:159-184`: 유효한 scope ID가 있는 link-local 주소를 `fe80::1%5` 형식으로 선택할 수 있다.
+- `clients/rust/maho-net/src/discovery/apple.rs:159-184`: 유효한 scope ID가 있는 link-local 주소를 `fe80::1%5` 형식으로 선택할 수 있다.
 - 같은 파일 `:193-214`: 공통 parser에는 scope를 잃은 `IpAddr`를 넘기고 성공한 뒤에만 문자열에 scope를 복구한다.
-- `clients/rust/erd-net/src/discovery.rs:25-35,170-176`: 공통 검증은 link-local IPv6를 모두 배제한다.
+- `clients/rust/maho-net/src/discovery.rs:25-35,170-176`: 공통 검증은 link-local IPv6를 모두 배제한다.
 
 **조건과 영향:** IPv4 또는 global/ULA IPv6 없이 유효한 scoped link-local 주소만 있는 Apple 발견 결과가 목록에서 사라진다.
 
@@ -192,7 +192,7 @@ R11은 시작 시점에는 없던 동시 변경이다. 문서 저장 전 관련 
 
 **근거**
 
-- `clients/rust/erd-host/src/main.rs:87-93`: 명시적 PIN 옵션이 없으면 무작위 PIN 대신 `12345678`을 사용하도록 리뷰 중 변경됐다. `--pin generate`는 여전히 별도 경로다.
+- `clients/rust/maho-host/src/main.rs:87-93`: 명시적 PIN 옵션이 없으면 무작위 PIN 대신 `12345678`을 사용하도록 리뷰 중 변경됐다. `--pin generate`는 여전히 별도 경로다.
 - `clients/rust/tauri-shell/src-tauri/src/lib.rs:1067-1081`: 저장 키 재접속의 모든 실패 또는 저장 레코드 부재에서 `pair_with_pin("12345678")`를 실행한다.
 
 **조건과 영향:** 기본 옵션의 bootstrap PIN이 예측 가능해진다. R2가 남은 경우 유효한 PIN을 알아야 한다는 전제가 크게 약해진다. 재접속 실패는 네트워크 오류, 키 폐기, 잘못된 대상 선택 등 원인이 다른데 모두 새 페어링 시도로 바뀐다. 사용자가 PIN을 입력하지 않았는데 호스트 승인 요청 또는 추가 인증 시도가 발생할 수 있다.
@@ -243,14 +243,14 @@ LAN/Tailscale 발견 또는 직접 주소 입력
 
 - 대상: R1, R2, R4, R11.
 - 순서: 인바운드/아웃바운드 저장소 분리와 이관 정책 확정 -> bootstrap 승인 ID 결속 -> 목록 IPC 공개 DTO -> PIN·재페어링 정책 적용.
-- 변경 위치: `erd-app/src/pairing.rs`, `erd-host/src/session.rs`, `erd-host/src/main.rs`, 데스크톱 명령·관련 tests.
+- 변경 위치: `maho-app/src/pairing.rs`, `maho-host/src/session.rs`, `maho-host/src/main.rs`, 데스크톱 명령·관련 tests.
 - 이관 원칙: 기존 파일을 삭제하지 않는다. 모호한 레코드는 보존하고 호스트 재승인 대상으로 분류한다. 새 허용 목록을 예전의 공용 파일로 다시 합치는 rollback은 하지 않는다.
 - 단계 종료: R1/R2의 실제 loopback TLS 거부·허용 테스트, 목록 JSON 계약, 인증 오류별 무자동재시도 테스트가 모두 통과한다.
 
 ### 단계 B. 미디어 등록 인증
 
 - 대상: R3. 단계 A와 모듈 작업은 분리할 수 있지만 통합 검증은 A 이후 수행한다.
-- 변경 위치: `erd-app/src/session.rs`, `erd-host/src/session.rs`, 필요 시 `erd-proto` 등록 메시지와 `erd-net` datagram 계약.
+- 변경 위치: `maho-app/src/session.rs`, `maho-host/src/session.rs`, 필요 시 `maho-proto` 등록 메시지와 `maho-net` datagram 계약.
 - compatibility 결정: 클라이언트와 호스트를 함께 갱신한다. 구형 평문 probe를 몰래 허용하는 fallback을 두지 않는다. wire 변경의 capability 또는 protocol-version 협상 방식은 구현 전 확정한다.
 - 단계 종료: 위조·이전 세션 등록은 모두 거부되고 새 세션의 올바른 수신 소켓에서 프레임이 관찰된다.
 
@@ -258,7 +258,7 @@ LAN/Tailscale 발견 또는 직접 주소 입력
 
 - 대상: R8, R9, R10.
 - 선행 조건: 단계 A의 저장소 역할 및 공개 DTO가 정해져야 한다.
-- 변경 위치: 데스크톱 `list_hosts`/`connect`, iOS discovery/commands/state, `erd-app` 저장 메타데이터, `erd-net` Apple endpoint 처리.
+- 변경 위치: 데스크톱 `list_hosts`/`connect`, iOS discovery/commands/state, `maho-app` 저장 메타데이터, `maho-net` Apple endpoint 처리.
 - UX: 새 호스트는 PIN 입력과 승인 대기, 저장 호스트는 키로 재접속, 폐기된 키는 이유와 명시적 재페어링 행동을 제공한다. 발견 실패가 직접 접속을 막으면 안 된다.
 - 선택된 호스트의 주소·포트는 제출 시 최신 발견 레코드와 대조한다. 광고 정보만으로 기존 키를 다른 피어에 결속하지 않는다.
 - 단계 종료: 앱 재시작·주소 변경·동명 호스트·LAN/Tailscale 전환·IPv6 scope 조건의 키 선택과 접속 결과가 계약에 맞는다.

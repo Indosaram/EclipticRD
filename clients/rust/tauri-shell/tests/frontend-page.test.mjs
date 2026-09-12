@@ -23,7 +23,7 @@ test('Computers page renders sidebar, This Computer card, and nav with aria-curr
     })`);
 
     expect(result.hasSidebar).toBe(true);
-    expect(result.sidebarHeader).toBe('EclipticRD');
+    expect(result.sidebarHeader).toBe('MahoRD');
     expect(result.navComputersCurrent).toBe('page');
     expect(result.navFavoritesCurrent).toBe('false');
 

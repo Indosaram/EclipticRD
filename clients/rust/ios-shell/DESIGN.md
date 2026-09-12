@@ -1,4 +1,4 @@
-# EclipticRD iOS Client Design Specification
+# MahoRD iOS Client Design Specification
 
 Status: implementation contract for the physical iPhone client.
 Authority: adaptation of `clients/rust/tauri-shell/DESIGN.md` to mobile handheld touch ergonomics and iOS safe-area layout.
@@ -9,7 +9,7 @@ Mode: Operate.
 
 ## 1. Product Truth & Mobile Ergonomics
 
-EclipticRD on iOS is an ultra-low latency remote desktop operator's tool for iPhone. The interface carries the established desktop charcoal and coral visual identity while respecting physical touchscreen constraints:
+MahoRD on iOS is an ultra-low latency remote desktop operator's tool for iPhone. The interface carries the established desktop charcoal and coral visual identity while respecting physical touchscreen constraints:
 
 - **Thumb-Zone Architecture**: Primary connection actions and floating in-session controls sit within the lower half and accessible margins of the screen, avoiding reach fatigue.
 - **Safe-Area Inset Enforcement**: The UI strictly honors `env(safe-area-inset-*)` across Dynamic Island, camera notches, rounded display corners, and the bottom home indicator.
@@ -141,7 +141,7 @@ Touches landing on the canvas are mapped to the aspect-fit video rectangle:
 ## 6. Pairing & Credential Security
 
 - **PIN Security**: Pairing PIN is strictly ephemeral in memory and never stored in `localStorage` or persisted to unencrypted files.
-- **Host Persistence**: The last connected host address may be stored in `localStorage` (`eclipticrd.ios.last_host`) for user convenience.
+- **Host Persistence**: The last connected host address may be stored in `localStorage` (`mahord.ios.last_host`) for user convenience.
 - **Authoritative Validation**: Host must be non-empty; PIN if provided must be exactly 8 ASCII digits (`^[0-9]{8}$`).
 - **QA Provisioning**: `startup()` returns `{ host, auto_connect }`. If `auto_connect` is true and a host is present, the app automatically calls `connect({ host, pin: null })`, exercising identical paths without leaking keys.
 
@@ -159,7 +159,7 @@ Touches landing on the canvas are mapped to the aspect-fit video rectangle:
 ## 8. LAN Discovery & Local Network Ergonomics
 
 ### Bonjour Service Contract
-- Discovers hosts advertising `_erd._tcp.local.` via system DNS-SD (`DNSServiceBrowse` / native Rust backend).
+- Discovers hosts advertising `_maho-rd._tcp.local.` via system DNS-SD (`DNSServiceBrowse` / native Rust backend).
 - Discovered attributes: `id` (service fullname), `name` (host display name), `ip` (resolved IPv4 or scoped IPv6), `os` (`macos`, `windows`, `linux`), `tcp_port` (signaling/control port), `udp_port` (media datagram port).
 
 ### Visual Hierarchy & Mobile Card Architecture
@@ -171,7 +171,7 @@ Touches landing on the canvas are mapped to the aspect-fit video rectangle:
 - **Distinct Discovery States**:
   - `loading`: Subtle scanning indicator with "Scanning local network...". Shown during initial DNS-SD resolution or when iOS local network permission alert is presented.
   - `idle` (with hosts): List of discovered cards with refresh trigger button.
-  - `idle` (empty): "No nearby EclipticRD hosts found on this network. Connect by IP address below."
+  - `idle` (empty): "No nearby MahoRD hosts found on this network. Connect by IP address below."
   - `error`: Distinct warning banner (`--warning` text, `--card-bg`) indicating permission denied or mDNS failure. Manual IP connection is never blocked.
 
 ### Security Invariant: Unauthenticated Discovery Hints

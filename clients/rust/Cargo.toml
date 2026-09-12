@@ -1,13 +1,13 @@
 [workspace]
 resolver = "2"
 members = [
-    "erd-proto",
-    "erd-net",
-    "erd-decode",
-    "erd-render",
-    "erd-app",
-   "erd-host",
-   "erd-mobile",
+    "maho-proto",
+    "maho-net",
+    "maho-decode",
+    "maho-render",
+    "maho-app",
+   "maho-host",
+   "maho-mobile",
    "tauri-shell",
     "ios-shell",
 ]

@@ -1,5 +1,5 @@
 /**
- * Session overlay core logic for the EclipticRD Tauri shell.
+ * Session overlay core logic for the MahoRD Tauri shell.
  *
  * Pure, DOM-free logic ported from ui/session-overlay.js as a strict
  * TypeScript ES module.

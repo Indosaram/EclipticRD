@@ -1,6 +1,6 @@
 use super::*;
-use erd_net::{PskIdentity, TlsPskServer};
-use erd_proto::{
+use maho_net::{PskIdentity, TlsPskServer};
+use maho_proto::{
     ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdate, ControlMessage, PacketHeader,
     PacketType, WireCodec,
 };
@@ -74,7 +74,7 @@ impl Connected {
         });
         let session = ClientSession::new(config).unwrap();
         session
-            .connect_with_pairing(erd_app::PairingRecord {
+            .connect_with_pairing(maho_app::PairingRecord {
                 id: "tauri-mailbox".into(),
                 name: "host".into(),
                 key: key.to_vec(),
@@ -174,7 +174,7 @@ async fn tcp_stop_error_survives_full_media_and_frame_cleanup() {
         worker_joined.store(true, Ordering::SeqCst);
     }));
     // When stop supplies its typed failure to the actual teardown consumer.
-    // Runtime panic conversion itself is covered by erd-app's private test.
+    // Runtime panic conversion itself is covered by maho-app's private test.
     let result = disconnect_with_stop(&fixture.state, |runtime| {
         runtime.stop()?;
         Err(SessionError::TcpRuntimePanicked(

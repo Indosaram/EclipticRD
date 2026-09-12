@@ -57,7 +57,7 @@ export interface Library<T extends Host = Host> {
   toggleFavorite(ip: string): void;
 }
 
-const FAVORITES_KEY = 'eclipticrd.favorites.v1';
+const FAVORITES_KEY = 'mahord.favorites.v1';
 
 export function normalizeHostKey(ip: string): string {
   return ip.trim().toLowerCase();

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# EclipticRD Linux Binary Installer
-# Copies compiled binaries (erd-host, erd-client) to /usr/local/bin and verifies runtime dependencies.
+# MahoRD Linux Binary Installer
+# Copies compiled binaries (maho-host, maho-client) to /usr/local/bin and verifies runtime dependencies.
 
 set -euo pipefail
 
 DEST_DIR="${DESTDIR:-/usr/local/bin}"
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-echo "=== EclipticRD Linux Installer ==="
+echo "=== MahoRD Linux Installer ==="
 echo "Target installation directory: ${DEST_DIR}"
 
 # 1. Dependency Checks (FFmpeg runtime and libraries)
@@ -97,8 +97,8 @@ if [ ! -w "${DEST_DIR}" ] && [ "$(id -u)" -ne 0 ]; then
     exec sudo bash "$0" "$@"
 fi
 
-install_binary "erd-host"
-install_binary "erd-client"
+install_binary "maho-host"
+install_binary "maho-client"
 install_binary "tauri-shell"
 
 echo "=== Installation finished successfully ==="

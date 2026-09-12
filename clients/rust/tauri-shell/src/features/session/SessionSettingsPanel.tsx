@@ -21,7 +21,7 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 
-export const QUALITY_STORAGE_KEY = "erd-quality-mbps";
+export const QUALITY_STORAGE_KEY = "maho-quality-mbps";
 
 export const QUALITY_OPTIONS = [8, 25, 50, 100] as const;
 

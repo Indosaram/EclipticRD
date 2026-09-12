@@ -1,4 +1,4 @@
-use erd_decode::Nv12Frame;
+use maho_decode::Nv12Frame;
 
 pub const FRAME_HEADER_SIZE: usize = 16;
 

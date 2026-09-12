@@ -6,8 +6,8 @@ pub mod state;
 #[cfg(test)]
 mod tests;
 
-pub use erd_app::{IpcError, IpcErrorCode, IpcErrorStage, PairingEndpoint, PairingSummary};
-pub use erd_render::AudioOutputEvent;
+pub use maho_app::{IpcError, IpcErrorCode, IpcErrorStage, PairingEndpoint, PairingSummary};
+pub use maho_render::AudioOutputEvent;
 pub use state::{AppState, ConnectionState, SessionStats, WorkerCompletion, WorkerKind};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -31,5 +31,5 @@ pub fn run() {
             commands::startup,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running EclipticRD iOS application");
+        .expect("error while running MahoRD iOS application");
 }

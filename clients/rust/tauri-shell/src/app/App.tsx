@@ -11,7 +11,7 @@ import {
   isNativeAvailable,
   invokeCommand,
   agentReleaseAll,
-  type ErdCommand,
+  type MahoCommand,
 } from "@/lib/ipc"
 
 export interface AppProps {
@@ -28,7 +28,7 @@ export function App(props: AppProps = {}) {
       propConnection ??
       createConnection({
         invoke: (cmd: string, args?: unknown) =>
-          invokeCommand(cmd as ErdCommand, args as Record<string, unknown> | undefined),
+          invokeCommand(cmd as MahoCommand, args as Record<string, unknown> | undefined),
         nativeAvailable: native,
         releaseInputs: async () => {
           try {

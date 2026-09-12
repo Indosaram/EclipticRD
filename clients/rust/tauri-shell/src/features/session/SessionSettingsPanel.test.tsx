@@ -180,8 +180,8 @@ describe("SessionSettingsPanel", () => {
     expect(setBitrateCalls[0]).toBe(25);
     expect(typeof setBitrateCalls[0]).toBe("number");
 
-    // Asserts: persists to localStorage under the key "erd-quality-mbps"
-    expect(globalThis.localStorage.getItem("erd-quality-mbps")).toBe("25");
+    // Asserts: persists to localStorage under the key "maho-quality-mbps"
+    expect(globalThis.localStorage.getItem("maho-quality-mbps")).toBe("25");
     expect(globalThis.localStorage.getItem(QUALITY_STORAGE_KEY)).toBe("25");
     expect(savedBitrateMbps()).toBe(25);
 
@@ -191,14 +191,14 @@ describe("SessionSettingsPanel", () => {
     expect(setBitrateCalls.length).toBe(2);
     expect(setBitrateCalls[1]).toBe(100);
     expect(typeof setBitrateCalls[1]).toBe("number");
-    expect(globalThis.localStorage.getItem("erd-quality-mbps")).toBe("100");
+    expect(globalThis.localStorage.getItem("maho-quality-mbps")).toBe("100");
     expect(globalThis.localStorage.getItem(QUALITY_STORAGE_KEY)).toBe("100");
     expect(savedBitrateMbps()).toBe(100);
 
     // User chooses 8 Mbps
     await applyBitrateCeiling(8, true);
     expect(setBitrateCalls[2]).toBe(8);
-    expect(globalThis.localStorage.getItem("erd-quality-mbps")).toBe("8");
+    expect(globalThis.localStorage.getItem("maho-quality-mbps")).toBe("8");
     expect(savedBitrateMbps()).toBe(8);
   });
 

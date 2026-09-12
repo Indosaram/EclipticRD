@@ -1,4 +1,4 @@
-use erd_app::{IpcError, IpcErrorStage, PairingStore, PairingSummary};
+use maho_app::{IpcError, IpcErrorStage, PairingStore, PairingSummary};
 use serde::Deserialize;
 use tauri::State;
 
@@ -15,7 +15,7 @@ pub struct TouchEventPayload {
 }
 
 #[tauri::command]
-pub async fn list_hosts(state: State<'_, AppState>) -> Result<Vec<erd_net::discovery::DiscoveredHost>, String> {
+pub async fn list_hosts(state: State<'_, AppState>) -> Result<Vec<maho_net::discovery::DiscoveredHost>, String> {
     state.list_discovered_hosts().await
 }
 
@@ -67,7 +67,7 @@ pub async fn connect(
         return Err(IpcError::pairing_required("PIN required for initial authorization"));
     }
 
-    let _ = build_session_config(&host, tcp_port, udp_port, "EclipticRD iOS")
+    let _ = build_session_config(&host, tcp_port, udp_port, "MahoRD iOS")
         .map_err(|e| IpcError::connection_failed(IpcErrorStage::Client, e))?;
     state.connect_async(host, tcp_port, udp_port, pin, pairing_id).await
 }

@@ -5,10 +5,10 @@
 - Prior Task ID: `st_01a0892a`
 - Parent Session: `01a0890a-69f1-7e5e-80cb-959dc3ddb61c`
 - Root Session: `01a0890a-69f1-7e5e-80cb-959dc3ddb61c`
-- Target Systems: `clients/rust/erd-host/src/session.rs`, `clients/rust/erd-host/src/main.rs`
+- Target Systems: `clients/rust/maho-host/src/session.rs`, `clients/rust/maho-host/src/main.rs`
 - Reference Contracts: `.omo/pairing-20260910/contracts.md` (Sections 1.2, 1.9, 4.1, 4.2, 4.3, 10.1, Amendments 3 & 4)
 - Base Commit: `71f8b05f5a0e9d53ce0249beb46ca864b7a836f8`
-- Execution Environment: Omarchy Linux (`indo@100.91.254.71`) at `/home/indo/projects/erd-pairing-20260910` with `PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig` and `LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH`
+- Execution Environment: Omarchy Linux (`indo@100.91.254.71`) at `/home/indo/projects/maho-pairing-20260910` with `PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig` and `LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH`
 
 ---
 
@@ -29,11 +29,11 @@ This report documents the verification, gap completion, and audit reconciliation
 
 ### 2.1 Provenance RED Artifacts (`st_01a0892a`)
 Stored in `.omo/pairing-20260910/evidence/st_01a0892a-red-regression.log`:
-- R11 unpatched binary panicked at `erd-host/src/main.rs:241:9` (`assertion left == right failed: default invocation must invoke generator, left: 0, right: 1`).
+- R11 unpatched binary panicked at `maho-host/src/main.rs:241:9` (`assertion left == right failed: default invocation must invoke generator, left: 0, right: 1`).
 - R2 unpatched session panicked on all three scenarios:
-  - `test_bootstrap_authenticated_session_rejects_duplicate_handshake`: panicked at `erd-host/src/session.rs:4589:9: server must reject duplicate handshake with AlreadyAuthenticated, got: Ok(())`.
-  - `test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input`: panicked at `erd-host/src/session.rs:4332:9: server must reject unconsented bootstrap handshake with PreAuth, got: Ok(())`.
-  - `test_bootstrap_consent_b_cannot_use_a`: panicked at `erd-host/src/session.rs:4412:9: server must reject handshake with mismatched pairing ID with IdentityMismatch, got: Ok(())`.
+  - `test_bootstrap_authenticated_session_rejects_duplicate_handshake`: panicked at `maho-host/src/session.rs:4589:9: server must reject duplicate handshake with AlreadyAuthenticated, got: Ok(())`.
+  - `test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input`: panicked at `maho-host/src/session.rs:4332:9: server must reject unconsented bootstrap handshake with PreAuth, got: Ok(())`.
+  - `test_bootstrap_consent_b_cannot_use_a`: panicked at `maho-host/src/session.rs:4412:9: server must reject handshake with mismatched pairing ID with IdentityMismatch, got: Ok(())`.
 
 ### 2.2 Independent Mutation Proofs (`st_01a08938`)
 Executed on remote Omarchy builder (`indo@100.91.254.71`):
@@ -42,13 +42,13 @@ Executed on remote Omarchy builder (`indo@100.91.254.71`):
    - Mutated `select_pin` default case to return `"12345678"`.
    - Command:
      ```bash
-     ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p erd-host pin"
+     ssh indo@100.91.254.71 "cd /home/indo/projects/maho-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p maho-host pin"
      ```
    - Exit code: `101`
    - Output:
      ```text
      ---- tests::test_pin_default_selects_injected_generator_branch stdout ----
-     thread 'tests::test_pin_default_selects_injected_generator_branch' panicked at erd-host/src/main.rs:243:9:
+     thread 'tests::test_pin_default_selects_injected_generator_branch' panicked at maho-host/src/main.rs:243:9:
      assertion `left == right` failed: default invocation must invoke generator
        left: 0
       right: 1
@@ -58,17 +58,17 @@ Executed on remote Omarchy builder (`indo@100.91.254.71`):
    - Mutated `session.rs` to bypass `granted_pairing_id` checks on bootstrap connections.
    - Command:
      ```bash
-     ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p erd-host bootstrap"
+     ssh indo@100.91.254.71 "cd /home/indo/projects/maho-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p maho-host bootstrap"
      ```
    - Exit code: `101`
    - Output:
      ```text
      ---- session::tests::test_bootstrap_consent_b_cannot_use_a stdout ----
-     thread 'session::tests::test_bootstrap_consent_b_cannot_use_a' panicked at erd-host/src/session.rs:4508:9:
+     thread 'session::tests::test_bootstrap_consent_b_cannot_use_a' panicked at maho-host/src/session.rs:4508:9:
      server must reject handshake with mismatched pairing ID with IdentityMismatch, got: Ok(())
 
      ---- session::tests::test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input stdout ----
-     thread 'session::tests::test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input' panicked at erd-host/src/session.rs:4423:9:
+     thread 'session::tests::test_bootstrap_without_consent_handshake_rejected_with_no_capture_or_input' panicked at maho-host/src/session.rs:4423:9:
      server must reject unconsented bootstrap handshake with PreAuth, got: Ok(())
      ```
 
@@ -76,13 +76,13 @@ Executed on remote Omarchy builder (`indo@100.91.254.71`):
    - Mutated `session.rs` to allow `PacketType::Handshake` in `SessionState::Authenticated` without returning `AlreadyAuthenticated`.
    - Command:
      ```bash
-     ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p erd-host test_bootstrap_authenticated_session_rejects_duplicate_handshake"
+     ssh indo@100.91.254.71 "cd /home/indo/projects/maho-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p maho-host test_bootstrap_authenticated_session_rejects_duplicate_handshake"
      ```
    - Exit code: `101`
    - Output:
      ```text
      ---- session::tests::test_bootstrap_authenticated_session_rejects_duplicate_handshake stdout ----
-     thread 'session::tests::test_bootstrap_authenticated_session_rejects_duplicate_handshake' panicked at erd-host/src/session.rs:4690:9:
+     thread 'session::tests::test_bootstrap_authenticated_session_rejects_duplicate_handshake' panicked at maho-host/src/session.rs:4690:9:
      server must reject duplicate handshake with AlreadyAuthenticated, got: Ok(())
      ```
 
@@ -90,7 +90,7 @@ Executed on remote Omarchy builder (`indo@100.91.254.71`):
 
 ## 3. Implementation Details
 
-### 3.1 `clients/rust/erd-host/src/main.rs`
+### 3.1 `clients/rust/maho-host/src/main.rs`
 - **PIN Selection Function:**
   ```rust
   pub fn select_pin<F>(
@@ -124,7 +124,7 @@ Executed on remote Omarchy builder (`indo@100.91.254.71`):
   - `test_pin_validation_accepts_8_digits_and_rejects_invalid`: bounds format validation (8 decimal digits).
   - `test_random_pin_retained_and_format_valid`: validates `random_pin()` format without probabilistic inequality.
 
-### 3.2 `clients/rust/erd-host/src/session.rs`
+### 3.2 `clients/rust/maho-host/src/session.rs`
 - **Typed Error Domain:**
   ```rust
   #[error("session is already authenticated")]
@@ -187,16 +187,16 @@ Executed on remote Omarchy builder (`indo@100.91.254.71`):
 
 ## 4. Green Verification (Final Results)
 
-All tests executed independently under `st_01a08938` on remote host `indo@100.91.254.71` with `PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig` and `LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH`.
+All tests executed independently under `st_01a08938` on remote host `indo@100.91.254.71` with `PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig` and `LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH`.
 
 ### 4.1 Bootstrap Test Suite
 ```bash
-ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p erd-host bootstrap"
+ssh indo@100.91.254.71 "cd /home/indo/projects/maho-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p maho-host bootstrap"
 ```
 **Exit Code:** `0`
 **Output:**
 ```text
-     Running unittests src/lib.rs (clients/rust/target/debug/deps/erd_host-3d5d23414c23b8a6)
+     Running unittests src/lib.rs (clients/rust/target/debug/deps/maho_host-3d5d23414c23b8a6)
 
 running 7 tests
 test session::tests::lockout_disables_bootstrap_after_five_failures ... ok
@@ -209,7 +209,7 @@ test session::tests::test_bootstrap_normal_b_and_paired_a_work ... ok
 
 test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 83 filtered out; finished in 0.52s
 
-     Running unittests src/main.rs (clients/rust/target/debug/deps/erd_host-63f9d0457be7c696)
+     Running unittests src/main.rs (clients/rust/target/debug/deps/maho_host-63f9d0457be7c696)
 
 running 1 test
 test tests::test_pin_explicit_bootstrap_pin_bypasses_generator ... ok
@@ -219,12 +219,12 @@ test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; fini
 
 ### 4.2 PIN Test Suite
 ```bash
-ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p erd-host pin"
+ssh indo@100.91.254.71 "cd /home/indo/projects/maho-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p maho-host pin"
 ```
 **Exit Code:** `0`
 **Output:**
 ```text
-     Running unittests src/main.rs (clients/rust/target/debug/deps/erd_host-63f9d0457be7c696)
+     Running unittests src/main.rs (clients/rust/target/debug/deps/maho_host-63f9d0457be7c696)
 
 running 5 tests
 test tests::test_pin_validation_accepts_8_digits_and_rejects_invalid ... ok
@@ -236,9 +236,9 @@ test tests::test_pin_generate_flag_selects_injected_generator_branch ... ok
 test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
 ```
 
-### 4.3 Full `erd-host` Package Suite
+### 4.3 Full `maho-host` Package Suite
 ```bash
-ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p erd-host"
+ssh indo@100.91.254.71 "cd /home/indo/projects/maho-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH cargo test --manifest-path clients/rust/Cargo.toml -p maho-host"
 ```
 **Exit Code:** `0`
 **Results:**
@@ -251,7 +251,7 @@ ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFI
 
 ### 4.4 Clippy Verification
 ```bash
-ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/erd-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib:$LD_LIBRARY_PATH cargo clippy --manifest-path clients/rust/Cargo.toml -p erd-host --all-targets --no-deps -- -D warnings"
+ssh indo@100.91.254.71 "cd /home/indo/projects/maho-pairing-20260910 && PKG_CONFIG_PATH=/home/indo/maho-ffmpeg7/lib/pkgconfig LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib:$LD_LIBRARY_PATH cargo clippy --manifest-path clients/rust/Cargo.toml -p maho-host --all-targets --no-deps -- -D warnings"
 ```
 **Exit Code:** `0`
 **Status:** Clean (0 warnings, 0 errors).
@@ -261,8 +261,8 @@ ssh indo@100.91.254.71 "cd /home/indo/projects/erd-pairing-20260910 && PKG_CONFI
 ## 5. Scope & Boundary Checklist
 
 - [x] Provenance reconciled between prior `st_01a0892a` artifacts and active `st_01a08938` execution.
-- [x] Only assigned files edited: `clients/rust/erd-host/src/session.rs`, `clients/rust/erd-host/src/main.rs`.
-- [x] No edits to `erd-app`, `tauri-shell`, or `ios-shell`.
+- [x] Only assigned files edited: `clients/rust/maho-host/src/session.rs`, `clients/rust/maho-host/src/main.rs`.
+- [x] No edits to `maho-app`, `tauri-shell`, or `ios-shell`.
 - [x] Existing `random_pin()` implementation retained.
 - [x] Injected generator seam used for default PIN proof without probabilistic inequality assertions.
 - [x] Production `main()` default PIN uses `random_pin`.

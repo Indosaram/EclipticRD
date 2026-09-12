@@ -4,7 +4,7 @@
 
 Implemented standard DNS-SD/mDNS discovery, independent of Tailscale, across
 the host, desktop client and iOS shell. Linux and Windows development hosts were
-restarted with the new implementation. The updated `com.eclipticrd.ios` app was
+restarted with the new implementation. The updated `com.projectmaho.mahord` app was
 installed and launched on the physical iPhone 16 Plus.
 
 **Physical iPhone host-list display, card-to-host authentication, video, audio
@@ -17,7 +17,7 @@ performed. This task updates the existing iOS app, not a new Android application
 
 ## Design
 
-- Service: `_erd._tcp.local.`, SRV port matching the actual TCP listener.
+- Service: `_maho-rd._tcp.local.`, SRV port matching the actual TCP listener.
 - TXT metadata: protocol version 3, name, OS and UDP port. No PIN or pairing key.
 - Apple browser: system DNSService APIs, persistent resolution/address callbacks,
   removal handling, scoped addresses, permission errors and cancellable workers.
@@ -41,12 +41,12 @@ Sources:
 ## Verification
 
 All non-iOS compilation/tests ran on Omarchy, in the isolated source workspace
-`/home/indo/projects/erd-lan-20260909`. Only physical `aarch64-apple-ios` compilation
+`/home/indo/projects/maho-lan-20260909`. Only physical `aarch64-apple-ios` compilation
 and Xcode signing/packaging ran on Mac.
 
 | Check | Observed result |
 | --- | --- |
-| Initial network RED | Missing `erd_net::discovery`, compiler exit 101 |
+| Initial network RED | Missing `maho_net::discovery`, compiler exit 101 |
 | Initial mobile RED | 0 pass, 14 fail |
 | Final mobile UI tests | 53 pass, 0 fail across 7 files |
 | Desktop UI tests | 56 pass, 0 fail across 4 files |
@@ -56,7 +56,7 @@ and Xcode signing/packaging ran on Mac.
 | Host Rust unit tests | 70 pass |
 | Host integration tests | 6 pass |
 | Desktop Rust unit tests | 50 pass, 1 existing live-surface test ignored |
-| Linux build | `erd-host`, `erd-net`, `tauri-shell`, `erd-ios` successful |
+| Linux build | `maho-host`, `maho-net`, `tauri-shell`, `maho-ios` successful |
 | Windows cross-build on Omarchy | `x86_64-pc-windows-gnu` release successful |
 | Physical iOS compile | Successful |
 | iOS signed build and IPA export | Successful after Swift library-path correction |
@@ -72,7 +72,7 @@ and `scale_to_uinput`. This discovery change did not modify those definitions.
 New discovery compiler errors and warnings were fixed, not suppressed.
 
 The first desktop test run could not load `libavutil.so.59`; setting
-`LD_LIBRARY_PATH=/home/indo/erd-ffmpeg7/lib` resolved the environment failure.
+`LD_LIBRARY_PATH=/home/indo/maho-ffmpeg7/lib` resolved the environment failure.
 An initial iOS link failed on Swift compatibility symbols because the old
 `TOOLCHAIN_DIR` resolved to a Metal toolchain. The ARM64 project now uses the
 selected Xcode's `XcodeDefault.xctoolchain` Swift library directory.
@@ -81,15 +81,15 @@ selected Xcode's `XcodeDefault.xctoolchain` Swift library directory.
 
 ### Windows
 
-- Installed binary: `C:\erd\clients\rust\target\release\erd-host.exe`.
-- Previous binary backup: `C:\erd\erd-host-before-lan.exe`.
-- Existing scheduled task `erd-host-run` and its authentication configuration
+- Installed binary: `C:\maho\clients\rust\target\release\maho-host.exe`.
+- Previous binary backup: `C:\maho\maho-host-before-lan.exe`.
+- Existing scheduled task `maho-host-run` and its authentication configuration
   were preserved. New observed process: PID 20376.
-- Added `EclipticRD-LAN-mDNS`, inbound UDP 5353, restricted to LocalSubnet and
+- Added `MahoRD-LAN-mDNS`, inbound UDP 5353, restricted to LocalSubnet and
   this executable.
 - Host log confirms LAN advertisement and listeners on TCP 19730 / UDP 19731.
-- Mac `dns-sd -B _erd._tcp local.` observed `DESKTOP-1LAPJMP`.
-- `dns-sd -L DESKTOP-1LAPJMP _erd._tcp local.` resolved
+- Mac `dns-sd -B _maho-rd._tcp local.` observed `DESKTOP-1LAPJMP`.
+- `dns-sd -L DESKTOP-1LAPJMP _maho-rd._tcp local.` resolved
   `DESKTOP-1LAPJMP.local.:19730`, interface 14, with
   `protocol=3 udp_port=19731 os=windows name=DESKTOP-1LAPJMP`.
 - TCP connection to actual LAN address `192.168.0.60:19730` succeeded.
@@ -101,10 +101,10 @@ the iPhone displayed or connected to that host.
 
 - Preserved the running host's arguments and graphical-session environment.
 - Backup/new binary and restricted logs are under
-  `/home/indo/projects/erd-lan-20260909/deployment`.
+  `/home/indo/projects/maho-lan-20260909/deployment`.
 - New observed process: PID 2241989.
-- Actual `erd-discover --timeout-secs 5` output included:
-  `indo._erd._tcp.local.`, IP `1.231.34.236`, OS `linux`,
+- Actual `maho-discover --timeout-secs 5` output included:
+  `indo._maho-rd._tcp.local.`, IP `1.231.34.236`, OS `linux`,
   TCP 19730, UDP 19731.
 - Linux is on a different physical subnet from the phone/Windows LAN. Its
   visibility on its own LAN is not evidence it appears on the phone's LAN.
@@ -113,13 +113,13 @@ the iPhone displayed or connected to that host.
 
 - Physical device: iPhone 16 Plus, CoreDevice
   `F1C581E0-A54E-5E85-8013-4F02DF80F98B`.
-- Package: `clients/rust/ios-shell/gen/apple/build/arm64/EclipticRD.ipa`.
-- Installation succeeded, bundle ID `com.eclipticrd.ios`.
+- Package: `clients/rust/ios-shell/gen/apple/build/arm64/MahoRD.ipa`.
+- Installation succeeded, bundle ID `com.projectmaho.mahord`.
 - Installed container:
-  `/private/var/containers/Bundle/Application/D0ADF61A-BB1C-4E8D-902E-D6644B959A33/EclipticRD.app/`.
+  `/private/var/containers/Bundle/Application/D0ADF61A-BB1C-4E8D-902E-D6644B959A33/MahoRD.app/`.
 - Launch with `--terminate-existing` succeeded.
 - Packaged Info.plist contains `NSLocalNetworkUsageDescription` and
-  `NSBonjourServices` entries `_erd._tcp`, `_erd._udp`.
+  `NSBonjourServices` entries `_maho-rd._tcp`, `_maho-rd._udp`.
 - Actual screenshot captured:
   `.omo/lan-discovery-20260909/iphone-lan.png`.
 - WebInspector returned `Web inspector is not enabled` after deployment.

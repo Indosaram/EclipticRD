@@ -115,13 +115,13 @@ captured original-code RED. No universal input-latency bound is claimed.
   returned three 3840x1600 frames (`native-linux-captest.log`).
 
 - Host integrated suite: `cargo test --manifest-path clients/rust/Cargo.toml
-  -p erd-host --lib` passed 59 tests, 0 failed, warning-free
+  -p maho-host --lib` passed 59 tests, 0 failed, warning-free
   (`host-integrated-tests.log`). It covers admission/KDF, the native pipeline,
   macOS session and capture stop, input injection, VideoToolbox encoding and
   Windows input logic, and shows 1 PBKDF2 derivation for 8 accepts in run output.
 - Screenshot share: 37 library, 11 CLI and 3 agent-control integration tests
   passed, exit 0 (`screenshot-share-green.log`).
-- Lane GREEN totals: framing 48 erd-proto and 24 erd-net; UDP cipher 18 native
+- Lane GREEN totals: framing 48 maho-proto and 24 maho-net; UDP cipher 18 native
   plus Miri strict 17 and the stale-boundary test; HTTP 20; client runtime 5
   unit and 5 integration; client production 5 unit and 3 integration plus Miri
   under both borrows; native session 15 harness, 15 cargo-seam and 33 extracted
@@ -220,7 +220,7 @@ captured original-code RED. No universal input-latency bound is claimed.
 - Software-default decoding is a configuration fact, not proof that enabling
   hardware decoding improves end-to-end performance. Readback still exists.
 - The macOS LAN-bitrate range warning was false: clap already enforces
-  `value_parser!(u32).range(50..=150)` in `erd-host/src/main.rs`.
+  `value_parser!(u32).range(50..=150)` in `maho-host/src/main.rs`.
 - MCP's sequential request loop is separate from the HTTP runtime; offloading
   its encoder alone would not provide concurrent stdio handling.
 - Stopping a UDP consumer does not reliably backpressure a UDP sender; overload
@@ -246,8 +246,8 @@ Win+R was already presented.
 Commands:
 
 ```sh
-cargo run --manifest-path clients/rust/Cargo.toml -p erd-app --bin erd-client -- --host 100.91.254.71 --frames 10 --timeout-secs 30
-cargo run --manifest-path clients/rust/Cargo.toml -p erd-app --bin erd-client -- --host 100.126.171.58 --pairing-id EF0460B1-FC0B-4CAE-B9C2-46727C8F26A6 --frames 10 --timeout-secs 30
+cargo run --manifest-path clients/rust/Cargo.toml -p maho-app --bin maho-client -- --host 100.91.254.71 --frames 10 --timeout-secs 30
+cargo run --manifest-path clients/rust/Cargo.toml -p maho-app --bin maho-client -- --host 100.126.171.58 --pairing-id EF0460B1-FC0B-4CAE-B9C2-46727C8F26A6 --frames 10 --timeout-secs 30
 node --test clients/rust/tauri-shell/ui/performance.test.mjs clients/rust/tauri-shell/ui/session-overlay.test.mjs
 ```
 

@@ -6,7 +6,7 @@ Original RED: `evidence/st_01a0892b/red-test-output.txt`, exit 101. The actual c
 
 Current full working-tree pairing check: `auth-lead-pairing-green.log`, 11 passed, exit 0, including the real `list_pairings()` call and isolated-store JSON serialization.
 
-To verify that the commit does not rely on unstaged discovery/authentication changes, the coordinator archived HEAD `9a364a955d5b65b96e5aeedc6c6b0366d8ca2a08` into the owned Omarchy directory `/home/indo/projects/erd-pairing-20260910/.omo/r4-index-check` and overlaid exact staged `lib.rs` and R4-only `pairing_tests.rs`.
+To verify that the commit does not rely on unstaged discovery/authentication changes, the coordinator archived HEAD `9a364a955d5b65b96e5aeedc6c6b0366d8ca2a08` into the owned Omarchy directory `/home/indo/projects/maho-pairing-20260910/.omo/r4-index-check` and overlaid exact staged `lib.rs` and R4-only `pairing_tests.rs`.
 
 With FFmpeg 7 environment variables and the existing isolated build target directory:
 

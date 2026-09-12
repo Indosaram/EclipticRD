@@ -47,7 +47,7 @@ export function HostGrid({
           Listed computers <span id="library-count" className="text-base font-normal text-muted-foreground">{hosts.length}</span>
         </h2>
         <p className="text-sm text-muted-foreground">
-          Availability is a discovery hint, not an ERD readiness check. Default testbeds may appear available without a probe.
+          Availability is a discovery hint, not an MahoRD readiness check. Default testbeds may appear available without a probe.
         </p>
       </div>
 

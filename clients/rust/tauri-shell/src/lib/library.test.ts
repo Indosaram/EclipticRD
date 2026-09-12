@@ -7,7 +7,7 @@ import {
   createLibrary,
 } from './library';
 
-const key = 'eclipticrd.favorites.v1';
+const key = 'mahord.favorites.v1';
 const hosts = [
   { id: 'unpaired-a', name: 'Studio', ip: ' FE80::AB ', os: 'Linux', online: true },
   { id: 'b', name: 'Office', ip: '10.0.0.2', os: 'Windows', online: false },

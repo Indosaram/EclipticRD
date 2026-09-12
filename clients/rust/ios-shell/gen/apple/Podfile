@@ -1,13 +1,13 @@
 # Uncomment the next line to define a global platform for your project
 
-target 'erd-ios_iOS' do
+target 'maho-ios_iOS' do
 platform :ios, '16.0'
-  # Pods for erd-ios_iOS
+  # Pods for maho-ios_iOS
 end
 
-target 'erd-ios_macOS' do
+target 'maho-ios_macOS' do
 platform :osx, '11.0'
-  # Pods for erd-ios_macOS
+  # Pods for maho-ios_macOS
 end
 
 # Delete the deployment target for iOS and macOS, causing it to be inherited from the Podfile

@@ -1056,16 +1056,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "erd-app"
+name = "maho-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
  "clap",
- "erd-decode",
- "erd-net",
- "erd-proto",
- "erd-render",
+ "maho-decode",
+ "maho-net",
+ "maho-proto",
+ "maho-render",
  "image",
  "objc2-app-kit",
  "objc2-foundation",
@@ -1083,18 +1083,18 @@ dependencies = [
 ]
 
 [[package]]
-name = "erd-decode"
+name = "maho-decode"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "erd-proto",
+ "maho-proto",
  "ffmpeg-next",
  "thiserror 2.0.20",
  "tracing",
 ]
 
 [[package]]
-name = "erd-host"
+name = "maho-host"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -1106,9 +1106,9 @@ dependencies = [
  "dirs",
  "dispatch2",
  "dxgi-capture-rs",
- "erd-app",
- "erd-net",
- "erd-proto",
+ "maho-app",
+ "maho-net",
+ "maho-proto",
  "evdev",
  "ffmpeg-next",
  "hostname",
@@ -1136,16 +1136,16 @@ dependencies = [
 ]
 
 [[package]]
-name = "erd-ios"
+name = "maho-ios"
 version = "0.1.0"
 dependencies = [
  "core-foundation",
- "erd-app",
- "erd-decode",
- "erd-mobile",
- "erd-net",
- "erd-proto",
- "erd-render",
+ "maho-app",
+ "maho-decode",
+ "maho-mobile",
+ "maho-net",
+ "maho-proto",
+ "maho-render",
  "objc2",
  "objc2-foundation",
  "serde",
@@ -1160,15 +1160,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "erd-mobile"
+name = "maho-mobile"
 version = "0.1.0"
 dependencies = [
  "core-foundation",
- "erd-app",
- "erd-decode",
- "erd-net",
- "erd-proto",
- "erd-render",
+ "maho-app",
+ "maho-decode",
+ "maho-net",
+ "maho-proto",
+ "maho-render",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -1177,12 +1177,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "erd-net"
+name = "maho-net"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
- "erd-proto",
+ "maho-proto",
  "flume",
  "hkdf",
  "if-addrs",
@@ -1200,14 +1200,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "erd-proto"
+name = "maho-proto"
 version = "0.1.0"
 dependencies = [
  "thiserror 2.0.20",
 ]
 
 [[package]]
-name = "erd-render"
+name = "maho-render"
 version = "0.1.0"
 dependencies = [
  "cpal",
@@ -4483,12 +4483,12 @@ dependencies = [
 name = "tauri-shell"
 version = "0.1.0"
 dependencies = [
- "erd-app",
- "erd-decode",
- "erd-host",
- "erd-net",
- "erd-proto",
- "erd-render",
+ "maho-app",
+ "maho-decode",
+ "maho-host",
+ "maho-net",
+ "maho-proto",
+ "maho-render",
  "image",
  "serde",
  "serde_json",

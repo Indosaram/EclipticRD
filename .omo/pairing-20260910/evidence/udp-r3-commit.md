@@ -6,7 +6,7 @@ Capability bit 7 is mandatory on both handshake sides. Native default configurat
 
 The client sends a sealed, empty Ping using its current client-to-host cipher and retains that cipher for subsequent sends. The host authenticates and validates registration before selecting an endpoint, freezes that endpoint, and limits receive work per session-loop pass.
 
-The commit excludes the concurrent `serve_with_stop` API, its polling loop/test, shell hosting/UI changes, and unrelated discovery work. It includes three separately reviewed equivalent `erd-app` lint corrections required by the strict gate: collapse the token comparison, remove a unit-value binding, and copy the input-ACK value without cloning.
+The commit excludes the concurrent `serve_with_stop` API, its polling loop/test, shell hosting/UI changes, and unrelated discovery work. It includes three separately reviewed equivalent `maho-app` lint corrections required by the strict gate: collapse the token comparison, remove a unit-value binding, and copy the input-ACK value without cloning.
 
 ## Actual evidence
 
@@ -16,7 +16,7 @@ The commit excludes the concurrent `serve_with_stop` API, its polling loop/test,
 - Earlier protocol filters selected zero tests and are not counted as proof. The exact command below was subsequently read from the actual test source and run by the coordinator; monitor `mon_2ZJA13M4TS45XQ0X` selected one test and passed:
 
 ```bash
-cargo test --manifest-path clients/rust/Cargo.toml -p erd-proto \
+cargo test --manifest-path clients/rust/Cargo.toml -p maho-proto \
   --test protocol_v3 capabilities_authenticated_udp_registration_round_trip -- --exact
 ```
 
@@ -28,9 +28,9 @@ The coordinator exported Git index tree `49b557eac865c928b906bee6a739d92fecdb1fb
 
 ```bash
 cargo test --manifest-path clients/rust/Cargo.toml \
-  -p erd-proto -p erd-net -p erd-host -p erd-app
+  -p maho-proto -p maho-net -p maho-host -p maho-app
 cargo clippy --manifest-path clients/rust/Cargo.toml \
-  -p erd-proto -p erd-net -p erd-host -p erd-app --no-deps -- -D warnings
+  -p maho-proto -p maho-net -p maho-host -p maho-app --no-deps -- -D warnings
 ```
 
 All selected test binaries and doc tests passed; strict Clippy passed; combined exit 0. Full per-suite output is in `udp-index-green.log`. No lint was suppressed or failing test removed.

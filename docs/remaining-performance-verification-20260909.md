@@ -36,7 +36,7 @@ To eliminate fragmentation without breaking receiver compatibility:
 - **Video Payload Chunk Limit:** Video chunks are capped at 1,154 bytes per datagram (1,200 bytes minus 46 bytes for UDP framing, encryption nonce, MAC tag, and protocol chunk headers).
 - **Audio Fragment Limit:** Audio fragments are capped at 1,152 bytes per datagram (1,200 bytes minus 48 bytes framing and encryption).
 - **Sender Frame Limit:** With the protocol's 1,024 chunk-per-frame ceiling, the maximum sender frame size is 1,181,696 bytes (1,024 × 1,154 bytes). Frames exceeding this bound are rejected upfront before transmission.
-- **Receiver Wire Bounds Preserved:** Wire acceptance constants in `erd-proto` (`MAX_VIDEO_CHUNK_BYTES = 1382` and `MAX_AUDIO_FRAGMENT_BYTES = 1380`) remain unchanged. Existing and third-party receivers continue to accept datagrams up to the historical limits.
+- **Receiver Wire Bounds Preserved:** Wire acceptance constants in `maho-proto` (`MAX_VIDEO_CHUNK_BYTES = 1382` and `MAX_AUDIO_FRAGMENT_BYTES = 1380`) remain unchanged. Existing and third-party receivers continue to accept datagrams up to the historical limits.
 
 ### Native Candidate Verification
 Native verification was performed on Omarchy Linux over UDP port 28631 (`mtu-native-verification.json`):
@@ -70,20 +70,20 @@ Direct hardware inspection of the physical host (`indo@100.91.254.71`) clarified
 
 ## 3. Strict Clippy Corrections
 
-Pre-existing compiler lints across `erd-app` and `erd-host` were resolved under strict `-D warnings` on the Omarchy builder (`clippy.md`):
+Pre-existing compiler lints across `maho-app` and `maho-host` were resolved under strict `-D warnings` on the Omarchy builder (`clippy.md`):
 
-1. **`erd-app/src/pairing.rs`:** Removed an unnecessary `return` expression in Unix pairing store resolution; replaced redundant `io::Error::new(io::ErrorKind::Other, ...)` constructs with `io::Error::other(...)`.
-2. **`erd-host/src/inject_linux.rs`:** Removed unused constant `ABSOLUTE_AXIS_MAX` and unused helper `scale_to_uinput`.
-3. **`erd-host/src/encode_linux.rs`:** Replaced indexed loop with `iter_mut().enumerate()` in NV12 software converter; converted parameter set search to `.contains()`; updated HEVC NAL pattern matching to inclusive range syntax `32..=34`.
-4. **`erd-host/src/session.rs`:** Simplified redundant error closure `.map_err(|e| SessionError::Io(e))` to `.map_err(SessionError::Io)`.
-5. **`erd-host/src/main.rs`:** Replaced manual reverse comparator with `sort_by_key(|left| Reverse(left.added_at_unix_ms))`.
-6. **`erd-app/tests/cli_mcp_contract.rs`:** Collapsed nested `if` statement into a match pattern guard.
+1. **`maho-app/src/pairing.rs`:** Removed an unnecessary `return` expression in Unix pairing store resolution; replaced redundant `io::Error::new(io::ErrorKind::Other, ...)` constructs with `io::Error::other(...)`.
+2. **`maho-host/src/inject_linux.rs`:** Removed unused constant `ABSOLUTE_AXIS_MAX` and unused helper `scale_to_uinput`.
+3. **`maho-host/src/encode_linux.rs`:** Replaced indexed loop with `iter_mut().enumerate()` in NV12 software converter; converted parameter set search to `.contains()`; updated HEVC NAL pattern matching to inclusive range syntax `32..=34`.
+4. **`maho-host/src/session.rs`:** Simplified redundant error closure `.map_err(|e| SessionError::Io(e))` to `.map_err(SessionError::Io)`.
+5. **`maho-host/src/main.rs`:** Replaced manual reverse comparator with `sort_by_key(|left| Reverse(left.added_at_unix_ms))`.
+6. **`maho-app/tests/cli_mcp_contract.rs`:** Collapsed nested `if` statement into a match pattern guard.
 
 ### Audit Summary
 - **No Suppressions:** Zero `#[allow(...)]` or `#[expect(...)]` attributes were introduced.
 - **Verification:**
-  - `cargo clippy --locked -p erd-app -p erd-host --all-targets --no-deps -- -D warnings`: Exit code 0, zero warnings, zero errors (`clippy-pass.log`).
-  - `cargo test --locked -p erd-app -p erd-host`: All 224 unit, integration, and doc tests passed warning-free (`tests-pass.log`).
+  - `cargo clippy --locked -p maho-app -p maho-host --all-targets --no-deps -- -D warnings`: Exit code 0, zero warnings, zero errors (`clippy-pass.log`).
+  - `cargo test --locked -p maho-app -p maho-host`: All 224 unit, integration, and doc tests passed warning-free (`tests-pass.log`).
 
 ---
 
@@ -136,7 +136,7 @@ The findings in this report correspond directly to the evidence retained in `.om
 | MTU Baseline | `baseline-fragmentation.json` | 3,395 fragmented datagrams (6,790 IP fragments) across 300 frames on 1280 MTU |
 | MTU Candidate | `mtu-native-verification.json` | 4,882 packets sent/received/authenticated, 0 IP fragments, 0 gaps, max 1200 B payload |
 | Clippy Audit | `clippy.md`, `clippy-pass.log` | Clean Clippy pass under `-D warnings` on Omarchy with zero suppressions |
-| Test Suite | `tests-pass.log` | 224 unit, integration, and doc tests passing across `erd-app` and `erd-host` |
+| Test Suite | `tests-pass.log` | 224 unit, integration, and doc tests passing across `maho-app` and `maho-host` |
 | Windows Geometry | `attributed-stderr.log`, `windows-attribution.md` | 3072×1280 vs 3840×1600 DPI error diagnosis and physical ModeDesc fix |
 | Windows Preliminary Stages | `windows-preliminary-stages.json` | 3,022 frames decoded; 103,580 trace overflow count; first-window stage timings |
 
@@ -176,23 +176,23 @@ All compiler gates were executed exclusively on the Omarchy builder under `-D wa
 
 1. **Full Workspace Linux Clippy Gate (`--workspace` without package narrowing):**
    ```bash
-   cargo clippy --manifest-path clients/rust/Cargo.toml --locked --workspace --exclude erd-ios --all-targets --no-deps -- -D warnings
+   cargo clippy --manifest-path clients/rust/Cargo.toml --locked --workspace --exclude maho-ios --all-targets --no-deps -- -D warnings
    ```
    - **Result:** 0 warnings, 0 errors (Exit Code 0).
    - **Receipt Artifact:** `.omo/remaining-performance-20260909/workspace-clippy-full.log`.
-   - **Scope:** Complete, unnarrowed workspace sweep across all Linux member crates (`erd-proto`, `erd-net`, `erd-decode`, `erd-render`, `erd-app`, `erd-host`, `tauri-shell`).
+   - **Scope:** Complete, unnarrowed workspace sweep across all Linux member crates (`maho-proto`, `maho-net`, `maho-decode`, `maho-render`, `maho-app`, `maho-host`, `tauri-shell`).
 
 2. **Windows Target Clippy Gate (Explicitly Scoped to Windows Host Daemon):**
    ```bash
-   cargo clippy --manifest-path clients/rust/Cargo.toml --locked -p erd-host --all-targets --target x86_64-pc-windows-gnu --no-deps -- -D warnings
+   cargo clippy --manifest-path clients/rust/Cargo.toml --locked -p maho-host --all-targets --target x86_64-pc-windows-gnu --no-deps -- -D warnings
    ```
    - **Result:** 0 warnings, 0 errors (`WINDOWS_CLIPPY_PASS`).
    - **Receipt Artifact:** `.omo/remaining-performance-20260909/windows-clippy.log`.
-   - **Criterion Replacement & Boundary:** Cross-compiling the entire workspace (`--workspace`) for `x86_64-pc-windows-gnu` on Linux fails at `ffmpeg-sys-next` (a dependency of client decoder `erd-decode`) because `pkg-config` has no MinGW FFmpeg sysroot installed (`.omo/remaining-performance-20260909/windows-workspace-clippy-error.log`). Because `erd-host` is the sole native Windows host daemon and uses native Media Foundation (not FFmpeg), the Windows acceptance criterion is explicitly defined as **Windows-host-only verification** (`-p erd-host`), which passes cleanly with zero warnings under `-D warnings`.
+   - **Criterion Replacement & Boundary:** Cross-compiling the entire workspace (`--workspace`) for `x86_64-pc-windows-gnu` on Linux fails at `ffmpeg-sys-next` (a dependency of client decoder `maho-decode`) because `pkg-config` has no MinGW FFmpeg sysroot installed (`.omo/remaining-performance-20260909/windows-workspace-clippy-error.log`). Because `maho-host` is the sole native Windows host daemon and uses native Media Foundation (not FFmpeg), the Windows acceptance criterion is explicitly defined as **Windows-host-only verification** (`-p maho-host`), which passes cleanly with zero warnings under `-D warnings`.
 
 3. **Full Workspace Regression:**
    ```bash
-   cargo test --manifest-path clients/rust/Cargo.toml --locked --workspace --exclude erd-ios
+   cargo test --manifest-path clients/rust/Cargo.toml --locked --workspace --exclude maho-ios
    ```
    - **Result:** 510 tests passed across all crates, 0 failed, 1 ignored pre-existing network test (`ALL_WORKSPACE_TESTS_PASS`).
 
@@ -200,7 +200,7 @@ All compiler gates were executed exclusively on the Omarchy builder under `-D wa
 
 ## 8. Real-Surface Physical Host Verification & Agent Lifecycle
 
-The Mac release client (`erd-client`) was executed against the physical Windows host (`100.126.171.58:28530`):
+The Mac release client (`maho-client`) was executed against the physical Windows host (`100.126.171.58:28530`):
 
 1. **Transport & Pairing:** Initiated bootstrap pairing via 8-digit PIN; completed handshake in 102 ms; decoded 30 frames of 3840 × 1600 H.264 video with 0 packet loss across 510 datagrams.
 2. **HTTP Agent API (`127.0.0.1:19735`):**
@@ -215,9 +215,9 @@ The Mac release client (`erd-client`) was executed against the physical Windows 
 ## 9. Resource Cleanup Receipts
 
 - **Windows Testbed (`DESKTOP-1LAPJMP`):**
-  - Scheduled tasks `erd-performance-workload-IgdJVT` and `erd-performance-host-IgdJVT` unregistered (`TaskWorkloadExists: false`, `TaskHostExists: false`).
-  - Temporary Edge test profile and directory `C:\Users\sook\AppData\Local\Temp\erd-performance-20260909-IgdJVT` removed (`TempDirExists: false`).
+  - Scheduled tasks `maho-performance-workload-IgdJVT` and `maho-performance-host-IgdJVT` unregistered (`TaskWorkloadExists: false`, `TaskHostExists: false`).
+  - Temporary Edge test profile and directory `C:\Users\sook\AppData\Local\Temp\maho-performance-20260909-IgdJVT` removed (`TempDirExists: false`).
   - Production daemon PID 18760 preserved continuously (`ProductionHostPid: 18760`).
 - **Omarchy Builder (`indo@100.91.254.71`):**
-  - Isolated builder root `/home/indo/projects/erd-performance-20260909-IgdJVT/` removed (`DIR_EXISTS=false`).
+  - Isolated builder root `/home/indo/projects/maho-performance-20260909-IgdJVT/` removed (`DIR_EXISTS=false`).
   - Production daemon PID 2505717 preserved continuously (`PROD_BEFORE=2505717`, `PROD_AFTER=2505717`).

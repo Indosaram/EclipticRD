@@ -35,7 +35,7 @@ jobs:
             clang libasound2-dev libavcodec-dev libavformat-dev libavutil-dev \
             libclang-dev libswscale-dev libudev-dev libva-dev libwayland-dev \
             libx264-dev pkg-config
-      - run: cargo check -p erd-host --target x86_64-unknown-linux-gnu
+      - run: cargo check -p maho-host --target x86_64-unknown-linux-gnu
       - run: cargo build --workspace
       - run: cargo test --workspace
 
@@ -49,8 +49,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Compile Windows host backends
-        run: cargo build -p erd-host --lib
+        run: cargo build -p maho-host --lib
       - name: Test Windows host and portable backend logic
-        run: cargo test -p erd-host --lib
+        run: cargo test -p maho-host --lib
       - run: cargo build --workspace
       - run: cargo test --workspace

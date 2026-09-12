@@ -287,7 +287,7 @@ test('pending list_hosts completes after stop and does not repopulate list', asy
     assert.equal(manager.snapshot().discoveryState, 'idle');
 
     resolveOldQuery([
-      { id: 'Stale._erd._tcp.local.', name: 'Stale Host', ip: '10.0.0.99', os: 'linux', tcp_port: 19730, udp_port: 19731 }
+      { id: 'Stale._maho-rd._tcp.local.', name: 'Stale Host', ip: '10.0.0.99', os: 'linux', tcp_port: 19730, udp_port: 19731 }
     ]);
     await query;
 
@@ -376,7 +376,7 @@ test('old completion does not clear new pending request', async () => {
     assert.equal(manager.snapshot().discoveryLoading, true, 'New in-flight query must remain loading after old finishes');
 
     resolveNew([
-      { id: 'New._erd._tcp.local.', name: 'New Host', ip: '10.0.0.50', os: 'macos', tcp_port: 19730, udp_port: 19731 }
+      { id: 'New._maho-rd._tcp.local.', name: 'New Host', ip: '10.0.0.50', os: 'macos', tcp_port: 19730, udp_port: 19731 }
     ]);
     await q2;
 
@@ -395,7 +395,7 @@ test('old completion does not clear new pending request', async () => {
 test('list_hosts resolution populates discoveredHosts and transitions discoveryState to idle', async () => {
   const fixtureHosts = [
     {
-      id: 'Studio-Mac._erd._tcp.local.',
+      id: 'Studio-Mac._maho-rd._tcp.local.',
       name: 'Studio Mac',
       ip: '192.168.1.50',
       os: 'macos',
@@ -403,7 +403,7 @@ test('list_hosts resolution populates discoveredHosts and transitions discoveryS
       udp_port: 19731
     },
     {
-      id: 'Arch-Linux._erd._tcp.local.',
+      id: 'Arch-Linux._maho-rd._tcp.local.',
       name: 'Arch Linux',
       ip: '192.168.1.75',
       os: 'linux',
@@ -466,7 +466,7 @@ test('empty discovery snapshot yields empty list without error', async () => {
 
 test('disappearing hosts are pruned from discoveredHosts on subsequent snapshot', async () => {
   const hostA = {
-    id: 'HostA._erd._tcp.local.',
+    id: 'HostA._maho-rd._tcp.local.',
     name: 'Host A',
     ip: '192.168.1.10',
     os: 'macos',
@@ -474,7 +474,7 @@ test('disappearing hosts are pruned from discoveredHosts on subsequent snapshot'
     udp_port: 19731
   };
   const hostB = {
-    id: 'HostB._erd._tcp.local.',
+    id: 'HostB._maho-rd._tcp.local.',
     name: 'Host B',
     ip: '192.168.1.20',
     os: 'windows',
@@ -638,29 +638,29 @@ test('lifecycle background transitions halt discovery refresh and foreground tra
 
 test('findDiscoveredHostById returns latest updated record when IP or ports change', () => {
   const initialHosts = [
-    { id: 'Host1._erd._tcp.local.', name: 'Mac', ip: '192.168.1.10', os: 'macos', tcp_port: 19730, udp_port: 19731 }
+    { id: 'Host1._maho-rd._tcp.local.', name: 'Mac', ip: '192.168.1.10', os: 'macos', tcp_port: 19730, udp_port: 19731 }
   ];
   const updatedHosts = [
-    { id: 'Host1._erd._tcp.local.', name: 'Mac', ip: '192.168.1.25', os: 'macos', tcp_port: 29730, udp_port: 29731 }
+    { id: 'Host1._maho-rd._tcp.local.', name: 'Mac', ip: '192.168.1.25', os: 'macos', tcp_port: 29730, udp_port: 29731 }
   ];
 
-  const found1 = findDiscoveredHostById(initialHosts, 'Host1._erd._tcp.local.');
+  const found1 = findDiscoveredHostById(initialHosts, 'Host1._maho-rd._tcp.local.');
   assert.equal(found1.ip, '192.168.1.10');
   assert.equal(found1.tcp_port, 19730);
 
-  const found2 = findDiscoveredHostById(updatedHosts, 'Host1._erd._tcp.local.');
+  const found2 = findDiscoveredHostById(updatedHosts, 'Host1._maho-rd._tcp.local.');
   assert.equal(found2.ip, '192.168.1.25');
   assert.equal(found2.tcp_port, 29730);
 });
 
 test('findDiscoveredHostById returns null when host is removed or inputs invalid', () => {
   const hosts = [
-    { id: 'Host1._erd._tcp.local.', name: 'Mac', ip: '192.168.1.10', os: 'macos', tcp_port: 19730, udp_port: 19731 }
+    { id: 'Host1._maho-rd._tcp.local.', name: 'Mac', ip: '192.168.1.10', os: 'macos', tcp_port: 19730, udp_port: 19731 }
   ];
 
   assert.equal(findDiscoveredHostById(hosts, 'NonExistent'), null);
-  assert.equal(findDiscoveredHostById([], 'Host1._erd._tcp.local.'), null);
-  assert.equal(findDiscoveredHostById(null, 'Host1._erd._tcp.local.'), null);
+  assert.equal(findDiscoveredHostById([], 'Host1._maho-rd._tcp.local.'), null);
+  assert.equal(findDiscoveredHostById(null, 'Host1._maho-rd._tcp.local.'), null);
   assert.equal(findDiscoveredHostById(hosts, ''), null);
 });
 
@@ -668,7 +668,7 @@ test('selecting a discovered host card populates target parameters without infer
   const { manager, cleanup } = createFixture();
   try {
     const host = {
-      id: 'Office-Desktop._erd._tcp.local.',
+      id: 'Office-Desktop._maho-rd._tcp.local.',
       name: 'Office Desktop',
       ip: '192.168.1.150',
       os: 'windows',
@@ -693,7 +693,7 @@ test('card-initiated connect requires PIN for unpaired host: asserts missing-PIN
   const { manager, getCalls, cleanup } = createFixture();
   try {
     const host = {
-      id: 'Target._erd._tcp.local.',
+      id: 'Target._maho-rd._tcp.local.',
       name: 'Custom Target',
       ip: '192.168.1.200',
       os: 'linux',

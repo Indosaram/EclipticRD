@@ -252,7 +252,7 @@ async fn malformed_media_audio_is_atomic_and_visible() {
     media(&state, &vec![0.125; 10_000]);
     assert_eq!(
         queue.queued_samples().unwrap(),
-        erd_render::AUDIO_QUEUE_CAPACITY
+        maho_render::AUDIO_QUEUE_CAPACITY
     );
 }
 
@@ -506,10 +506,10 @@ fn pairing_store_round_trip_and_deletion() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let directory = std::env::temp_dir().join(format!("erd-pairing-test-{id}"));
+    let directory = std::env::temp_dir().join(format!("maho-pairing-test-{id}"));
     let _ = std::fs::remove_dir_all(&directory);
     let store = PairingStore::new(directory.join("pairings.json"));
-    let record1 = erd_app::PairingRecord {
+    let record1 = maho_app::PairingRecord {
         id: "id-1".into(),
         name: "host-1".into(),
         key: vec![1; 32],
@@ -517,7 +517,7 @@ fn pairing_store_round_trip_and_deletion() {
         last_endpoint: None,
         endpoint_aliases: Vec::new(),
     };
-    let record2 = erd_app::PairingRecord {
+    let record2 = maho_app::PairingRecord {
         id: "id-2".into(),
         name: "host-2".into(),
         key: vec![2; 32],

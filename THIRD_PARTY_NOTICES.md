@@ -1,6 +1,6 @@
 # Third-party software and distribution requirements
 
-EclipticRD's original source is covered by the [MIT License](LICENSE). This does
+MahoRD's original source is covered by the [MIT License](LICENSE). This does
 not relicense its dependencies, operating-system frameworks, drivers, or SDKs.
 
 ## Rust dependency inventory
@@ -15,7 +15,7 @@ distinctions in the current main-workspace graph include:
 
 - `cssparser`, `cssparser-macros`, `dtoa-short`, `option-ext` and `selectors`:
   **MPL-2.0**. Its file-level source and notice obligations apply when distributing
-  covered software; it does not automatically relicense unrelated EclipticRD files.
+  covered software; it does not automatically relicense unrelated MahoRD files.
 - `ring`: **Apache-2.0 AND ISC**; both parts of the expression matter.
 - `dpi`: **Apache-2.0 AND MIT**.
 - `unicode-ident`: **(MIT OR Apache-2.0) AND Unicode-3.0**.
@@ -47,7 +47,7 @@ Therefore it is not legally redistributable.
 ```
 
 **Do not redistribute that FFmpeg build or present the existing private Linux
-bundle as an approved public release.** Making EclipticRD's source public does
+bundle as an approved public release.** Making MahoRD's source public does
 not change this restriction. Removing a filename or adding this notice does not
 make the existing binaries redistributable.
 
@@ -83,7 +83,7 @@ Upstream references:
   exact NVIDIA/header material included in any package.
 - Apple SDKs/frameworks, Windows SDK/runtime components, Linux system libraries,
   GTK and WebKitGTK have their own terms. Do not copy an SDK or driver into a
-  release merely because EclipticRD's source is MIT.
+  release merely because MahoRD's source is MIT.
 - Source licensing does not itself grant codec patent or trademark rights.
 
 ## Publication scope

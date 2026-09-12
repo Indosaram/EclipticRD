@@ -16,7 +16,7 @@ export function Sidebar({ active, onSelect }: Props) {
         <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary font-bold text-primary-foreground">
           E
         </div>
-        <span className="font-bold text-foreground max-[1040px]:hidden">EclipticRD</span>
+        <span className="font-bold text-foreground max-[1040px]:hidden">MahoRD</span>
       </header>
 
       <nav aria-label="Primary" className="flex flex-1 flex-col gap-1 px-3 py-2 max-[1040px]:px-2">
@@ -55,7 +55,7 @@ export function Sidebar({ active, onSelect }: Props) {
       </nav>
 
       <footer className="mt-auto p-4 text-xs text-muted-foreground max-[1040px]:hidden">
-        EclipticRD
+        MahoRD
       </footer>
     </aside>
   )

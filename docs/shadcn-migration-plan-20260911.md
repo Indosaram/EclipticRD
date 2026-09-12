@@ -232,8 +232,8 @@ returns 0 hits.
 ### P7 — Release verification
 
 Follow the existing deployment discipline: build, sign, back up to
-`~/Library/Application Support/EclipticRD-releases/<date>-<sha>/rollback/`, deploy to
-`/Applications/EclipticRD.app`, verify connect + stream + input against both testbeds.
+`~/Library/Application Support/MahoRD-releases/<date>-<sha>/rollback/`, deploy to
+`/Applications/MahoRD.app`, verify connect + stream + input against both testbeds.
 
 ---
 
@@ -373,6 +373,6 @@ Stopping after P1 (visual parity only, no framework) is ~1.5 days and carries no
 
 ## 11. Out of scope
 
-`ios-shell`, `erd-host`, `erd-app`, protocol crates, the agent HTTP/MCP API, and the Rust-side IPC
+`ios-shell`, `maho-host`, `maho-app`, protocol crates, the agent HTTP/MCP API, and the Rust-side IPC
 handlers. No dependency, model, or deployment configuration changes. No commit or deployment is
 authorized by this document.

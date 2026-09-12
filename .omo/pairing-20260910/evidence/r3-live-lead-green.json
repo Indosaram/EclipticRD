@@ -16,7 +16,7 @@
       "signal": null
     },
     "success": true,
-    "clientOutput": "2026-09-10T04:53:53.085372Z  INFO erd_client: Initializing headless client session host=127.0.0.1 tcp_port=34083 udp_port=51735 timeout_secs=Some(5)\n2026-09-10T04:53:53.085495Z  INFO erd_client: Connecting with explicit PSK pairing_id=qa-r3-registration\n2026-09-10T04:53:53.088840Z  INFO erd_client: Handshake completed, session ready host_name=ERD isolated R3 QA width=3840 height=1600 version=3\n2026-09-10T04:53:53.089002Z  INFO erd_client: Awaiting UDP media datagrams and decoding frames...\n2026-09-10T04:53:53.473096Z  INFO erd_client: decoder initialized from keyframe codec_kind=Hevc\n2026-09-10T04:53:53.519847Z  INFO erd_client: Decoded frame progress decoded_frames=1 target_frames=1\n2026-09-10T04:53:53.519928Z  INFO erd_client: Reached requested target frame count decoded_frames=1\n2026-09-10T04:53:53.519941Z  INFO erd_client: Cleaning up session transport... decoded_frames=1 target_frames=1\n2026-09-10T04:53:53.525475Z  INFO erd_client: Headless decode and receiver statistics summary stats={\"frames\":1,\"p50_us\":47828,\"p95_us\":47828,\"p99_us\":47828,\"max_us\":47828,\"receiver_snapshot\":{\"udp_authenticated_datagrams\":24,\"udp_authenticated_bytes\":26456,\"udp_receive_bps\":34352031.551820494,\"packet_loss_ratio\":null,\"loss_expected_packets\":0,\"loss_missing_packets\":0,\"host_ready_to_encode_us\":{\"frames\":1,\"p50_us\":47400,\"p95_us\":47400,\"p99_us\":47400,\"max_us\":47400},\"host_encode_us\":{\"frames\":1,\"p50_us\":256778,\"p95_us\":256778,\"p99_us\":256778,\"max_us\":256778},\"host_encode_to_send_complete_us\":{\"frames\":1,\"p50_us\":6038,\"p95_us\":6038,\"p99_us\":6038,\"max_us\":6038},\"receive_assembly_us\":{\"frames\":1,\"p50_us\":6132,\"p95_us\":6132,\"p99_us\":6132,\"max_us\":6132}}}\n",
+    "clientOutput": "2026-09-10T04:53:53.085372Z  INFO maho_client: Initializing headless client session host=127.0.0.1 tcp_port=34083 udp_port=51735 timeout_secs=Some(5)\n2026-09-10T04:53:53.085495Z  INFO maho_client: Connecting with explicit PSK pairing_id=qa-r3-registration\n2026-09-10T04:53:53.088840Z  INFO maho_client: Handshake completed, session ready host_name=MahoRD isolated R3 QA width=3840 height=1600 version=3\n2026-09-10T04:53:53.089002Z  INFO maho_client: Awaiting UDP media datagrams and decoding frames...\n2026-09-10T04:53:53.473096Z  INFO maho_client: decoder initialized from keyframe codec_kind=Hevc\n2026-09-10T04:53:53.519847Z  INFO maho_client: Decoded frame progress decoded_frames=1 target_frames=1\n2026-09-10T04:53:53.519928Z  INFO maho_client: Reached requested target frame count decoded_frames=1\n2026-09-10T04:53:53.519941Z  INFO maho_client: Cleaning up session transport... decoded_frames=1 target_frames=1\n2026-09-10T04:53:53.525475Z  INFO maho_client: Headless decode and receiver statistics summary stats={\"frames\":1,\"p50_us\":47828,\"p95_us\":47828,\"p99_us\":47828,\"max_us\":47828,\"receiver_snapshot\":{\"udp_authenticated_datagrams\":24,\"udp_authenticated_bytes\":26456,\"udp_receive_bps\":34352031.551820494,\"packet_loss_ratio\":null,\"loss_expected_packets\":0,\"loss_missing_packets\":0,\"host_ready_to_encode_us\":{\"frames\":1,\"p50_us\":47400,\"p95_us\":47400,\"p99_us\":47400,\"max_us\":47400},\"host_encode_us\":{\"frames\":1,\"p50_us\":256778,\"p95_us\":256778,\"p99_us\":256778,\"max_us\":256778},\"host_encode_to_send_complete_us\":{\"frames\":1,\"p50_us\":6038,\"p95_us\":6038,\"p99_us\":6038,\"max_us\":6038},\"receive_assembly_us\":{\"frames\":1,\"p50_us\":6132,\"p95_us\":6132,\"p99_us\":6132,\"max_us\":6132}}}\n",
     "hostOutput": "QA_READY 34083 51735\n[hevc_nvenc @ 0x7f6228000cc0] dl_fn->cuda_dl->cuInit(0) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected\n[h264_nvenc @ 0x7f6228000cc0] dl_fn->cuda_dl->cuInit(0) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected\n"
   },
   "adversarial": {
@@ -34,16 +34,16 @@
       "signal": null
     },
     "success": true,
-    "clientOutput": "2026-09-10T04:53:53.611747Z  INFO erd_client: Initializing headless client session host=127.0.0.1 tcp_port=45035 udp_port=57948 timeout_secs=Some(5)\n2026-09-10T04:53:53.611865Z  INFO erd_client: Connecting with explicit PSK pairing_id=qa-r3-registration\n2026-09-10T04:53:53.615404Z  INFO erd_client: Handshake completed, session ready host_name=ERD isolated R3 QA width=3840 height=1600 version=3\n2026-09-10T04:53:53.615569Z  INFO erd_client: Awaiting UDP media datagrams and decoding frames...\n2026-09-10T04:53:53.957575Z  INFO erd_client: decoder initialized from keyframe codec_kind=Hevc\n2026-09-10T04:53:54.002271Z  INFO erd_client: Decoded frame progress decoded_frames=1 target_frames=1\n2026-09-10T04:53:54.002318Z  INFO erd_client: Reached requested target frame count decoded_frames=1\n2026-09-10T04:53:54.002328Z  INFO erd_client: Cleaning up session transport... decoded_frames=1 target_frames=1\n2026-09-10T04:53:54.006047Z  INFO erd_client: Headless decode and receiver statistics summary stats={\"frames\":1,\"p50_us\":45522,\"p95_us\":45522,\"p99_us\":45522,\"max_us\":45522,\"receiver_snapshot\":{\"udp_authenticated_datagrams\":24,\"udp_authenticated_bytes\":26456,\"udp_receive_bps\":24731452.376789764,\"packet_loss_ratio\":null,\"loss_expected_packets\":0,\"loss_missing_packets\":0,\"host_ready_to_encode_us\":{\"frames\":1,\"p50_us\":10,\"p95_us\":10,\"p99_us\":10,\"max_us\":10},\"host_encode_us\":{\"frames\":1,\"p50_us\":264775,\"p95_us\":264775,\"p99_us\":264775,\"max_us\":264775},\"host_encode_to_send_complete_us\":{\"frames\":1,\"p50_us\":10801,\"p95_us\":10801,\"p99_us\":10801,\"max_us\":10801},\"receive_assembly_us\":{\"frames\":1,\"p50_us\":8524,\"p95_us\":8524,\"p99_us\":8524,\"max_us\":8524}}}\n",
+    "clientOutput": "2026-09-10T04:53:53.611747Z  INFO maho_client: Initializing headless client session host=127.0.0.1 tcp_port=45035 udp_port=57948 timeout_secs=Some(5)\n2026-09-10T04:53:53.611865Z  INFO maho_client: Connecting with explicit PSK pairing_id=qa-r3-registration\n2026-09-10T04:53:53.615404Z  INFO maho_client: Handshake completed, session ready host_name=MahoRD isolated R3 QA width=3840 height=1600 version=3\n2026-09-10T04:53:53.615569Z  INFO maho_client: Awaiting UDP media datagrams and decoding frames...\n2026-09-10T04:53:53.957575Z  INFO maho_client: decoder initialized from keyframe codec_kind=Hevc\n2026-09-10T04:53:54.002271Z  INFO maho_client: Decoded frame progress decoded_frames=1 target_frames=1\n2026-09-10T04:53:54.002318Z  INFO maho_client: Reached requested target frame count decoded_frames=1\n2026-09-10T04:53:54.002328Z  INFO maho_client: Cleaning up session transport... decoded_frames=1 target_frames=1\n2026-09-10T04:53:54.006047Z  INFO maho_client: Headless decode and receiver statistics summary stats={\"frames\":1,\"p50_us\":45522,\"p95_us\":45522,\"p99_us\":45522,\"max_us\":45522,\"receiver_snapshot\":{\"udp_authenticated_datagrams\":24,\"udp_authenticated_bytes\":26456,\"udp_receive_bps\":24731452.376789764,\"packet_loss_ratio\":null,\"loss_expected_packets\":0,\"loss_missing_packets\":0,\"host_ready_to_encode_us\":{\"frames\":1,\"p50_us\":10,\"p95_us\":10,\"p99_us\":10,\"max_us\":10},\"host_encode_us\":{\"frames\":1,\"p50_us\":264775,\"p95_us\":264775,\"p99_us\":264775,\"max_us\":264775},\"host_encode_to_send_complete_us\":{\"frames\":1,\"p50_us\":10801,\"p95_us\":10801,\"p99_us\":10801,\"max_us\":10801},\"receive_assembly_us\":{\"frames\":1,\"p50_us\":8524,\"p95_us\":8524,\"p99_us\":8524,\"max_us\":8524}}}\n",
     "hostOutput": "QA_READY 45035 44663\n[hevc_nvenc @ 0x7fcf10000cc0] dl_fn->cuda_dl->cuInit(0) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected\n[h264_nvenc @ 0x7fcf10000cc0] dl_fn->cuda_dl->cuInit(0) failed -> CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected\n"
   },
   "binaryHashesBefore": [
-    "93e45b30bfc95b834b33e95301280ae942b238ed489cda5367f1680edcef7e0a  clients/rust/target/debug/erd-client",
-    "c8940afc272f1e973c8068311bae64064e1b55ef21e86d1b9429793c7de1b789  clients/rust/target/debug/erd-pairing-qa-host"
+    "93e45b30bfc95b834b33e95301280ae942b238ed489cda5367f1680edcef7e0a  clients/rust/target/debug/maho-client",
+    "c8940afc272f1e973c8068311bae64064e1b55ef21e86d1b9429793c7de1b789  clients/rust/target/debug/maho-pairing-qa-host"
   ],
   "binaryHashesAfter": [
-    "93e45b30bfc95b834b33e95301280ae942b238ed489cda5367f1680edcef7e0a  clients/rust/target/debug/erd-client",
-    "c8940afc272f1e973c8068311bae64064e1b55ef21e86d1b9429793c7de1b789  clients/rust/target/debug/erd-pairing-qa-host"
+    "93e45b30bfc95b834b33e95301280ae942b238ed489cda5367f1680edcef7e0a  clients/rust/target/debug/maho-client",
+    "c8940afc272f1e973c8068311bae64064e1b55ef21e86d1b9429793c7de1b789  clients/rust/target/debug/maho-pairing-qa-host"
   ],
   "cleanup": [
     {
@@ -51,7 +51,7 @@
       "hostPid": 4119316,
       "clientPid": 4119318,
       "closedSockets": 0,
-      "removedDirectory": "/tmp/erd-r3-qa-JZp7iZ",
+      "removedDirectory": "/tmp/maho-r3-qa-JZp7iZ",
       "cleanupErrors": []
     },
     {
@@ -59,7 +59,7 @@
       "hostPid": 4119370,
       "clientPid": 4119372,
       "closedSockets": 2,
-      "removedDirectory": "/tmp/erd-r3-qa-6BAuAo",
+      "removedDirectory": "/tmp/maho-r3-qa-6BAuAo",
       "cleanupErrors": []
     }
   ]

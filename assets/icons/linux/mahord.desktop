@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=MahoRD
+Comment=Ultra-low latency Remote Desktop
+Exec=mahord
+Icon=mahord
+Terminal=false
+Type=Application
+Categories=Network;RemoteAccess;Utility;
+Keywords=remote;desktop;rdp;parsec;vnc;streaming;
+StartupWMClass=mahord

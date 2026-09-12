@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="clients/rust/tauri-shell/icons/icon-1024.png" alt="EclipticRD icon" width="112">
+  <img src="clients/rust/tauri-shell/icons/icon-1024.png" alt="MahoRD icon" width="112">
 </p>
 
-<h1 align="center">EclipticRD</h1>
+<h1 align="center">MahoRD</h1>
 
 <p align="center">
   <strong>Agent-first remote desktop for automation.</strong><br>
@@ -16,7 +16,7 @@
   <img src="https://img.shields.io/badge/core-Rust-dea584" alt="Core: Rust">
 </p>
 
-EclipticRD connects a host daemon to a desktop or mobile client. The host captures
+MahoRD connects a host daemon to a desktop or mobile client. The host captures
 the screen, encodes video, and accepts input; the client decodes frames, plays
 audio, and presents a computer library and in-session controls.
 
@@ -29,37 +29,37 @@ production readiness, complete platform support, or a guaranteed latency figure.
 Start the host inside the desktop session you want to share:
 
 ```sh
-erd-host --pin generate
+maho-host --pin generate
 ```
 
 Pair from the agent computer, approve at the host, and let the client save
 the record. Replace `HOST` and `PIN` with the actual values:
 
 ```sh
-mkdir -p "$HOME/.config/eclipticrd"
-erd-client --host HOST --pin PIN \
-  --pairing-store "$HOME/.config/eclipticrd/pairings.json" \
+mkdir -p "$HOME/.config/mahord"
+maho-client --host HOST --pin PIN \
+  --pairing-store "$HOME/.config/mahord/pairings.json" \
   --frames 10 --timeout-secs 60
-jq -r '.[] | [.id, .name] | @tsv' "$HOME/.config/eclipticrd/pairings.json"
+jq -r '.[] | [.id, .name] | @tsv' "$HOME/.config/mahord/pairings.json"
 ```
 
 Use the saved ID and the same private store to register MCP:
 
 ```sh
 # Claude Code, project scope
-claude mcp add --transport stdio --scope project eclipticrd \
-  -- /absolute/path/to/erd-client --host HOST --pairing-id PAIRING-ID \
+claude mcp add --transport stdio --scope project mahord \
+  -- /absolute/path/to/maho-client --host HOST --pairing-id PAIRING-ID \
     --pairing-store /absolute/path/to/pairings.json --mcp
 
 # Codex
-codex mcp add eclipticrd \
-  -- /absolute/path/to/erd-client --host HOST --pairing-id PAIRING-ID \
+codex mcp add mahord \
+  -- /absolute/path/to/maho-client --host HOST --pairing-id PAIRING-ID \
     --pairing-store /absolute/path/to/pairings.json --mcp
 ```
 
-Install [`skills/eclipticrd-remote-control/SKILL.md`](skills/eclipticrd-remote-control/SKILL.md)
-into your project's `.claude/skills/eclipticrd-remote-control/` (Claude Code) or
-`.agents/skills/eclipticrd-remote-control/` (Codex). Clients without a skill
+Install [`skills/mahord-remote-control/SKILL.md`](skills/mahord-remote-control/SKILL.md)
+into your project's `.claude/skills/mahord-remote-control/` (Claude Code) or
+`.agents/skills/mahord-remote-control/` (Codex). Clients without a skill
 loader can receive that file as task context; tools must still be registered.
 
 Ask the agent to **inspect a screenshot, move the pointer, inspect again, and
@@ -71,7 +71,7 @@ Closing stdin ends the session.
 For HTTP automation, use `--agent-server 19735` instead of `--mcp`:
 
 ```sh
-erd-client --host HOST --pairing-id PAIRING-ID \
+maho-client --host HOST --pairing-id PAIRING-ID \
   --pairing-store /absolute/path/to/pairings.json --agent-server 19735
 ```
 
@@ -123,8 +123,8 @@ The active workspace is **`clients/rust/Cargo.toml`**. The root Cargo workspace
 contains an earlier ScreenCaptureKit experiment, not the desktop application.
 
 ```sh
-git clone https://github.com/Indosaram/EclipticRD.git
-cd EclipticRD
+git clone https://github.com/Indosaram/MahoRD.git
+cd MahoRD
 rustup toolchain install stable
 ```
 
@@ -160,7 +160,7 @@ With the native dependencies available:
 
 ```sh
 cargo build --manifest-path clients/rust/Cargo.toml --locked --release \
-  -p erd-host -p erd-app
+  -p maho-host -p maho-app
 
 cargo build --manifest-path clients/rust/Cargo.toml --locked --release \
   -p tauri-shell --features tauri/custom-protocol
@@ -177,7 +177,7 @@ This builds binaries, not a fully packaged or notarized installer. If
 Run inside the desktop session you intend to share:
 
 ```sh
-clients/rust/target/release/erd-host --pin generate
+clients/rust/target/release/maho-host --pin generate
 ```
 
 The host prints a bootstrap PIN and prompts for pairing approval. The bootstrap
@@ -198,7 +198,7 @@ clients/rust/target/release/tauri-shell
 ```
 
 Choose a discovered computer or enter its address, supply the host's PIN, and
-approve the request on the host. Discovery uses `_erd._tcp.local.`. Multicast
+approve the request on the host. Discovery uses `_maho-rd._tcp.local.`. Multicast
 filtering, guest Wi-Fi isolation, firewall rules, and subnet boundaries can
 prevent discovery; a directly reachable address can still be used.
 
@@ -214,7 +214,7 @@ prevent discovery; a directly reachable address can still be used.
 Replace the address and example PIN with your host's values:
 
 ```sh
-clients/rust/target/release/erd-client \
+clients/rust/target/release/maho-client \
   --host 192.168.1.50 --pin 12345678 --frames 30 \
   --stats-json receiver-stats.json
 ```
@@ -227,7 +227,7 @@ Discovery can also be inspected independently:
 
 ```sh
 cargo run --manifest-path clients/rust/Cargo.toml --locked \
-  -p erd-net --bin erd-discover -- --timeout-secs 3
+  -p maho-net --bin maho-discover -- --timeout-secs 3
 ```
 
 ## Performance and verification limits
@@ -280,13 +280,13 @@ Client                        v
 
 | Crate | Responsibility |
 | --- | --- |
-| `erd-proto` | Wire types, framing, handshake and protocol limits |
-| `erd-net` | TCP/UDP transport, replay protection, discovery, signaling and STUN |
-| `erd-decode` | FFmpeg and iOS VideoToolbox decoding |
-| `erd-render` | Presentation and audio infrastructure |
-| `erd-app` | Sessions, pairing, frame queues, statistics, CLI and automation |
-| `erd-host` | Platform capture, encoding, audio and input injection |
-| `erd-mobile` | Shared mobile input, lifecycle and storage abstractions |
+| `maho-proto` | Wire types, framing, handshake and protocol limits |
+| `maho-net` | TCP/UDP transport, replay protection, discovery, signaling and STUN |
+| `maho-decode` | FFmpeg and iOS VideoToolbox decoding |
+| `maho-render` | Presentation and audio infrastructure |
+| `maho-app` | Sessions, pairing, frame queues, statistics, CLI and automation |
+| `maho-host` | Platform capture, encoding, audio and input injection |
+| `maho-mobile` | Shared mobile input, lifecycle and storage abstractions |
 | `tauri-shell` | Desktop application |
 | `ios-shell` | iOS application and native integration |
 
@@ -294,7 +294,7 @@ Client                        v
 
 ```sh
 cargo test --manifest-path clients/rust/Cargo.toml --locked \
-  --workspace --exclude erd-ios
+  --workspace --exclude maho-ios
 
 bun test clients/rust/tauri-shell/ui/connection-state.test.mjs \
   clients/rust/tauri-shell/ui/library.test.mjs \
@@ -310,7 +310,7 @@ input and disconnect API verification. See [deployment evidence](docs/release-de
 
 ## License
 
-EclipticRD's original source is licensed under the [MIT License](LICENSE).
+MahoRD's original source is licensed under the [MIT License](LICENSE).
 Dependencies retain their own licenses.
 
 **The currently documented nonfree Linux FFmpeg build must not be redistributed.**
