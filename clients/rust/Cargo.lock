@@ -1056,166 +1056,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "maho-app"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "clap",
- "maho-decode",
- "maho-net",
- "maho-proto",
- "maho-render",
- "image",
- "objc2-app-kit",
- "objc2-foundation",
- "rand 0.8.8",
- "rustix",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "maho-decode"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "maho-proto",
- "ffmpeg-next",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "maho-host"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "block2",
- "clap",
- "clipboard-win",
- "core-foundation",
- "core-graphics",
- "dirs",
- "dispatch2",
- "dxgi-capture-rs",
- "maho-app",
- "maho-net",
- "maho-proto",
- "evdev",
- "ffmpeg-next",
- "hostname",
- "libc",
- "nvenc",
- "objc2",
- "objc2-core-foundation",
- "objc2-core-media",
- "objc2-core-video",
- "objc2-foundation",
- "objc2-screen-capture-kit",
- "openssl",
- "rand 0.9.5",
- "rustix",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "wayland-client",
- "wayland-protocols-wlr",
- "windows 0.62.2",
-]
-
-[[package]]
-name = "maho-ios"
-version = "0.1.0"
-dependencies = [
- "core-foundation",
- "maho-app",
- "maho-decode",
- "maho-mobile",
- "maho-net",
- "maho-proto",
- "maho-render",
- "objc2",
- "objc2-foundation",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tempfile",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "maho-mobile"
-version = "0.1.0"
-dependencies = [
- "core-foundation",
- "maho-app",
- "maho-decode",
- "maho-net",
- "maho-proto",
- "maho-render",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "maho-net"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "base64 0.22.1",
- "maho-proto",
- "flume",
- "hkdf",
- "if-addrs",
- "libc",
- "mdns-sd",
- "openssl",
- "openssl-sys",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "maho-proto"
-version = "0.1.0"
-dependencies = [
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "maho-render"
-version = "0.1.0"
-dependencies = [
- "cpal",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
 name = "errno"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2385,6 +2225,166 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "maho-app"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "image",
+ "maho-decode",
+ "maho-net",
+ "maho-proto",
+ "maho-render",
+ "objc2-app-kit",
+ "objc2-foundation",
+ "rand 0.8.8",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "maho-decode"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ffmpeg-next",
+ "maho-proto",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "maho-host"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "block2",
+ "clap",
+ "clipboard-win",
+ "core-foundation",
+ "core-graphics",
+ "dirs",
+ "dispatch2",
+ "dxgi-capture-rs",
+ "evdev",
+ "ffmpeg-next",
+ "hostname",
+ "libc",
+ "maho-app",
+ "maho-net",
+ "maho-proto",
+ "nvenc",
+ "objc2",
+ "objc2-core-foundation",
+ "objc2-core-media",
+ "objc2-core-video",
+ "objc2-foundation",
+ "objc2-screen-capture-kit",
+ "openssl",
+ "rand 0.9.5",
+ "rustix",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "wayland-client",
+ "wayland-protocols-wlr",
+ "windows 0.62.2",
+]
+
+[[package]]
+name = "maho-ios"
+version = "0.1.0"
+dependencies = [
+ "core-foundation",
+ "maho-app",
+ "maho-decode",
+ "maho-mobile",
+ "maho-net",
+ "maho-proto",
+ "maho-render",
+ "objc2",
+ "objc2-foundation",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "maho-mobile"
+version = "0.1.0"
+dependencies = [
+ "core-foundation",
+ "maho-app",
+ "maho-decode",
+ "maho-net",
+ "maho-proto",
+ "maho-render",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "maho-net"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "flume",
+ "hkdf",
+ "if-addrs",
+ "libc",
+ "maho-proto",
+ "mdns-sd",
+ "openssl",
+ "openssl-sys",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "maho-proto"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "maho-render"
+version = "0.1.0"
+dependencies = [
+ "cpal",
+ "thiserror 2.0.20",
+ "tracing",
 ]
 
 [[package]]
@@ -4483,13 +4483,13 @@ dependencies = [
 name = "tauri-shell"
 version = "0.1.0"
 dependencies = [
+ "image",
  "maho-app",
  "maho-decode",
  "maho-host",
  "maho-net",
  "maho-proto",
  "maho-render",
- "image",
  "serde",
  "serde_json",
  "tauri",
