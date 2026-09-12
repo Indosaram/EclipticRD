@@ -17,7 +17,7 @@
 /**
  * Target IDs on which keyboard input belongs to the remote host.
  */
-const REMOTE_TARGET_IDS = new Set<string>(['viewport', 'screen-canvas']);
+const REMOTE_TARGET_IDS = new Set<string>(['viewport', 'viewport-container', 'screen-canvas', 'video-canvas']);
 
 /**
  * Supported mouse button identifiers.

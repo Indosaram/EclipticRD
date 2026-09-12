@@ -30,7 +30,9 @@ test("keyboard events on overlay UI are not forwarded to the remote host", () =>
 test("keyboard events on the video surface are forwarded to the remote host", () => {
   expect(shouldForwardKeyboardEvent({ target: { tagName: "BODY", id: "" } })).toBe(true);
   expect(shouldForwardKeyboardEvent({ target: { tagName: "DIV", id: "viewport" } })).toBe(true);
+  expect(shouldForwardKeyboardEvent({ target: { tagName: "DIV", id: "viewport-container" } })).toBe(true);
   expect(shouldForwardKeyboardEvent({ target: { tagName: "CANVAS", id: "screen-canvas" } })).toBe(true);
+  expect(shouldForwardKeyboardEvent({ target: { tagName: "CANVAS", id: "video-canvas" } })).toBe(true);
 });
 
 // ---------------------------------------------------------------------------
@@ -226,6 +228,8 @@ test("isRemoteInputTarget rejects invalid targets and identifies remote surfaces
   expect(isRemoteInputTarget({})).toBe(false);
   expect(isRemoteInputTarget({ tagName: "BODY" })).toBe(true);
   expect(isRemoteInputTarget({ tagName: "DIV", id: "viewport" })).toBe(true);
+  expect(isRemoteInputTarget({ tagName: "DIV", id: "viewport-container" })).toBe(true);
   expect(isRemoteInputTarget({ tagName: "CANVAS", id: "screen-canvas" })).toBe(true);
+  expect(isRemoteInputTarget({ tagName: "CANVAS", id: "video-canvas" })).toBe(true);
   expect(isRemoteInputTarget({ tagName: "DIV", id: "other" })).toBe(false);
 });
