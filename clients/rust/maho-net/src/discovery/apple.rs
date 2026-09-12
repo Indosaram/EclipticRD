@@ -26,10 +26,7 @@ const K_DNS_SERVICE_INTERFACE_INDEX_LOCAL_ONLY: u32 = !0u32;
 const K_DNS_SERVICE_MAX_DOMAIN_NAME: usize = 1009;
 const MAX_CONCURRENT_SERVICES: usize = 64;
 
-const REGTYPE_C_STR: &CStr = match CStr::from_bytes_with_nul(b"_maho-rd._tcp\0") {
-    Ok(c) => c,
-    Err(_) => panic!("invalid constant REGTYPE_C_STR"),
-};
+const REGTYPE_C_STR: &CStr = c"_maho-rd._tcp";
 
 extern "C" {
     fn DNSServiceBrowse(
@@ -1090,11 +1087,9 @@ impl AppleDnsServiceAdvertiser {
             })
             .map_err(|e| DiscoveryError::Backend(format!("thread spawn failed: {e}")))?;
 
-        let init_res = init_rx
+        init_rx
             .recv_timeout(Duration::from_millis(500))
             .map_err(|_| DiscoveryError::Backend("advertiser registration timed out".into()))??;
-
-        let _ = init_res;
 
         Ok(Self {
             wake_tx,

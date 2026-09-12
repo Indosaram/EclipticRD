@@ -14,13 +14,14 @@ use maho_net::{
     BOOTSTRAP_IDENTITY, PAIRING_IDENTITY_PREFIX,
 };
 use maho_proto::{
-    AudioFragmentHeader, BitrateAdjust, Capabilities, ClipboardSyncDirection, ClipboardSyncOrigin,
-    ClipboardSyncUpdate, ControlMessage, CursorUpdate, FrameHeader, Handshake, InputAckMessage,
-    InputEvent, PacketHeader, PacketType, PairingGrant, PairingReject, PairingRejectReason,
-    PairingRequest, StreamConfigurationErrorCode, StreamConfigurationReject,
+    AudioFragmentHeader, BitrateAdjust, Capabilities, ControlMessage, CursorUpdate, FrameHeader,
+    Handshake, InputAckMessage, InputEvent, PacketHeader, PacketType, PairingGrant, PairingReject,
+    PairingRejectReason, PairingRequest, StreamConfigurationErrorCode, StreamConfigurationReject,
     StreamConfigurationResponse, WireCodec, MAX_AUDIO_FRAGMENT_BYTES, MAX_VIDEO_CHUNK_BYTES,
     PROTOCOL_VERSION,
 };
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+use maho_proto::{ClipboardSyncDirection, ClipboardSyncOrigin, ClipboardSyncUpdate};
 use openssl::base64;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -305,9 +306,8 @@ impl HostConfig {
         bootstrap_pin: Option<String>,
         pairing_store: PairingStore,
     ) -> Result<Self, SessionError> {
-        let meta =
-            crate::capture_windows::WindowsCapture::primary_output_metadata()
-                .map_err(|error| SessionError::Io(io::Error::other(error.to_string())))?;
+        let meta = crate::capture_windows::WindowsCapture::primary_output_metadata()
+            .map_err(|error| SessionError::Io(io::Error::other(error.to_string())))?;
         Ok(Self {
             tcp_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_TCP_PORT)),
             udp_addr: SocketAddr::from(([0, 0, 0, 0], DEFAULT_UDP_PORT)),
@@ -2047,10 +2047,15 @@ impl HostServer {
     }
 
     pub fn serve(self) -> Result<(), SessionError> {
-        self.serve_with_stop(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        self.serve_with_stop(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )))
     }
 
-    pub fn serve_with_stop(self, stop: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Result<(), SessionError> {
+    pub fn serve_with_stop(
+        self,
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), SessionError> {
         self.tcp_listener.set_nonblocking(true)?;
         while !stop.load(std::sync::atomic::Ordering::Relaxed) {
             match self.tcp_listener.accept() {
@@ -2061,7 +2066,9 @@ impl HostServer {
                     let tls_server = maho_net::tls_psk::TlsPskServer::new(self.current_psks()?)?;
                     match tls_server.accept_stream_until(tcp, admission_deadline) {
                         Ok(stream) => {
-                            if let Err(error) = self.handle_connection(stream, peer, admission_deadline) {
+                            if let Err(error) =
+                                self.handle_connection(stream, peer, admission_deadline)
+                            {
                                 tracing::warn!(%error, "connection ended with an error");
                             }
                         }
@@ -2396,7 +2403,9 @@ impl HostServer {
                         ) || error
                             .get_ref()
                             .and_then(|cause| cause.downcast_ref::<openssl::ssl::Error>())
-                            .is_some_and(|ssl_err| ssl_err.code() == openssl::ssl::ErrorCode::SYSCALL) =>
+                            .is_some_and(|ssl_err| {
+                                ssl_err.code() == openssl::ssl::ErrorCode::SYSCALL
+                            }) =>
                     {
                         warn!(%error, "read_frame saw EOF/reset/broken pipe, closing connection");
                         break;
@@ -2561,7 +2570,9 @@ impl HostServer {
                             success,
                             error_code: if success { 0 } else { 1 },
                         };
-                        if let Err(error) = send_tcp_control(&mut stream, ControlMessage::InputAck(ack)) {
+                        if let Err(error) =
+                            send_tcp_control(&mut stream, ControlMessage::InputAck(ack))
+                        {
                             warn!(%error, "failed to send input ACK");
                         }
                     }
@@ -2807,9 +2818,7 @@ const _: () = assert!(
         <= UDP_PAYLOAD_BUDGET
 );
 const _: () = assert!(
-    ENCRYPTED_DATAGRAM_OVERHEAD
-        + AudioFragmentHeader::SIZE
-        + SENDER_MAX_AUDIO_FRAGMENT_BYTES
+    ENCRYPTED_DATAGRAM_OVERHEAD + AudioFragmentHeader::SIZE + SENDER_MAX_AUDIO_FRAGMENT_BYTES
         <= UDP_PAYLOAD_BUDGET
 );
 
@@ -3819,10 +3828,10 @@ mod tests {
         udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
         // When: disconnect before discovery, or corrupt control after real UDP output.
         if malformed {
-            let mut c2h =
-                DatagramCipher::derive(&key, &[5; 16], Direction::ClientToHost).unwrap();
-            let reg =
-                c2h.seal_datagram(&PacketHeader::new(PacketType::Ping, 0, 0, 0), &[]).unwrap();
+            let mut c2h = DatagramCipher::derive(&key, &[5; 16], Direction::ClientToHost).unwrap();
+            let reg = c2h
+                .seal_datagram(&PacketHeader::new(PacketType::Ping, 0, 0, 0), &[])
+                .unwrap();
             udp.send_to(&reg, udp_addr).unwrap();
             let mut buffer = [0; 2048];
             let (length, _) = udp.recv_from(&mut buffer).unwrap();
@@ -4117,10 +4126,10 @@ mod tests {
 
         let udp = UdpSocket::bind("127.0.0.1:0").unwrap();
         udp.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
-        let mut c2h =
-            DatagramCipher::derive(&grant.key, &salt, Direction::ClientToHost).unwrap();
-        let reg =
-            c2h.seal_datagram(&PacketHeader::new(PacketType::Ping, 0, 0, 0), &[]).unwrap();
+        let mut c2h = DatagramCipher::derive(&grant.key, &salt, Direction::ClientToHost).unwrap();
+        let reg = c2h
+            .seal_datagram(&PacketHeader::new(PacketType::Ping, 0, 0, 0), &[])
+            .unwrap();
         udp.send_to(&reg, udp_addr).unwrap();
         let mut receive =
             DatagramCipher::derive(&grant.key, &salt, Direction::HostToClient).unwrap();
@@ -4817,10 +4826,13 @@ mod tests {
         let mut host_c2h = DatagramCipher::derive(&key, &salt, Direction::ClientToHost).unwrap();
         let mut host_h2c = DatagramCipher::derive(&key, &salt, Direction::HostToClient).unwrap();
         let mut client_h2c = DatagramCipher::derive(&key, &salt, Direction::HostToClient).unwrap();
-        let mut prior_client_c2h = DatagramCipher::derive(&key, &prior_salt, Direction::ClientToHost).unwrap();
+        let mut prior_client_c2h =
+            DatagramCipher::derive(&key, &prior_salt, Direction::ClientToHost).unwrap();
 
         let client_udp = UdpSocket::bind("127.0.0.1:0").unwrap();
-        client_udp.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        client_udp
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
         let client_addr = client_udp.local_addr().unwrap();
 
         let attacker_udp = UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -4838,30 +4850,49 @@ mod tests {
         let (peek_len, peek_from) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
         assert_eq!(peek_len, 1);
         assert_eq!(peek_from, attacker_addr);
-        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        server
+            .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
+            .unwrap();
         assert_eq!(udp_peer, None, "plaintext probe must not register endpoint");
-        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "plaintext probe must have been consumed from socket");
+        assert!(
+            matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock),
+            "plaintext probe must have been consumed from socket"
+        );
 
         // Stage 1b: Short malformed packet (< 40 bytes)
         let malformed = [0x45, 0x52, 0x07, 0x00, 0x01, 0x02];
         attacker_udp.send_to(&malformed, host_udp_addr).unwrap();
         let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
         assert_eq!(peek_len, malformed.len());
-        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
+        server
+            .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
+            .unwrap();
         assert_eq!(udp_peer, None, "short packet must not register endpoint");
-        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "short packet must have been consumed from socket");
+        assert!(
+            matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock),
+            "short packet must have been consumed from socket"
+        );
 
         // Stage 1c: Packet encrypted with wrong key
         let wrong_key = [0x99; 32];
-        let mut wrong_cipher = DatagramCipher::derive(&wrong_key, &salt, Direction::ClientToHost).unwrap();
+        let mut wrong_cipher =
+            DatagramCipher::derive(&wrong_key, &salt, Direction::ClientToHost).unwrap();
         let ping_hdr = PacketHeader::new(PacketType::Ping, 0, 1000, 0);
         let wrong_packet = wrong_cipher.seal_datagram(&ping_hdr, &[]).unwrap();
         attacker_udp.send_to(&wrong_packet, host_udp_addr).unwrap();
         let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
         assert_eq!(peek_len, wrong_packet.len());
-        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
-        assert_eq!(udp_peer, None, "wrong-key packet must not register endpoint");
-        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "wrong-key packet must have been consumed from socket");
+        server
+            .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
+            .unwrap();
+        assert_eq!(
+            udp_peer, None,
+            "wrong-key packet must not register endpoint"
+        );
+        assert!(
+            matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock),
+            "wrong-key packet must have been consumed from socket"
+        );
 
         // Stage 1d: Non-registration packet (valid encryption, but PacketType::InputEvent)
         let input_hdr = PacketHeader::new(PacketType::InputEvent, 1, 1000, 0);
@@ -4869,19 +4900,37 @@ mod tests {
         client_udp.send_to(&non_reg_packet, host_udp_addr).unwrap();
         let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
         assert_eq!(peek_len, non_reg_packet.len());
-        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
-        assert_eq!(udp_peer, None, "non-registration packet must not register endpoint");
-        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "non-registration packet must have been consumed from socket");
+        server
+            .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
+            .unwrap();
+        assert_eq!(
+            udp_peer, None,
+            "non-registration packet must not register endpoint"
+        );
+        assert!(
+            matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock),
+            "non-registration packet must have been consumed from socket"
+        );
 
         // Stage 1e: Ping with non-empty payload
         let ping_payload_hdr = PacketHeader::new(PacketType::Ping, 2, 1000, 0);
-        let payload_packet = client_c2h.seal_datagram(&ping_payload_hdr, &[1, 2, 3]).unwrap();
+        let payload_packet = client_c2h
+            .seal_datagram(&ping_payload_hdr, &[1, 2, 3])
+            .unwrap();
         client_udp.send_to(&payload_packet, host_udp_addr).unwrap();
         let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
         assert_eq!(peek_len, payload_packet.len());
-        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
-        assert_eq!(udp_peer, None, "ping with non-empty payload must not register endpoint");
-        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "non-empty ping must have been consumed from socket");
+        server
+            .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
+            .unwrap();
+        assert_eq!(
+            udp_peer, None,
+            "ping with non-empty payload must not register endpoint"
+        );
+        assert!(
+            matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock),
+            "non-empty ping must have been consumed from socket"
+        );
 
         // Stage 1f: Prior-session salt packet
         let prior_hdr = PacketHeader::new(PacketType::Ping, 0, 1000, 0);
@@ -4889,9 +4938,17 @@ mod tests {
         client_udp.send_to(&prior_packet, host_udp_addr).unwrap();
         let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
         assert_eq!(peek_len, prior_packet.len());
-        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
-        assert_eq!(udp_peer, None, "prior-session packet must not register endpoint");
-        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "prior-session packet must have been consumed from socket");
+        server
+            .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
+            .unwrap();
+        assert_eq!(
+            udp_peer, None,
+            "prior-session packet must not register endpoint"
+        );
+        assert!(
+            matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock),
+            "prior-session packet must have been consumed from socket"
+        );
 
         // Stage 2: Genuine registration packet from legitimate client (sealed empty Ping)
         let reg_hdr = PacketHeader::new(PacketType::Ping, 3, 1000, 0);
@@ -4899,14 +4956,23 @@ mod tests {
         client_udp.send_to(&reg_packet, host_udp_addr).unwrap();
         let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
         assert_eq!(peek_len, reg_packet.len());
-        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
-        assert_eq!(udp_peer, Some(client_addr), "valid registration must register legitimate client endpoint");
+        server
+            .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
+            .unwrap();
+        assert_eq!(
+            udp_peer,
+            Some(client_addr),
+            "valid registration must register legitimate client endpoint"
+        );
 
         // Stage 3: Controlled frame delivery to registered valid socket
         let frame_hdr = PacketHeader::new(PacketType::FrameHeader, 1, 1000, 0);
         let frame_payload = b"controlled-test-frame-content";
         let sealed_frame = host_h2c.seal_datagram(&frame_hdr, frame_payload).unwrap();
-        server.udp_socket.send_to(&sealed_frame, udp_peer.unwrap()).unwrap();
+        server
+            .udp_socket
+            .send_to(&sealed_frame, udp_peer.unwrap())
+            .unwrap();
 
         let mut recv_buf = [0_u8; 1024];
         let (recv_len, from_addr) = client_udp.recv_from(&mut recv_buf).unwrap();
@@ -4917,7 +4983,9 @@ mod tests {
 
         // Attacker received nothing
         let mut attacker_buf = [0_u8; 1024];
-        assert!(matches!(attacker_udp.recv_from(&mut attacker_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock));
+        assert!(
+            matches!(attacker_udp.recv_from(&mut attacker_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock)
+        );
 
         // Stage 4: Post-registration hijack attempt from attacker socket
         let hijack_hdr = PacketHeader::new(PacketType::Ping, 4, 1000, 0);
@@ -4925,19 +4993,33 @@ mod tests {
         attacker_udp.send_to(&hijack_packet, host_udp_addr).unwrap();
         let (peek_len, _) = server.udp_socket.peek_from(&mut peek_buf).unwrap();
         assert_eq!(peek_len, hijack_packet.len());
-        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
-        assert_eq!(udp_peer, Some(client_addr), "post-registration packet must NOT change registered endpoint");
-        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "hijack packet must have been consumed from socket");
+        server
+            .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
+            .unwrap();
+        assert_eq!(
+            udp_peer,
+            Some(client_addr),
+            "post-registration packet must NOT change registered endpoint"
+        );
+        assert!(
+            matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock),
+            "hijack packet must have been consumed from socket"
+        );
 
         // Another frame sent still reaches legitimate client, not attacker
         let frame_hdr2 = PacketHeader::new(PacketType::FrameHeader, 2, 2000, 0);
         let sealed_frame2 = host_h2c.seal_datagram(&frame_hdr2, frame_payload).unwrap();
-        server.udp_socket.send_to(&sealed_frame2, udp_peer.unwrap()).unwrap();
+        server
+            .udp_socket
+            .send_to(&sealed_frame2, udp_peer.unwrap())
+            .unwrap();
 
         let (recv_len2, _) = client_udp.recv_from(&mut recv_buf).unwrap();
         let (opened_hdr2, _) = client_h2c.open_datagram(&recv_buf[..recv_len2]).unwrap();
         assert_eq!(opened_hdr2.sequence, 2);
-        assert!(matches!(attacker_udp.recv_from(&mut attacker_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock));
+        assert!(
+            matches!(attacker_udp.recv_from(&mut attacker_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock)
+        );
     }
 
     #[test]
@@ -4954,8 +5036,10 @@ mod tests {
         let prior_salt = [0x11; 16];
 
         // Independent client-send with prior salt and host-receive with current salt
-        let mut prior_client_c2h = DatagramCipher::derive(&key, &prior_salt, Direction::ClientToHost).unwrap();
-        let mut host_c2h = DatagramCipher::derive(&key, &current_salt, Direction::ClientToHost).unwrap();
+        let mut prior_client_c2h =
+            DatagramCipher::derive(&key, &prior_salt, Direction::ClientToHost).unwrap();
+        let mut host_c2h =
+            DatagramCipher::derive(&key, &current_salt, Direction::ClientToHost).unwrap();
 
         let client_udp = UdpSocket::bind("127.0.0.1:0").unwrap();
         client_udp.set_nonblocking(true).unwrap();
@@ -4975,12 +5059,20 @@ mod tests {
         assert_eq!(peek_len, prior_packet.len());
         assert_eq!(peek_from, client_addr);
 
-        server.discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h)).unwrap();
-        assert_eq!(udp_peer, None, "datagram from prior session must not register endpoint");
+        server
+            .discover_udp_peer(tcp_peer, &mut udp_peer, Some(&mut host_c2h))
+            .unwrap();
+        assert_eq!(
+            udp_peer, None,
+            "datagram from prior session must not register endpoint"
+        );
 
         // Prove packet was consumed and discarded by discover_udp_peer
         let mut check_buf = [0_u8; 64];
-        assert!(matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock), "prior-session packet must have been consumed from socket");
+        assert!(
+            matches!(server.udp_socket.recv_from(&mut check_buf), Err(ref e) if e.kind() == io::ErrorKind::WouldBlock),
+            "prior-session packet must have been consumed from socket"
+        );
     }
 
     #[test]

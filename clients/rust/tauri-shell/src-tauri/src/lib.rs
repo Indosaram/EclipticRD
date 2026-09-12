@@ -1514,7 +1514,7 @@ pub mod commands {
                 stale.stop();
             }
         }
-        let mut monitor = match ClipboardMonitor::new(SystemClipboard::default()) {
+        let mut monitor = match ClipboardMonitor::new(SystemClipboard) {
             Ok(monitor) => monitor,
             Err(error) => {
                 tracing::warn!(%error, "clipboard monitor unavailable");
