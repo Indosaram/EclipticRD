@@ -74,7 +74,7 @@ pub const PAIRING_WINDOW: Duration = Duration::from_secs(300);
 /// assert_eq!(bytes.len(), 42);
 /// assert_eq!(maho_host::TimestampStats::SIZE, 42);
 /// assert_eq!(&bytes[..6], maho_host::session::TIMESTAMP_STATS_MAGIC);
-/// assert_eq!(maho_host::session::TIMESTAMP_STATS_MAGIC, b"MAHOTS1");
+/// assert_eq!(maho_host::session::TIMESTAMP_STATS_MAGIC, b"ERDTS1");
 /// assert_eq!(decode(&bytes), Some(stats));
 /// ```
 pub use maho_proto::{TimestampStats, TIMESTAMP_STATS_MAGIC};

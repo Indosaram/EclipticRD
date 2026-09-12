@@ -23,7 +23,7 @@ fn encode_preserves_legacy_length_magic_and_little_endian_field_order() {
     let bytes = encode(STATS);
     // Then the entire legacy wire representation is unchanged.
     assert_eq!(TimestampStats::SIZE, 42);
-    assert_eq!(TIMESTAMP_STATS_MAGIC, b"MAHOTS1");
+    assert_eq!(TIMESTAMP_STATS_MAGIC, b"ERDTS1");
     assert_eq!(bytes, LEGACY_BYTES);
 }
 

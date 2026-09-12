@@ -8,11 +8,11 @@ pub const MAX_FRAME_BYTES: u32 = 32 * 1024 * 1024;
 pub const MAX_VIDEO_CHUNK_BYTES: usize = 1382;
 pub const MAX_AUDIO_FRAGMENT_BYTES: usize = 1380;
 
-pub const TIMESTAMP_STATS_MAGIC: &[u8; 6] = b"MAHOTS1";
+pub const TIMESTAMP_STATS_MAGIC: &[u8; 6] = b"ERDTS1";
 
 /// Legacy per-frame host timestamps, in host session-relative microseconds.
 ///
-/// The 42-byte MAHOTS1 payload uses little-endian fields. Decoding checks only
+/// The 42-byte ERDTS1 payload uses little-endian fields. Decoding checks only
 /// length and magic; timestamp ordering is a consumer concern.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimestampStats {

@@ -414,7 +414,7 @@ fn authenticated_tls_udp_ingress_records_stats_and_assembly_without_changing_pin
     assert_eq!(fixture.receive(&duplicate).unwrap(), SessionEvent::Ping);
     let plain = fixture.seal(PacketType::Ping, 2, b"ordinary ping");
     assert_eq!(fixture.receive(&plain).unwrap(), SessionEvent::Ping);
-    let malformed = fixture.seal(PacketType::Ping, 3, b"MAHOTS1");
+    let malformed = fixture.seal(PacketType::Ping, 3, b"ERDTS1");
     assert_eq!(fixture.receive(&malformed).unwrap(), SessionEvent::Ping);
     let invalid = fixture.seal(
         PacketType::Ping,
