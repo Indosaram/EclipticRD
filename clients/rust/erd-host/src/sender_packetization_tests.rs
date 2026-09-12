@@ -281,7 +281,7 @@ fn video_frame_exceeding_max_chunks_is_rejected() {
     let initial_frame_id = sender.frame_id;
     let now = Instant::now();
 
-    // Sized to require 1025 chunks (> MAX_CHUNKS_PER_FRAME = 1024)
+    // Sized to require 8193 chunks (> MAX_CHUNKS_PER_FRAME = 8192)
     let oversized_len = TARGET_VIDEO_CHUNK_BYTES * (erd_proto::MAX_CHUNKS_PER_FRAME as usize) + 1;
     let frame = VideoFrame {
         data: vec![0x33; oversized_len],

@@ -3,7 +3,7 @@ use crate::{
     CodecError, WireCodec,
 };
 
-pub const MAX_CHUNKS_PER_FRAME: u16 = 1024;
+pub const MAX_CHUNKS_PER_FRAME: u16 = 8192;
 pub const MAX_FRAME_BYTES: u32 = 32 * 1024 * 1024;
 pub const MAX_VIDEO_CHUNK_BYTES: usize = 1382;
 pub const MAX_AUDIO_FRAGMENT_BYTES: usize = 1380;
